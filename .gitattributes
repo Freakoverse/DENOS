@@ -1,0 +1,5 @@
+# Force Unix line endings for Linux-specific files
+*.desktop.template text eol=lf
+*.desktop text eol=lf
+*.metainfo.xml text eol=lf
+*.sh text eol=lf

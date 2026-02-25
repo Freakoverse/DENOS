@@ -1,0 +1,330 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+@import "tailwindcss";
+
+/* ── Hide all scrollbars globally ── */
+* {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+}
+
+*::-webkit-scrollbar {
+    display: none;
+}
+
+/* ── DENOS Theme — deep navy, blue accent ── */
+@theme {
+    --color-background: #0a0f1a;
+    --color-foreground: #e8ecf4;
+    --color-card: #131b2e;
+    --color-card-foreground: #e8ecf4;
+    --color-popover: #131b2e;
+    --color-popover-foreground: #e8ecf4;
+
+    --color-primary: #5b8def;
+    --color-primary-foreground: #ffffff;
+
+    --color-secondary: #1a2540;
+    --color-secondary-foreground: #e8ecf4;
+
+    --color-muted: #1a2540;
+    --color-muted-foreground: #7b8ba5;
+    --color-accent: #1a2540;
+    --color-accent-foreground: #e8ecf4;
+
+    --color-destructive: #ef4444;
+    --color-destructive-foreground: #fafafa;
+    --color-success: #34d399;
+    --color-warning: #fbbf24;
+
+    --color-border: #1f2d47;
+    --color-input: #1f2d47;
+    --color-ring: #5b8def;
+
+    --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    --font-mono: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+}
+
+/* ── Light mode overrides ── */
+html.light {
+    --color-background: #f0f2f5;
+    --color-foreground: #1a1d23;
+    --color-card: #ffffff;
+    --color-card-foreground: #1a1d23;
+    --color-popover: #ffffff;
+    --color-popover-foreground: #1a1d23;
+
+    --color-primary: #4a7adc;
+    --color-primary-foreground: #ffffff;
+
+    --color-secondary: #e8ecf1;
+    --color-secondary-foreground: #1a1d23;
+
+    --color-muted: #e8ecf1;
+    --color-muted-foreground: #6b7280;
+    --color-accent: #e8ecf1;
+    --color-accent-foreground: #1a1d23;
+
+    --color-destructive: #dc2626;
+    --color-destructive-foreground: #ffffff;
+    --color-success: #16a34a;
+    --color-warning: #d97706;
+
+    --color-border: #d4d8e0;
+    --color-input: #d4d8e0;
+    --color-ring: #4a7adc;
+}
+
+/* Light-mode component adjustments */
+html.light .bottom-nav-inner {
+    box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.08);
+    border-color: var(--color-border);
+}
+
+/* Softer card shadows in light mode */
+html.light [class*="shadow-black\/20"] {
+    --tw-shadow-color: rgba(0, 0, 0, 0.06);
+}
+
+/* Wallet balance card: stronger look in light mode */
+html.light .wallet-balance-card {
+    background: linear-gradient(135deg, #4a7adc 0%, #3b5fd9 100%);
+    color: #ffffff;
+    border-color: transparent;
+    box-shadow: 0 4px 20px rgba(59, 95, 217, 0.3);
+}
+
+html.light .wallet-balance-card .text-primary {
+    color: rgba(255, 255, 255, 0.85);
+}
+
+html.light .wallet-balance-card .text-muted-foreground {
+    color: rgba(255, 255, 255, 0.75);
+}
+
+html.light .wallet-balance-card .text-foreground {
+    color: #ffffff;
+}
+
+/* Top bar shadow in light mode */
+html.light .top-bar-inner {
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
+    border-color: var(--color-border);
+}
+
+/* Window control hover for light mode */
+html.light .window-control:hover {
+    background: rgba(0, 0, 0, 0.06);
+}
+
+/* Transaction history items: card-like in light mode */
+html.light .tx-item {
+    background: #ffffff;
+    border: 1px solid var(--color-border);
+}
+
+/* Wallet badge buttons: more opaque in light mode */
+html.light .wallet-badge-btn {
+    border-width: 1px;
+    color: var(--color-muted-foreground) !important;
+}
+
+/* Switch thumb: softer when inactive in light mode */
+html.light [data-state="unchecked"]>[data-state="unchecked"] {
+    background: #9ca3af;
+}
+
+@layer base {
+    * {
+        box-sizing: border-box;
+        border-color: var(--color-border);
+    }
+
+    html,
+    body,
+    #root {
+        height: 100%;
+        width: 100%;
+        overflow: hidden;
+    }
+
+    body {
+        font-family: var(--font-sans);
+        background: var(--color-background);
+        color: var(--color-foreground);
+        font-size: 16px;
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+    }
+
+    ::-webkit-scrollbar {
+        width: 6px;
+    }
+
+    ::-webkit-scrollbar-track {
+        background: transparent;
+    }
+
+    ::-webkit-scrollbar-thumb {
+        background: var(--color-border);
+        border-radius: 3px;
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+        background: #2a3d5e;
+    }
+
+    html.light ::-webkit-scrollbar-thumb:hover {
+        background: #b0b8c4;
+    }
+}
+
+@layer utilities {
+    @keyframes fade-in {
+        from {
+            opacity: 0;
+        }
+
+        to {
+            opacity: 1;
+        }
+    }
+
+    @keyframes slide-up {
+        from {
+            opacity: 0;
+            transform: translateY(10px);
+        }
+
+        to {
+            opacity: 1;
+            transform: translateY(0);
+        }
+    }
+
+    @keyframes scale-in {
+        from {
+            opacity: 0;
+            transform: scale(0.95);
+        }
+
+        to {
+            opacity: 1;
+            transform: scale(1);
+        }
+    }
+
+    @keyframes pulse-glow {
+
+        0%,
+        100% {
+            box-shadow: 0 0 4px 0 rgba(52, 211, 153, 0.4);
+        }
+
+        50% {
+            box-shadow: 0 0 12px 4px rgba(52, 211, 153, 0.15);
+        }
+    }
+
+    .animate-fade-in {
+        animation: fade-in 0.2s ease-out;
+    }
+
+    .animate-slide-up {
+        animation: slide-up 0.25s ease-out;
+    }
+
+    .animate-scale-in {
+        animation: scale-in 0.2s ease-out;
+    }
+
+    .animate-pulse-glow {
+        animation: pulse-glow 2s ease-in-out infinite;
+    }
+
+    @keyframes toast-slide-up {
+        from {
+            opacity: 0;
+            transform: translateY(100%);
+        }
+
+        to {
+            opacity: 1;
+            transform: translateY(0);
+        }
+    }
+
+    .animate-toast-in {
+        animation: toast-slide-up 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    @keyframes toast-exit {
+        to {
+            opacity: 0;
+            transform: translateY(30px) scale(0.95);
+        }
+    }
+
+    .animate-toast-exit {
+        animation: toast-exit 0.3s ease-in forwards;
+    }
+
+    @keyframes toast-countdown {
+        from {
+            width: 100%;
+        }
+
+        to {
+            width: 0%;
+        }
+    }
+
+    @keyframes shake {
+
+        0%,
+        100% {
+            transform: translateX(0);
+        }
+
+        10%,
+        30%,
+        50%,
+        70%,
+        90% {
+            transform: translateX(-4px);
+        }
+
+        20%,
+        40%,
+        60%,
+        80% {
+            transform: translateX(4px);
+        }
+    }
+
+    .animate-shake {
+        animation: shake 0.5s ease-in-out;
+    }
+}
+
+.drag-region {
+    -webkit-app-region: drag;
+}
+
+.no-drag {
+    -webkit-app-region: no-drag;
+}
+
+/* Hide native Edge/Chromium password reveal button */
+input::-ms-reveal,
+input::-ms-clear {
+    display: none;
+}
+
+.scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+}
+
+.scrollbar-hide::-webkit-scrollbar {
+    display: none;
+}

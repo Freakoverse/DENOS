@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>dnnid.denos.signer</id>
+  <name>DENOS</name>
+  <summary>Nostr Signer, Payment System, and ID Manager</summary>
+  <developer id="com.freakoverse">
+    <name>Freakoverse</name>
+  </developer>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+
+  <description>
+    <p>DENOS is a Nostr signer, ID manager, and payment system.</p>
+  </description>
+
+  <launchable type="desktop-id">DENOS.desktop</launchable>
+
+  <icon type="stock">denos</icon>
+
+  <url type="homepage">https://denos.nabandonaread</url>
+
+  <categories>
+    <category>Finance</category>
+    <category>Utility</category>
+  </categories>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="0.1.0" date="2026-02-21"/>
+  </releases>
+</component>

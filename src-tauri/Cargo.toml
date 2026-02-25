@@ -1,0 +1,47 @@
+[package]
+name = "denos"
+version = "0.1.0"
+description = "DENOS — Nostr Signer, Payment System, and ID Manager"
+authors = ["DNN"]
+edition = "2021"
+license = "MIT"
+homepage = "https://denos.nabandonaread"
+repository = "https://denos.nabandonaread/repo"
+
+[lib]
+name = "denos_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-os = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt"] }
+rand = "0.8"
+hex = "0.4"
+bech32 = "0.11"
+tokio = { version = "1", features = ["full"] }
+nostr-sdk = { version = "0.39", features = ["nip04", "nip06", "nip44"] }
+bip39 = { version = "2", features = ["std"] }
+uuid = { version = "1", features = ["v4"] }
+hkdf = "0.12"
+sha2 = "0.10"
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+
+[profile.dev]
+incremental = true
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

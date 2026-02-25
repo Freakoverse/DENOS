@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=DENOS
+Comment=Nostr Signer, Payment System, and ID Manager
+Exec=denos
+Icon=dnnid.denos.signer
+Type=Application
+Categories=Finance;Network;
+StartupWMClass=DENOS

@@ -1,0 +1,46 @@
+# Maintainer: Freakoverse <https://github.com/Freakoverse>
+pkgname=denos
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="DENOS — Nostr Signer, Payment System, and ID Manager"
+arch=('x86_64')
+url="https://github.com/Freakoverse/DENOS"
+license=('MIT')
+depends=('webkit2gtk-4.1' 'libsecret' 'libappindicator-gtk3')
+makedepends=('rust' 'cargo' 'nodejs' 'npm' 'patchelf')
+source=("${pkgname}-${pkgver}.tar.gz::${url}/archive/v${pkgver}.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+    cd "DENOS-${pkgver}"
+    npm ci
+    npx tauri build --bundles none
+}
+
+package() {
+    cd "DENOS-${pkgver}"
+
+    # Binary
+    install -Dm755 "src-tauri/target/release/denos" "${pkgdir}/usr/bin/denos"
+
+    # Desktop entry
+    install -Dm644 /dev/stdin "${pkgdir}/usr/share/applications/denos.desktop" <<EOF
+[Desktop Entry]
+Name=DENOS
+Comment=Nostr Signer, Payment System, and ID Manager
+Exec=denos
+Icon=denos
+Type=Application
+Categories=Finance;Network;
+StartupWMClass=DENOS
+EOF
+
+    # Icons
+    for size in 32 48 128 256 512; do
+        install -Dm644 "src-tauri/icons/${size}x${size}.png" \
+            "${pkgdir}/usr/share/icons/hicolor/${size}x${size}/apps/denos.png"
+    done
+
+    # License
+    install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+}
