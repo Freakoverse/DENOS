@@ -1,26 +1,34 @@
 /**
- * LockScreen — Full-screen PIN lock overlay.
+ * LockScreen — Full-screen PIN lock overlay with profile selection.
  *
- * Two modes:
- * 1. Setup mode (first launch, no PIN set) — create PIN + confirm
- * 2. Unlock mode — enter 8-digit PIN to unlock
+ * Three modes:
+ * 1. Setup mode (no profiles exist) — create first profile + PIN
+ * 2. Unlock mode — select profile, enter PIN to unlock
+ * 3. New-profile mode — create another profile from the lock screen
  *
  * Shows "Signer active" badge when NIP-46 is running while locked.
  */
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { invoke } from '@tauri-apps/api/core';
-import { Lock, Shield, Eye, EyeOff, Radio } from 'lucide-react';
+import { Lock, Shield, Eye, EyeOff, Radio, UserPlus, ChevronDown } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import type { ProfileListItem } from '@/App';
 
-interface LockScreenProps {
+export interface LockScreenProps {
     pinSet: boolean;
+    profiles: ProfileListItem[];
+    lastProfileId: string | null;
     signerRunning?: boolean;
     onUnlock: () => void;
 }
 
+type Mode = 'unlock' | 'setup' | 'new-profile';
+
 export const LockScreen: React.FC<LockScreenProps> = ({
     pinSet,
+    profiles,
+    lastProfileId,
     signerRunning = false,
     onUnlock,
 }) => {
@@ -34,12 +42,23 @@ export const LockScreen: React.FC<LockScreenProps> = ({
         observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
         return () => observer.disconnect();
     }, []);
-    // Setup mode state
+
+    // Determine initial mode
+    const hasProfiles = profiles.length > 0;
+    const initialMode: Mode = hasProfiles ? 'unlock' : 'setup';
+
+    const [mode, setMode] = useState<Mode>(initialMode);
+    const [selectedProfileId, setSelectedProfileId] = useState<string>(
+        lastProfileId || (profiles.length > 0 ? profiles[0].id : '')
+    );
+    const [dropdownOpen, setDropdownOpen] = useState(false);
+
+    // Setup / new-profile state
     const [setupStep, setSetupStep] = useState<'create' | 'confirm'>('create');
     const [newPin, setNewPin] = useState('');
     const [confirmPin, setConfirmPin] = useState('');
 
-    // Unlock mode state
+    // Unlock state
     const [pin, setPin] = useState('');
     const [error, setError] = useState('');
     const [shake, setShake] = useState(false);
@@ -47,18 +66,38 @@ export const LockScreen: React.FC<LockScreenProps> = ({
     const [loading, setLoading] = useState(false);
 
     const inputRef = useRef<HTMLInputElement>(null);
+    const dropdownRef = useRef<HTMLDivElement>(null);
+
+    // Update selected profile when profiles change
+    useEffect(() => {
+        if (profiles.length > 0 && !selectedProfileId) {
+            setSelectedProfileId(lastProfileId || profiles[0].id);
+        }
+    }, [profiles, lastProfileId, selectedProfileId]);
 
     useEffect(() => {
-        // Focus the input on mount
         setTimeout(() => inputRef.current?.focus(), 100);
-    }, [setupStep, pinSet]);
+    }, [setupStep, mode]);
+
+    // Close dropdown on outside click
+    useEffect(() => {
+        const handler = (e: MouseEvent) => {
+            if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+                setDropdownOpen(false);
+            }
+        };
+        document.addEventListener('mousedown', handler);
+        return () => document.removeEventListener('mousedown', handler);
+    }, []);
 
     const triggerShake = useCallback(() => {
         setShake(true);
         setTimeout(() => setShake(false), 500);
     }, []);
 
-    // --- Setup Mode ---
+    const selectedProfile = profiles.find(p => p.id === selectedProfileId);
+
+    // --- Setup / New Profile: Create PIN ---
     const handleSetupCreate = () => {
         if (newPin.length !== 8) {
             setError('PIN must be exactly 8 digits');
@@ -75,6 +114,7 @@ export const LockScreen: React.FC<LockScreenProps> = ({
         setConfirmPin('');
     };
 
+    // --- Setup / New Profile: Confirm PIN ---
     const handleSetupConfirm = async () => {
         if (confirmPin !== newPin) {
             setError('PINs do not match');
@@ -84,7 +124,13 @@ export const LockScreen: React.FC<LockScreenProps> = ({
         }
         setLoading(true);
         try {
-            await invoke('set_pin', { pin: newPin });
+            if (mode === 'setup') {
+                // First-time setup: create_profile creates profile + sets PIN
+                await invoke('create_profile', { pin: newPin });
+            } else {
+                // new-profile mode
+                await invoke('create_profile', { pin: newPin });
+            }
             onUnlock();
         } catch (e) {
             setError(String(e));
@@ -101,7 +147,10 @@ export const LockScreen: React.FC<LockScreenProps> = ({
         }
         setLoading(true);
         try {
-            const valid = await invoke<boolean>('verify_pin', { pin });
+            const valid = await invoke<boolean>('unlock_profile', {
+                profileId: selectedProfileId,
+                pin,
+            });
             if (valid) {
                 onUnlock();
             } else {
@@ -112,39 +161,60 @@ export const LockScreen: React.FC<LockScreenProps> = ({
             }
         } catch (e) {
             setError(String(e));
+            setPin('');
             setLoading(false);
         }
     };
 
     const handleKeyDown = (e: React.KeyboardEvent) => {
         if (e.key === 'Enter') {
-            if (!pinSet) {
+            if (mode === 'unlock') {
+                handleUnlock();
+            } else {
                 if (setupStep === 'create') handleSetupCreate();
                 else handleSetupConfirm();
-            } else {
-                handleUnlock();
             }
         }
     };
 
-    const currentPin = !pinSet
-        ? (setupStep === 'create' ? newPin : confirmPin)
-        : pin;
+    const currentPin = mode === 'unlock'
+        ? pin
+        : (setupStep === 'create' ? newPin : confirmPin);
 
     const setCurrentPin = (val: string) => {
-        // Only allow digits, max 8
         const cleaned = val.replace(/\D/g, '').slice(0, 8);
-        if (!pinSet) {
+        if (mode === 'unlock') {
+            setPin(cleaned);
+        } else {
             if (setupStep === 'create') setNewPin(cleaned);
             else setConfirmPin(cleaned);
-        } else {
-            setPin(cleaned);
         }
         setError('');
     };
 
+    const switchToNewProfile = () => {
+        setMode('new-profile');
+        setSetupStep('create');
+        setNewPin('');
+        setConfirmPin('');
+        setError('');
+        setDropdownOpen(false);
+    };
+
+    const switchToUnlock = () => {
+        setMode('unlock');
+        setPin('');
+        setError('');
+    };
+
+    const subtitle = mode === 'unlock'
+        ? 'Enter your PIN to unlock'
+        : (setupStep === 'create'
+            ? (mode === 'setup' ? 'Create your 8-digit PIN' : 'Create PIN for new profile')
+            : 'Confirm your PIN');
+
     return createPortal(
-        <div className="fixed inset-0 z-[95] bg-background flex flex-col items-center justify-center select-none">
+        <div className="fixed inset-0 z-[200] bg-background flex flex-col items-center justify-center select-none">
             {/* Background pattern */}
             <div className="absolute inset-0 opacity-[0.02]"
                 style={{
@@ -163,12 +233,58 @@ export const LockScreen: React.FC<LockScreenProps> = ({
                         <img src={logoSrc} alt="DENOS" className="w-14 h-14 rounded-xl" />
                     </div>
                     <h1 className="text-2xl font-bold text-foreground">DENOS</h1>
-                    <p className="text-sm text-muted-foreground">
-                        {!pinSet
-                            ? (setupStep === 'create' ? 'Create your 8-digit PIN' : 'Confirm your PIN')
-                            : 'Enter your PIN to unlock'}
-                    </p>
+                    <p className="text-sm text-muted-foreground">{subtitle}</p>
                 </div>
+
+                {/* Profile Selector (unlock mode only, with multiple profiles) */}
+                {mode === 'unlock' && profiles.length > 0 && (
+                    <div className="w-72 relative" ref={dropdownRef}>
+                        <button
+                            onClick={() => setDropdownOpen(!dropdownOpen)}
+                            className="w-full flex items-center justify-between px-4 py-2.5 bg-secondary/50 border border-border rounded-xl text-foreground text-sm hover:bg-secondary/80 transition-colors cursor-pointer"
+                        >
+                            <span className="truncate">
+                                {selectedProfile?.name || 'Select profile'}
+                            </span>
+                            <ChevronDown className={cn(
+                                "w-4 h-4 text-muted-foreground transition-transform",
+                                dropdownOpen && "rotate-180"
+                            )} />
+                        </button>
+
+                        {dropdownOpen && (
+                            <div className="absolute top-full left-0 right-0 mt-1 bg-card border border-border rounded-xl shadow-lg overflow-hidden z-10">
+                                {profiles.map(p => (
+                                    <button
+                                        key={p.id}
+                                        onClick={() => {
+                                            setSelectedProfileId(p.id);
+                                            setDropdownOpen(false);
+                                            setPin('');
+                                            setError('');
+                                        }}
+                                        className={cn(
+                                            "w-full text-left px-4 py-2.5 text-sm transition-colors cursor-pointer",
+                                            p.id === selectedProfileId
+                                                ? "bg-primary/10 text-primary font-medium"
+                                                : "text-foreground hover:bg-secondary/50"
+                                        )}
+                                    >
+                                        {p.name}
+                                    </button>
+                                ))}
+                                {/* New Profile button at bottom of dropdown */}
+                                <button
+                                    onClick={switchToNewProfile}
+                                    className="w-full text-left px-4 py-2.5 text-sm text-primary hover:bg-primary/10 transition-colors border-t border-border flex items-center gap-2 cursor-pointer"
+                                >
+                                    <UserPlus className="w-3.5 h-3.5" />
+                                    New Profile
+                                </button>
+                            </div>
+                        )}
+                    </div>
+                )}
 
                 {/* PIN Input */}
                 <div className="w-72 space-y-3">
@@ -215,11 +331,11 @@ export const LockScreen: React.FC<LockScreenProps> = ({
                     {/* Action button */}
                     <button
                         onClick={() => {
-                            if (!pinSet) {
+                            if (mode === 'unlock') {
+                                handleUnlock();
+                            } else {
                                 if (setupStep === 'create') handleSetupCreate();
                                 else handleSetupConfirm();
-                            } else {
-                                handleUnlock();
                             }
                         }}
                         disabled={currentPin.length !== 8 || loading}
@@ -232,13 +348,13 @@ export const LockScreen: React.FC<LockScreenProps> = ({
                     >
                         <Shield className="w-4 h-4" />
                         {loading ? 'Please wait...' :
-                            !pinSet
-                                ? (setupStep === 'create' ? 'Set PIN' : 'Confirm & Unlock')
-                                : 'Unlock'}
+                            mode === 'unlock'
+                                ? 'Unlock'
+                                : (setupStep === 'create' ? 'Set PIN' : 'Confirm & Create Profile')}
                     </button>
 
                     {/* Back button in confirm step */}
-                    {!pinSet && setupStep === 'confirm' && (
+                    {(mode === 'setup' || mode === 'new-profile') && setupStep === 'confirm' && (
                         <button
                             onClick={() => {
                                 setSetupStep('create');
@@ -248,6 +364,16 @@ export const LockScreen: React.FC<LockScreenProps> = ({
                             className="w-full py-2 text-xs text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
                         >
                             ← Go back and change PIN
+                        </button>
+                    )}
+
+                    {/* Cancel new-profile creation */}
+                    {mode === 'new-profile' && hasProfiles && (
+                        <button
+                            onClick={switchToUnlock}
+                            className="w-full py-2 text-xs text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
+                        >
+                            ← Back to profile selection
                         </button>
                     )}
                 </div>

@@ -872,6 +872,25 @@ pub fn remove_relay(
 }
 
 #[tauri::command]
+pub fn reset_relays(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    {
+        let mut relays = state.relay_urls.lock().unwrap();
+        *relays = vec![
+            "wss://relay.damus.io".to_string(),
+            "wss://relay.primal.net".to_string(),
+            "wss://nos.lol".to_string(),
+        ];
+    }
+    state.save_relays()?;
+    emit_log(&app, "[INFO] Reset relays to defaults");
+    emit_signer_state(&app, &state);
+    Ok(())
+}
+
+#[tauri::command]
 pub fn list_relays(state: State<'_, AppState>) -> Vec<RelayInfo> {
     let connected = state.connected_relays.lock().unwrap();
     state.relay_urls.lock().unwrap().iter().map(|url| {
@@ -974,6 +993,43 @@ pub async fn fetch_user_relays(
 }
 
 #[tauri::command]
+pub async fn fetch_user_blossom_servers(
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, String> {
+    let active = state.active_keypair.lock().unwrap().clone()
+        .ok_or_else(|| "No active keypair".to_string())?;
+    let pubkey = PublicKey::from_hex(&active)
+        .map_err(|e| format!("Invalid pubkey: {}", e))?;
+
+    let client = {
+        let sc = state.signer_client.lock().unwrap();
+        sc.clone().ok_or_else(|| "Signer not running".to_string())?
+    };
+
+    let filter = Filter::new()
+        .kind(Kind::Custom(10063))
+        .author(pubkey)
+        .limit(1);
+
+    let events: Vec<Event> = match client.fetch_events(filter, std::time::Duration::from_secs(5)).await {
+        Ok(evs) => evs.into_iter().collect(),
+        Err(e) => return Err(format!("Failed to fetch blossom server list: {}", e)),
+    };
+
+    let mut server_urls: Vec<String> = Vec::new();
+    if let Some(event) = events.first() {
+        for tag in event.tags.iter() {
+            let parts = tag.as_slice();
+            if parts.len() >= 2 && parts[0] == "server" {
+                server_urls.push(parts[1].to_string());
+            }
+        }
+    }
+
+    Ok(server_urls)
+}
+
+#[tauri::command]
 pub async fn publish_user_relays(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -1007,6 +1063,40 @@ pub async fn publish_user_relays(
         }
         Err(e) => {
             error!("[NIP-65] Failed to publish relay list: {}", e);
+            return Err(format!("Failed to publish: {}", e));
+        }
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn publish_user_blossom_servers(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    servers: Vec<String>,
+) -> Result<(), String> {
+    let client = {
+        let sc = state.signer_client.lock().unwrap();
+        sc.clone().ok_or_else(|| "Signer not running".to_string())?
+    };
+
+    // Build kind 10063 replaceable event with "server" tags
+    let mut tags: Vec<Tag> = Vec::new();
+    for url in &servers {
+        tags.push(Tag::custom(TagKind::from("server"), vec![url.clone()]));
+    }
+
+    let event_builder = EventBuilder::new(Kind::Custom(10063), "")
+        .tags(tags);
+
+    match client.send_event_builder(event_builder).await {
+        Ok(output) => {
+            info!("Published Blossom server list (kind 10063), id={}", output.id().to_hex());
+            emit_log(&app, &format!("[INFO] Published Blossom server list ({} servers)", servers.len()));
+        }
+        Err(e) => {
+            error!("Failed to publish Blossom server list: {}", e);
             return Err(format!("Failed to publish: {}", e));
         }
     }

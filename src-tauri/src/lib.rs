@@ -2,6 +2,7 @@ mod keys;
 mod nip46;
 mod pc55;
 mod state;
+mod updater;
 mod upv2;
 
 use state::AppState;
@@ -14,7 +15,8 @@ pub fn run() {
     info!("DENOS starting...");
 
     let app_state = AppState::new();
-    info!("Loaded {} keypairs from keyring", app_state.keypair_count());
+    let profiles_count = app_state.profiles.lock().unwrap().len();
+    info!("Loaded {} profiles from keyring", profiles_count);
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -110,6 +112,11 @@ pub fn run() {
             keys::change_pin,
             keys::remove_pin,
             keys::set_lock_timeout,
+            // Profile management
+            keys::list_profiles,
+            keys::create_profile,
+            keys::unlock_profile,
+            keys::delete_profile,
             // NIP-46 signer
             nip46::get_signer_state,
             nip46::start_signer,
@@ -128,11 +135,14 @@ pub fn run() {
             nip46::resolve_reconnect,
             nip46::add_relay,
             nip46::remove_relay,
+            nip46::reset_relays,
             nip46::list_relays,
             nip46::add_user_relay,
             nip46::remove_user_relay,
             nip46::fetch_user_relays,
+            nip46::fetch_user_blossom_servers,
             nip46::publish_user_relays,
+            nip46::publish_user_blossom_servers,
             nip46::sign_event_local,
             nip46::toggle_nip46_enabled,
             nip46::get_signing_history,
@@ -152,6 +162,13 @@ pub fn run() {
             pc55::start_pc55_server,
             pc55::stop_pc55_server,
             pc55::get_pc55_state,
+            // Updater
+            updater::check_for_update,
+            updater::download_and_install_update,
+            updater::upload_to_blossom,
+            updater::publish_update_event,
+            updater::fetch_version_history,
+            updater::write_temp_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running DENOS");

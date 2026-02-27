@@ -1,9 +1,16 @@
-use crate::state::{AppState, KeypairInfo, SeedInfo, save_raw_to_keyring, get_raw_from_keyring, delete_raw_from_keyring, save_to_keyring, PIN_HASH_KEY, LOCK_TIMEOUT_KEY, ACTIVE_KEYPAIR_KEY, ACTIVE_SEED_KEY};
+use crate::state::{AppState, ProfileInfo, KeypairInfo, SeedInfo, save_raw_to_keyring, get_raw_from_keyring, delete_raw_from_keyring, save_to_keyring};
 use nostr_sdk::prelude::*;
 use nostr_sdk::nips::nip06::FromMnemonic;
 use tauri::{AppHandle, Emitter, State};
 use tracing::{info, error};
 use sha2::{Sha256, Digest};
+use uuid::Uuid;
+
+/// Build a profile-scoped keyring key for the active profile
+fn ppk(state: &AppState, suffix: &str) -> String {
+    let pid = state.profile_id();
+    format!("p-{}/{}", pid, suffix)
+}
 
 fn emit_state(app: &AppHandle, state: &State<'_, AppState>) {
     let payload = state.to_app_payload();
@@ -42,8 +49,8 @@ pub fn generate_keypair(
     let npub = public_key.to_bech32()
         .map_err(|e| format!("Bech32 encoding failed: {}", e))?;
 
-    // Store secret key in OS keychain
-    save_raw_to_keyring(&format!("sk-{}", pubkey_hex), &sk_hex)?;
+    // Store secret key in OS keychain (profile-scoped)
+    save_raw_to_keyring(&ppk(&state, &format!("sk-{}", pubkey_hex)), &sk_hex)?;
 
     let kp = KeypairInfo {
         pubkey: pubkey_hex.clone(),
@@ -99,7 +106,7 @@ pub fn import_nsec(
         }
     }
 
-    save_raw_to_keyring(&format!("sk-{}", pubkey_hex), &sk_hex)?;
+    save_raw_to_keyring(&ppk(&state, &format!("sk-{}", pubkey_hex)), &sk_hex)?;
 
     let kp = KeypairInfo {
         pubkey: pubkey_hex.clone(),
@@ -161,7 +168,7 @@ pub fn import_seed(
         }
     }
 
-    save_raw_to_keyring(&format!("sk-{}", pubkey_hex), &sk_hex)?;
+    save_raw_to_keyring(&ppk(&state, &format!("sk-{}", pubkey_hex)), &sk_hex)?;
 
     let kp = KeypairInfo {
         pubkey: pubkey_hex.clone(),
@@ -197,7 +204,7 @@ pub fn delete_keypair(
     state: State<'_, AppState>,
     pubkey: String,
 ) -> Result<(), String> {
-    let _ = delete_raw_from_keyring(&format!("sk-{}", pubkey));
+    let _ = delete_raw_from_keyring(&ppk(&state, &format!("sk-{}", pubkey)));
 
     {
         let mut keypairs = state.keypairs.lock().unwrap();
@@ -265,7 +272,7 @@ pub async fn set_active_keypair(
     }
 
     // Persist to keyring so it survives restarts
-    let _ = save_to_keyring(ACTIVE_KEYPAIR_KEY, &pubkey);
+    let _ = save_to_keyring(&ppk(&state, "active-keypair"), &pubkey);
 
     info!("Active keypair: {}...", &pubkey[..16]);
     emit_log(&app, &format!("[INFO] Active keypair: {}...", &pubkey[..16]));
@@ -325,7 +332,7 @@ pub fn export_nsec(
         }
     }
 
-    let sk_hex = get_raw_from_keyring(&format!("sk-{}", pubkey))?;
+    let sk_hex = get_raw_from_keyring(&ppk(&state, &format!("sk-{}", pubkey)))?;
     let secret_key = SecretKey::from_hex(&sk_hex)
         .map_err(|e| format!("Invalid stored key: {}", e))?;
     let nsec = secret_key.to_bech32()
@@ -346,7 +353,7 @@ pub fn export_private_key_hex(
         }
     }
 
-    get_raw_from_keyring(&format!("sk-{}", pubkey))
+    get_raw_from_keyring(&ppk(&state, &format!("sk-{}", pubkey)))
 }
 
 #[tauri::command]
@@ -360,7 +367,7 @@ pub fn get_active_keys(state: &AppState) -> Result<Keys, String> {
         .clone()
         .ok_or("No active keypair")?;
 
-    let sk_hex = get_raw_from_keyring(&format!("sk-{}", pubkey))?;
+    let sk_hex = get_raw_from_keyring(&ppk(state, &format!("sk-{}", pubkey)))?;
     let secret_key = SecretKey::from_hex(&sk_hex)
         .map_err(|e| format!("Invalid stored key: {}", e))?;
 
@@ -390,7 +397,7 @@ pub fn generate_seed(
     let seed_name = name.unwrap_or_else(|| "My Seed".to_string());
 
     // Store mnemonic in OS keyring
-    save_raw_to_keyring(&format!("seed-{}", seed_id), &mnemonic_str)?;
+    save_raw_to_keyring(&ppk(&state, &format!("seed-{}", seed_id)), &mnemonic_str)?;
 
     // Derive first keypair (account index 0)
     let keys = Keys::from_mnemonic_with_account(mnemonic_str.as_str(), None::<&str>, Some(0))
@@ -404,7 +411,7 @@ pub fn generate_seed(
         .map_err(|e| format!("Bech32 error: {}", e))?;
 
     // Store secret key
-    save_raw_to_keyring(&format!("sk-{}", pubkey_hex), &sk_hex)?;
+    save_raw_to_keyring(&ppk(&state, &format!("sk-{}", pubkey_hex)), &sk_hex)?;
 
     // Create keypair info
     let kp = KeypairInfo {
@@ -503,8 +510,8 @@ pub fn import_seed_phrase(
     let seed_name = name.unwrap_or_else(|| "Imported Seed".to_string());
 
     // Store mnemonic and secret key
-    save_raw_to_keyring(&format!("seed-{}", seed_id), mnemonic.trim())?;
-    save_raw_to_keyring(&format!("sk-{}", pubkey_hex), &sk_hex)?;
+    save_raw_to_keyring(&ppk(&state, &format!("seed-{}", seed_id)), mnemonic.trim())?;
+    save_raw_to_keyring(&ppk(&state, &format!("sk-{}", pubkey_hex)), &sk_hex)?;
 
     let kp = KeypairInfo {
         pubkey: pubkey_hex.clone(),
@@ -565,7 +572,7 @@ pub fn derive_next_keypair(
     };
 
     // Retrieve mnemonic from keyring
-    let mnemonic = get_raw_from_keyring(&format!("seed-{}", seed_id))?;
+    let mnemonic = get_raw_from_keyring(&ppk(&state, &format!("seed-{}", seed_id)))?;
 
     // Find next account index
     let next_index = {
@@ -598,7 +605,7 @@ pub fn derive_next_keypair(
         }
     }
 
-    save_raw_to_keyring(&format!("sk-{}", pubkey_hex), &sk_hex)?;
+    save_raw_to_keyring(&ppk(&state, &format!("sk-{}", pubkey_hex)), &sk_hex)?;
 
     let kp = KeypairInfo {
         pubkey: pubkey_hex.clone(),
@@ -648,11 +655,11 @@ pub fn delete_seed(
 
     // Delete all derived secret keys from keyring
     for pk in &keypair_pubkeys {
-        let _ = delete_raw_from_keyring(&format!("sk-{}", pk));
+        let _ = delete_raw_from_keyring(&ppk(&state, &format!("sk-{}", pk)));
     }
 
     // Delete seed mnemonic from keyring
-    let _ = delete_raw_from_keyring(&format!("seed-{}", seed_id));
+    let _ = delete_raw_from_keyring(&ppk(&state, &format!("seed-{}", seed_id)));
 
     // Remove derived keypairs from state
     {
@@ -715,7 +722,7 @@ pub fn set_active_seed(
     }
 
     // Persist to keyring so it survives restarts
-    let _ = save_to_keyring(ACTIVE_SEED_KEY, &seed_id);
+    let _ = save_to_keyring(&ppk(&state, "active-seed"), &seed_id);
 
     info!("Active seed: {}...", &seed_id[..8]);
     emit_log(&app, &format!("[INFO] Active seed: {}...", &seed_id[..8]));
@@ -788,13 +795,14 @@ pub fn export_seed_words(
         }
     }
 
-    get_raw_from_keyring(&format!("seed-{}", seed_id))
+    get_raw_from_keyring(&ppk(&state, &format!("seed-{}", seed_id)))
 }
 
 /// Save eCash state (proofs, mints, history, pending) for a given pubkey.
 /// Each field is stored in its own keyring entry to avoid size limits.
 #[tauri::command]
 pub fn save_ecash_state(
+    state: State<'_, AppState>,
     pubkey: String,
     proofs_json: String,
     mints_json: String,
@@ -802,11 +810,12 @@ pub fn save_ecash_state(
     pending_json: String,
     discovered_json: String,
 ) -> Result<(), String> {
-    save_raw_to_keyring(&format!("ecash-proofs-{}", pubkey), &proofs_json)?;
-    save_raw_to_keyring(&format!("ecash-mints-{}", pubkey), &mints_json)?;
-    save_raw_to_keyring(&format!("ecash-history-{}", pubkey), &history_json)?;
-    save_raw_to_keyring(&format!("ecash-pending-{}", pubkey), &pending_json)?;
-    save_raw_to_keyring(&format!("ecash-discovered-{}", pubkey), &discovered_json)?;
+    let pid = state.profile_id();
+    save_raw_to_keyring(&format!("p-{}/ecash-proofs-{}", pid, pubkey), &proofs_json)?;
+    save_raw_to_keyring(&format!("p-{}/ecash-mints-{}", pid, pubkey), &mints_json)?;
+    save_raw_to_keyring(&format!("p-{}/ecash-history-{}", pid, pubkey), &history_json)?;
+    save_raw_to_keyring(&format!("p-{}/ecash-pending-{}", pid, pubkey), &pending_json)?;
+    save_raw_to_keyring(&format!("p-{}/ecash-discovered-{}", pid, pubkey), &discovered_json)?;
     Ok(())
 }
 
@@ -814,17 +823,19 @@ pub fn save_ecash_state(
 /// Returns JSON strings for each field, or empty defaults if not found.
 #[tauri::command]
 pub fn load_ecash_state(
+    state: State<'_, AppState>,
     pubkey: String,
 ) -> Result<serde_json::Value, String> {
-    let proofs = get_raw_from_keyring(&format!("ecash-proofs-{}", pubkey))
+    let pid = state.profile_id();
+    let proofs = get_raw_from_keyring(&format!("p-{}/ecash-proofs-{}", pid, pubkey))
         .unwrap_or_else(|_| "[]".to_string());
-    let mints = get_raw_from_keyring(&format!("ecash-mints-{}", pubkey))
+    let mints = get_raw_from_keyring(&format!("p-{}/ecash-mints-{}", pid, pubkey))
         .unwrap_or_else(|_| "{}".to_string());
-    let history = get_raw_from_keyring(&format!("ecash-history-{}", pubkey))
+    let history = get_raw_from_keyring(&format!("p-{}/ecash-history-{}", pid, pubkey))
         .unwrap_or_else(|_| "[]".to_string());
-    let pending = get_raw_from_keyring(&format!("ecash-pending-{}", pubkey))
+    let pending = get_raw_from_keyring(&format!("p-{}/ecash-pending-{}", pid, pubkey))
         .unwrap_or_else(|_| "[]".to_string());
-    let discovered = get_raw_from_keyring(&format!("ecash-discovered-{}", pubkey))
+    let discovered = get_raw_from_keyring(&format!("p-{}/ecash-discovered-{}", pid, pubkey))
         .unwrap_or_else(|_| "{}".to_string());
 
     Ok(serde_json::json!({
@@ -844,6 +855,7 @@ fn hash_pin(pin: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// Set PIN for the currently active profile
 #[tauri::command]
 pub fn set_pin(
     app: AppHandle,
@@ -854,22 +866,41 @@ pub fn set_pin(
         return Err("PIN must be exactly 8 digits".to_string());
     }
     let hashed = hash_pin(&pin);
-    save_raw_to_keyring(PIN_HASH_KEY, &hashed)?;
+    let profile_id = state.profile_id();
+
+    // Update the profile's pin_hash in the profiles index
+    {
+        let mut profiles = state.profiles.lock().unwrap();
+        if let Some(p) = profiles.iter_mut().find(|p| p.id == profile_id) {
+            p.pin_hash = hashed.clone();
+        }
+    }
+    state.save_profiles()?;
+
     *state.pin_hash.lock().unwrap() = Some(hashed);
-    info!("PIN set successfully");
+    info!("PIN set successfully for profile {}", &profile_id[..8]);
     app.emit("app-state", state.to_app_payload()).ok();
     Ok(())
 }
 
+/// Verify PIN against a specific profile (or active profile if not specified)
 #[tauri::command]
 pub fn verify_pin(
     state: State<'_, AppState>,
     pin: String,
+    profile_id: Option<String>,
 ) -> Result<bool, String> {
-    let stored = state.pin_hash.lock().unwrap();
-    match stored.as_ref() {
-        Some(stored_hash) => Ok(hash_pin(&pin) == *stored_hash),
-        None => Err("No PIN is set".to_string()),
+    let profiles = state.profiles.lock().unwrap();
+    let pid = profile_id.unwrap_or_else(|| state.profile_id());
+    match profiles.iter().find(|p| p.id == pid) {
+        Some(profile) => {
+            if profile.pin_hash.is_empty() {
+                Err("No PIN is set for this profile".to_string())
+            } else {
+                Ok(hash_pin(&pin) == profile.pin_hash)
+            }
+        }
+        None => Err("Profile not found".to_string()),
     }
 }
 
@@ -880,24 +911,35 @@ pub fn change_pin(
     current_pin: String,
     new_pin: String,
 ) -> Result<(), String> {
+    let profile_id = state.profile_id();
+
     // Verify current PIN
-    let stored = state.pin_hash.lock().unwrap().clone();
-    match stored.as_ref() {
-        Some(stored_hash) => {
-            if hash_pin(&current_pin) != *stored_hash {
-                return Err("Current PIN is incorrect".to_string());
-            }
+    {
+        let profiles = state.profiles.lock().unwrap();
+        let profile = profiles.iter().find(|p| p.id == profile_id)
+            .ok_or("Active profile not found")?;
+        if hash_pin(&current_pin) != profile.pin_hash {
+            return Err("Current PIN is incorrect".to_string());
         }
-        None => return Err("No PIN is set".to_string()),
     }
+
     // Validate new PIN
     if new_pin.len() != 8 || !new_pin.chars().all(|c| c.is_ascii_digit()) {
         return Err("New PIN must be exactly 8 digits".to_string());
     }
     let hashed = hash_pin(&new_pin);
-    save_raw_to_keyring(PIN_HASH_KEY, &hashed)?;
+
+    // Update profile
+    {
+        let mut profiles = state.profiles.lock().unwrap();
+        if let Some(p) = profiles.iter_mut().find(|p| p.id == profile_id) {
+            p.pin_hash = hashed.clone();
+        }
+    }
+    state.save_profiles()?;
+
     *state.pin_hash.lock().unwrap() = Some(hashed);
-    info!("PIN changed successfully");
+    info!("PIN changed for profile {}", &profile_id[..8]);
     app.emit("app-state", state.to_app_payload()).ok();
     Ok(())
 }
@@ -908,18 +950,30 @@ pub fn remove_pin(
     state: State<'_, AppState>,
     pin: String,
 ) -> Result<(), String> {
-    let stored = state.pin_hash.lock().unwrap().clone();
-    match stored.as_ref() {
-        Some(stored_hash) => {
-            if hash_pin(&pin) != *stored_hash {
-                return Err("PIN is incorrect".to_string());
-            }
+    let profile_id = state.profile_id();
+
+    // Verify current PIN
+    {
+        let profiles = state.profiles.lock().unwrap();
+        let profile = profiles.iter().find(|p| p.id == profile_id)
+            .ok_or("Active profile not found")?;
+        if hash_pin(&pin) != profile.pin_hash {
+            return Err("PIN is incorrect".to_string());
         }
-        None => return Err("No PIN is set".to_string()),
     }
-    delete_raw_from_keyring(PIN_HASH_KEY).ok();
+
+    // Clear PIN from profile (NOTE: profiles should always have a PIN,
+    // but we support clearing for edge cases)
+    {
+        let mut profiles = state.profiles.lock().unwrap();
+        if let Some(p) = profiles.iter_mut().find(|p| p.id == profile_id) {
+            p.pin_hash = String::new();
+        }
+    }
+    state.save_profiles()?;
+
     *state.pin_hash.lock().unwrap() = None;
-    info!("PIN removed");
+    info!("PIN removed for profile {}", &profile_id[..8]);
     app.emit("app-state", state.to_app_payload()).ok();
     Ok(())
 }
@@ -930,9 +984,196 @@ pub fn set_lock_timeout(
     state: State<'_, AppState>,
     minutes: u32,
 ) -> Result<(), String> {
-    save_to_keyring(LOCK_TIMEOUT_KEY, &minutes)?;
+    save_to_keyring(&ppk(&state, "lock-timeout"), &minutes)?;
     *state.lock_timeout_minutes.lock().unwrap() = minutes;
     info!("Lock timeout set to {} minutes", minutes);
     app.emit("app-state", state.to_app_payload()).ok();
+    Ok(())
+}
+
+// ─── Profile Management ─────────────────────────────────────────────────
+
+/// List all profiles (id + name, no secrets)
+#[tauri::command]
+pub fn list_profiles(
+    state: State<'_, AppState>,
+) -> Vec<crate::state::ProfileListItem> {
+    let profiles = state.profiles.lock().unwrap();
+    profiles.iter().map(|p| crate::state::ProfileListItem {
+        id: p.id.clone(),
+        name: p.name.clone(),
+    }).collect()
+}
+
+/// Create a new profile with the given PIN
+#[tauri::command]
+pub fn create_profile(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    pin: String,
+) -> Result<String, String> {
+    if pin.len() != 8 || !pin.chars().all(|c| c.is_ascii_digit()) {
+        return Err("PIN must be exactly 8 digits".to_string());
+    }
+
+    let profile_id = Uuid::new_v4().to_string();
+    let hashed = hash_pin(&pin);
+
+    // Determine name: "PIN Account N+1"
+    let profile_number = {
+        let profiles = state.profiles.lock().unwrap();
+        profiles.len() + 1
+    };
+    let name = format!("PIN Account {}", profile_number);
+
+    let profile = ProfileInfo {
+        id: profile_id.clone(),
+        name: name.clone(),
+        pin_hash: hashed.clone(),
+    };
+
+    {
+        let mut profiles = state.profiles.lock().unwrap();
+        profiles.push(profile);
+    }
+    state.save_profiles()?;
+
+    // Load (activate) the new profile
+    state.load_profile(&profile_id);
+
+    info!("Created profile '{}' ({})", &name, &profile_id[..8]);
+    app.emit("app-state", state.to_app_payload()).ok();
+
+    Ok(profile_id)
+}
+
+/// Unlock a profile by verifying its PIN, then load its data
+#[tauri::command]
+pub fn unlock_profile(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    profile_id: String,
+    pin: String,
+) -> Result<bool, String> {
+    // Verify PIN
+    let valid = {
+        let profiles = state.profiles.lock().unwrap();
+        match profiles.iter().find(|p| p.id == profile_id) {
+            Some(profile) => {
+                if profile.pin_hash.is_empty() {
+                    return Err("No PIN is set for this profile".to_string());
+                }
+                hash_pin(&pin) == profile.pin_hash
+            }
+            None => return Err("Profile not found".to_string()),
+        }
+    };
+
+    if valid {
+        // Load this profile's data
+        state.load_profile(&profile_id);
+        info!("Unlocked profile {}", &profile_id[..8]);
+        app.emit("app-state", state.to_app_payload()).ok();
+    }
+
+    Ok(valid)
+}
+
+/// Delete a profile and all its data from keyring
+#[tauri::command]
+pub fn delete_profile(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    profile_id: String,
+    pin: String,
+) -> Result<(), String> {
+    // Verify PIN for the profile being deleted
+    {
+        let profiles = state.profiles.lock().unwrap();
+        let profile = profiles.iter().find(|p| p.id == profile_id)
+            .ok_or("Profile not found")?;
+        if !profile.pin_hash.is_empty() && hash_pin(&pin) != profile.pin_hash {
+            return Err("PIN is incorrect".to_string());
+        }
+    }
+
+    // Clean up all keyring entries for this profile
+    let pid = &profile_id;
+    // Delete per-item keys by reading indexes
+    if let Ok(index_json) = get_raw_from_keyring(&format!("p-{}/keypairs-index", pid)) {
+        if let Ok(pubkeys) = serde_json::from_str::<Vec<String>>(&index_json) {
+            for pk in &pubkeys {
+                let _ = delete_raw_from_keyring(&format!("p-{}/sk-{}", pid, pk));
+                let _ = delete_raw_from_keyring(&format!("p-{}/kp-{}", pid, pk));
+                for ecash_key in &["ecash-proofs-", "ecash-mints-", "ecash-history-", "ecash-pending-", "ecash-discovered-"] {
+                    let _ = delete_raw_from_keyring(&format!("p-{}/{}{}", pid, ecash_key, pk));
+                }
+            }
+        }
+    }
+    if let Ok(index_json) = get_raw_from_keyring(&format!("p-{}/seeds-index", pid)) {
+        if let Ok(seed_ids) = serde_json::from_str::<Vec<String>>(&index_json) {
+            for sid in &seed_ids {
+                let _ = delete_raw_from_keyring(&format!("p-{}/seed-{}", pid, sid));
+                let _ = delete_raw_from_keyring(&format!("p-{}/seed-info-{}", pid, sid));
+            }
+        }
+    }
+    if let Ok(index_json) = get_raw_from_keyring(&format!("p-{}/connections", pid)) {
+        if let Ok(conn_ids) = serde_json::from_str::<Vec<String>>(&index_json) {
+            for cid in &conn_ids {
+                let _ = delete_raw_from_keyring(&format!("p-{}/conn-{}", pid, cid));
+            }
+        }
+    }
+    if let Ok(index_json) = get_raw_from_keyring(&format!("p-{}/upv2-sessions", pid)) {
+        if let Ok(sess_ids) = serde_json::from_str::<Vec<String>>(&index_json) {
+            for sid in &sess_ids {
+                let _ = delete_raw_from_keyring(&format!("p-{}/upv2-sess-{}", pid, sid));
+            }
+        }
+    }
+    if let Ok(index_json) = get_raw_from_keyring(&format!("p-{}/login-attempts", pid)) {
+        if let Ok(attempt_ids) = serde_json::from_str::<Vec<String>>(&index_json) {
+            for aid in &attempt_ids {
+                let _ = delete_raw_from_keyring(&format!("p-{}/login-attempt-{}", pid, aid));
+            }
+        }
+    }
+
+    // Delete index keys
+    let suffixes = [
+        "keypairs-index", "seeds-index", "connections", "relays",
+        "upv2-login-key", "upv2-sessions", "login-attempts", "last-online-at",
+        "lock-timeout", "active-keypair", "active-seed", "nip46-enabled",
+        "signing-history", "user-relays",
+    ];
+    for suffix in &suffixes {
+        let _ = delete_raw_from_keyring(&format!("p-{}/{}", pid, suffix));
+    }
+
+    // Remove from profiles list
+    let is_active_profile = state.active_profile.lock().unwrap().as_deref() == Some(&profile_id);
+    {
+        let mut profiles = state.profiles.lock().unwrap();
+        profiles.retain(|p| p.id != profile_id);
+    }
+    state.save_profiles()?;
+
+    // If we deleted the active profile, switch to first remaining
+    if is_active_profile {
+        let first_id = {
+            let profiles = state.profiles.lock().unwrap();
+            profiles.first().map(|p| p.id.clone())
+        };
+        if let Some(_fid) = first_id {
+            *state.active_profile.lock().unwrap() = None;
+            // Don't auto-load — require PIN on next unlock
+        }
+    }
+
+    info!("Deleted profile {}", &profile_id[..8]);
+    app.emit("app-state", state.to_app_payload()).ok();
+
     Ok(())
 }

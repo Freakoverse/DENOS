@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <strong>Nostr Signer, Payment System, and ID Manager</strong>
+  <strong>Nostr Signer, ID Manager, and Payment System</strong>
 </p>
 
 <p align="center">
@@ -22,9 +22,9 @@ DENOS is a tool for managing your Nostr identities, signing events, and pay or r
 ## Features
 
 - **Nostr Signer** — Manage keys, sign events, and connect to relays
+- **Identity Manager** — DNN-based decentralized identity management
 - **Bitcoin Wallet** — secp256k1 wallet with Silent Payments and multi-sig support
 - **eCash** — Cashu-based eCash wallet with a focus on nut zaps
-- **Identity Manager** — DNN-based decentralized identity management
 - **QR Scanner** — Built-in QR code scanner and generator
 - **Cross-Platform** — Windows, macOS, and Linux
 
@@ -183,6 +183,8 @@ DENOS/
 - [x] **NIP-46** — Nostr Connect (remote signer protocol)
 - [x] **NIP-60** — Cashu wallet state backup (encrypted to self)
 - [x] **NIP-61** — Nut zaps (Cashu ecash zaps via Nostr, with P2PK locking)
+- [x] **NIP-65** — Relay list metadata
+- [x] **NIP-78** — Arbitrary data to deliver updates to DENOS
 - [x] **NIP-87** — Cashu mint discovery via Nostr events
 - [x] **NIP-PC55** — Local signer protocol (alternative to NIP-46)
 - [x] **NIP-UPV2** — Username & Password version 2 (alternative to NIP-46)

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
@@ -9,11 +9,13 @@ import { cn } from '@/lib/utils';
 import { Switch } from '@/components/ui/switch';
 import {
     Radio, X, Plus, Info, Terminal, ChevronRight, ArrowLeft, Shield, Eye, EyeOff, Users,
-    Copy, Check, RefreshCw, Heart, Bitcoin, Banknote, ChevronDown, Sun, Moon, Palette, Store, Network,
+    Copy, Check, RefreshCw, Heart, Bitcoin, Banknote, ChevronDown, Sun, Moon, Palette, Store, Network, Lock,
+    Play, GraduationCap, Cloud, Download,
 } from 'lucide-react';
 import { useFeedback } from '@/components/ui/feedback';
 import { KeypairManager } from '@/components/KeypairManager';
 import { bitcoinNodes } from '@/services/bitcoin';
+import { blossomServers } from '@/services/blossomServers';
 import type { AppState } from '@/App';
 import { fetchNostrProfile, type NostrProfile } from '@/services/nostrProfile';
 import { dnnService } from '@/services/dnn';
@@ -38,16 +40,17 @@ interface SignerState {
     login_attempts: any[];
 }
 
-type SubPage = 'accounts' | 'relays' | 'debug' | 'about' | 'security' | 'preferences' | 'merchant' | 'currency-nodes' | null;
+type SubPage = 'accounts' | 'relays' | 'debug' | 'about' | 'security' | 'preferences' | 'merchant' | 'currency-nodes' | 'tutorials' | 'blossom' | null;
 
 interface Props {
     logs: string[];
     appState: AppState;
     onNavigateToWallet?: (recipient: string) => void;
     onNavigateToEcashSend?: (recipient: string) => void;
+    onLock?: () => void;
 }
 
-export function Settings({ logs, appState, onNavigateToWallet, onNavigateToEcashSend }: Props) {
+export function Settings({ logs, appState, onNavigateToWallet, onNavigateToEcashSend, onLock }: Props) {
     const [signerState, setSignerState] = useState<SignerState | null>(null);
     const [newRelay, setNewRelay] = useState('');
     const [addingRelay, setAddingRelay] = useState(false);
@@ -92,7 +95,7 @@ export function Settings({ logs, appState, onNavigateToWallet, onNavigateToEcash
         if (!url.startsWith('wss://') && !url.startsWith('ws://')) url = 'wss://' + url;
         setAddingRelay(true);
         try {
-            await invoke('add_relay', { relayUrl: url });
+            await invoke('add_relay', { url });
             setNewRelay('');
         } catch (e: any) {
             toast('Error adding relay: ' + e);
@@ -101,7 +104,7 @@ export function Settings({ logs, appState, onNavigateToWallet, onNavigateToEcash
     };
 
     const handleRemoveRelay = async (url: string) => {
-        try { await invoke('remove_relay', { relayUrl: url }); } catch (e: any) { toast('Error: ' + e); }
+        try { await invoke('remove_relay', { url }); } catch (e: any) { toast('Error: ' + e); }
     };
 
     /* ── Sub-pages ── */
@@ -186,18 +189,25 @@ export function Settings({ logs, appState, onNavigateToWallet, onNavigateToEcash
                 {/* Signer's local relays */}
                 <Card>
                     <CardContent className="pt-4">
-                        <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-3">Signer's local relays</div>
+                        <div className="flex items-center justify-between mb-3">
+                            <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Signer's local relays</div>
+                            <button
+                                onClick={async () => { try { await invoke('reset_relays'); toast('Relays reset to defaults', 'success'); } catch (e: any) { toast('Error: ' + e, 'error'); } }}
+                                className="text-[10px] text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
+                            >Reset</button>
+                        </div>
 
                         <div className="flex gap-2 mb-3">
                             <Input
                                 value={newRelay}
                                 onChange={e => setNewRelay(e.target.value)}
                                 placeholder="wss://..."
-                                className="flex-1 h-8 text-sm"
+                                className="flex-1 h-9 text-sm"
                                 onKeyDown={e => e.key === 'Enter' && handleAddRelay()}
                             />
                             <Button
                                 size="sm"
+                                className="h-9"
                                 onClick={handleAddRelay}
                                 disabled={addingRelay || !newRelay.trim()}
                             >
@@ -254,11 +264,12 @@ export function Settings({ logs, appState, onNavigateToWallet, onNavigateToEcash
                                 value={newUserRelay}
                                 onChange={e => setNewUserRelay(e.target.value)}
                                 placeholder="wss://..."
-                                className="flex-1 h-8 text-sm"
+                                className="flex-1 h-9 text-sm"
                                 onKeyDown={e => e.key === 'Enter' && handleAddUserRelay()}
                             />
                             <Button
                                 size="sm"
+                                className="h-9"
                                 onClick={handleAddUserRelay}
                                 disabled={addingUserRelay || !newUserRelay.trim()}
                             >
@@ -358,7 +369,7 @@ export function Settings({ logs, appState, onNavigateToWallet, onNavigateToEcash
     }
 
     if (subPage === 'about') {
-        return <AboutPage onBack={() => setSubPage(null)} toast={toast} onNavigateToWallet={onNavigateToWallet} onNavigateToEcashSend={onNavigateToEcashSend} />;
+        return <AboutPage onBack={() => setSubPage(null)} toast={toast} onNavigateToWallet={onNavigateToWallet} onNavigateToEcashSend={onNavigateToEcashSend} appState={appState} />;
     }
 
     if (subPage === 'preferences') {
@@ -398,7 +409,15 @@ export function Settings({ logs, appState, onNavigateToWallet, onNavigateToEcash
     }
 
     if (subPage === 'security') {
-        return <SecuritySettings onBack={() => setSubPage(null)} toast={toast} />;
+        return <SecuritySettings onBack={() => setSubPage(null)} toast={toast} appState={appState} onLock={onLock} />;
+    }
+
+    if (subPage === 'tutorials') {
+        return <TutorialsPage onBack={() => setSubPage(null)} />;
+    }
+
+    if (subPage === 'blossom') {
+        return <BlossomServersPage onBack={() => setSubPage(null)} toast={toast} />;
     }
 
     if (subPage === 'merchant') {
@@ -463,6 +482,8 @@ export function Settings({ logs, appState, onNavigateToWallet, onNavigateToEcash
         { id: 'currency-nodes', label: 'Network Currency Nodes', desc: 'Network node connections', icon: Network },
         { id: 'debug', label: 'Debug Console', desc: `${logs.length} log entries`, icon: Terminal },
         { id: 'merchant', label: 'Merchant', desc: 'Manage commercial settings', icon: Store },
+        { id: 'blossom', label: 'Blossom Servers', desc: 'Media server fallbacks', icon: Cloud },
+        { id: 'tutorials', label: 'Tutorials', desc: 'Learn how to use DENOS', icon: GraduationCap },
         { id: 'about', label: 'About DENOS', desc: 'Version 0.1', icon: Info },
     ];
 
@@ -494,14 +515,30 @@ export function Settings({ logs, appState, onNavigateToWallet, onNavigateToEcash
                     ))}
                 </CardContent>
             </Card>
+
+            {onLock && (
+                <button
+                    onClick={onLock}
+                    className="flex items-center justify-center gap-2 w-full py-3.5 rounded-xl bg-foreground/10 text-foreground hover:bg-foreground/20 transition-colors cursor-pointer font-medium text-sm"
+                >
+                    <Lock className="w-4 h-4" />
+                    Lock Signer
+                </button>
+            )}
+
             <div className="h-[100px]" />
         </div>
     );
 }
 
 // ── Security Settings Sub-Page ──
-function SecuritySettings({ onBack, toast }: { onBack: () => void; toast: (msg: string, type?: 'error' | 'success' | 'info') => void }) {
-    const [step, setStep] = useState<'menu' | 'change-pin'>('menu');
+function SecuritySettings({ onBack, toast, appState, onLock }: {
+    onBack: () => void;
+    toast: (msg: string, type?: 'error' | 'success' | 'info') => void;
+    appState: AppState;
+    onLock?: () => void;
+}) {
+    const [step, setStep] = useState<'menu' | 'change-pin' | 'delete-phrase' | 'delete-pin' | 'delete-confirm' | 'delete-countdown'>('menu');
     const [currentPin, setCurrentPin] = useState('');
     const [newPin, setNewPin] = useState('');
     const [confirmPin, setConfirmPin] = useState('');
@@ -511,11 +548,75 @@ function SecuritySettings({ onBack, toast }: { onBack: () => void; toast: (msg: 
     const [showNew, setShowNew] = useState(false);
     const [lockTimeout, setLockTimeout] = useState(5);
 
+    // Delete flow state
+    const [deletePhrase, setDeletePhrase] = useState('');
+    const [deletePin1, setDeletePin1] = useState('');
+    const [deletePin2, setDeletePin2] = useState('');
+    const [deletePin3, setDeletePin3] = useState('');
+    const [countdown, setCountdown] = useState(10);
+    const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+    // Determine profile number (1-based index in the profiles list)
+    const profileIndex = appState.profiles.findIndex(p => p.id === appState.active_profile) + 1;
+    const profileNumber = profileIndex > 0 ? profileIndex : 1;
+    const requiredPhrase = `Delete PIN Account ${profileNumber}`;
+
     useEffect(() => {
         invoke<{ lock_timeout_minutes: number }>('get_app_state')
             .then(state => setLockTimeout(state.lock_timeout_minutes))
             .catch(() => { });
     }, []);
+
+    // Countdown logic
+    useEffect(() => {
+        if (step === 'delete-countdown') {
+            setCountdown(10);
+            countdownRef.current = setInterval(() => {
+                setCountdown(prev => {
+                    if (prev <= 1) {
+                        if (countdownRef.current) clearInterval(countdownRef.current);
+                        // Execute deletion
+                        handleDeleteProfile();
+                        return 0;
+                    }
+                    return prev - 1;
+                });
+            }, 1000);
+            return () => {
+                if (countdownRef.current) clearInterval(countdownRef.current);
+            };
+        }
+    }, [step]);
+
+    const handleAbortCountdown = () => {
+        if (countdownRef.current) clearInterval(countdownRef.current);
+        resetDeleteState();
+    };
+
+    const resetDeleteState = () => {
+        setStep('menu');
+        setDeletePhrase('');
+        setDeletePin1('');
+        setDeletePin2('');
+        setDeletePin3('');
+        setError('');
+    };
+
+    const handleDeleteProfile = async () => {
+        try {
+            await invoke('delete_profile', {
+                profileId: appState.active_profile,
+                pin: deletePin1,
+            });
+            toast('PIN Account deleted permanently', 'success');
+            resetDeleteState();
+            // Lock the app — will show another profile or creation flow
+            if (onLock) onLock();
+        } catch (e) {
+            toast('Delete failed: ' + String(e), 'error');
+            resetDeleteState();
+        }
+    };
 
     const handleChangePin = async () => {
         if (currentPin.length !== 8) { setError('Current PIN must be 8 digits'); return; }
@@ -542,6 +643,215 @@ function SecuritySettings({ onBack, toast }: { onBack: () => void; toast: (msg: 
             toast('Error: ' + e);
         }
     };
+
+    // ── Delete: Step 1 — Type exact phrase ──
+    if (step === 'delete-phrase') {
+        return (
+            <div className="space-y-4 animate-fade-in">
+                <button
+                    onClick={resetDeleteState}
+                    className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
+                >
+                    <ArrowLeft className="w-4 h-4" /> Back
+                </button>
+
+                <Card>
+                    <CardHeader>
+                        <CardTitle className="flex items-center gap-2 text-base text-destructive">
+                            <Shield className="w-4.5 h-4.5" />
+                            Delete PIN Account {profileNumber}
+                        </CardTitle>
+                    </CardHeader>
+                    <CardContent className="space-y-4">
+                        <p className="text-sm text-muted-foreground">
+                            To proceed, type the exact phrase below (case-sensitive):
+                        </p>
+                        <div className="bg-destructive/10 rounded-lg px-3 py-2 text-sm font-mono text-destructive text-center select-all">
+                            {requiredPhrase}
+                        </div>
+                        <Input
+                            value={deletePhrase}
+                            onChange={(e) => { setDeletePhrase(e.target.value); setError(''); }}
+                            placeholder="Type the phrase exactly..."
+                            className="font-mono text-sm"
+                        />
+                        {error && <p className="text-xs text-destructive">{error}</p>}
+                        <Button
+                            variant="destructive"
+                            className="w-full"
+                            disabled={deletePhrase !== requiredPhrase}
+                            onClick={() => {
+                                if (deletePhrase === requiredPhrase) {
+                                    setError('');
+                                    setStep('delete-pin');
+                                } else {
+                                    setError('Phrase does not match');
+                                }
+                            }}
+                        >
+                            Continue
+                        </Button>
+                    </CardContent>
+                </Card>
+            </div>
+        );
+    }
+
+    // ── Delete: Step 2 — Enter PIN three times ──
+    if (step === 'delete-pin') {
+        const allMatch = deletePin1.length === 8 && deletePin1 === deletePin2 && deletePin2 === deletePin3;
+        return (
+            <div className="space-y-4 animate-fade-in">
+                <button
+                    onClick={() => { setStep('delete-phrase'); setDeletePin1(''); setDeletePin2(''); setDeletePin3(''); setError(''); }}
+                    className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
+                >
+                    <ArrowLeft className="w-4 h-4" /> Back
+                </button>
+
+                <Card>
+                    <CardHeader>
+                        <CardTitle className="flex items-center gap-2 text-base text-destructive">
+                            <Shield className="w-4.5 h-4.5" />
+                            Confirm Your PIN
+                        </CardTitle>
+                    </CardHeader>
+                    <CardContent className="space-y-3">
+                        <p className="text-sm text-muted-foreground">
+                            Enter your PIN for PIN Account {profileNumber} three times to confirm:
+                        </p>
+                        {[
+                            { label: 'PIN (1st entry)', value: deletePin1, setter: setDeletePin1 },
+                            { label: 'PIN (2nd entry)', value: deletePin2, setter: setDeletePin2 },
+                            { label: 'PIN (3rd entry)', value: deletePin3, setter: setDeletePin3 },
+                        ].map(({ label, value, setter }, i) => (
+                            <div key={i}>
+                                <label className="text-xs text-muted-foreground mb-1 block">{label}</label>
+                                <input
+                                    type="password"
+                                    value={value}
+                                    onChange={(e) => { setter(e.target.value.replace(/\D/g, '').slice(0, 8)); setError(''); }}
+                                    placeholder="• • • • • • • •"
+                                    maxLength={8}
+                                    inputMode="numeric"
+                                    className="w-full bg-secondary/50 border border-border rounded-xl px-3 py-2.5 text-foreground text-sm tracking-widest font-mono focus:ring-2 focus:ring-primary outline-none"
+                                />
+                            </div>
+                        ))}
+
+                        {error && <p className="text-xs text-destructive">{error}</p>}
+
+                        <Button
+                            variant="destructive"
+                            className="w-full"
+                            disabled={!allMatch}
+                            onClick={() => {
+                                if (!allMatch) {
+                                    setError('All three PINs must match');
+                                    return;
+                                }
+                                setError('');
+                                setStep('delete-confirm');
+                            }}
+                        >
+                            Continue
+                        </Button>
+                    </CardContent>
+                </Card>
+            </div>
+        );
+    }
+
+    // ── Delete: Step 3 — Final warning ──
+    if (step === 'delete-confirm') {
+        return (
+            <div className="space-y-4 animate-fade-in">
+                <button
+                    onClick={() => setStep('delete-pin')}
+                    className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
+                >
+                    <ArrowLeft className="w-4 h-4" /> Back
+                </button>
+
+                <Card className="border-destructive/30">
+                    <CardContent className="pt-6 space-y-4 text-center">
+                        <div className="w-14 h-14 rounded-full bg-destructive/15 flex items-center justify-center mx-auto">
+                            <Shield className="w-7 h-7 text-destructive" />
+                        </div>
+                        <h3 className="text-lg font-bold text-destructive">Are you sure?</h3>
+                        <p className="text-sm text-muted-foreground leading-relaxed">
+                            This will completely erase all generated and/or imported seeds and keypairs/nsecs under this PIN account{' '}
+                            <span className="font-semibold text-foreground">PIN Account {profileNumber}</span>.
+                        </p>
+                        <p className="text-sm font-bold text-destructive">
+                            THIS CANNOT BE UNDONE AND IS PERMANENT
+                        </p>
+                        <div className="flex gap-3 pt-2">
+                            <Button
+                                variant="outline"
+                                className="flex-1"
+                                onClick={resetDeleteState}
+                            >
+                                Cancel
+                            </Button>
+                            <Button
+                                variant="destructive"
+                                className="flex-1"
+                                onClick={() => setStep('delete-countdown')}
+                            >
+                                Confirm Delete
+                            </Button>
+                        </div>
+                    </CardContent>
+                </Card>
+            </div>
+        );
+    }
+
+    // ── Delete: Step 4 — Countdown ──
+    if (step === 'delete-countdown') {
+        const progress = ((10 - countdown) / 10) * 100;
+        return (
+            <div className="space-y-6 animate-fade-in">
+                <Card className="border-destructive/50">
+                    <CardContent className="pt-6 space-y-6 text-center">
+                        <div className="relative w-28 h-28 mx-auto">
+                            {/* Background circle */}
+                            <svg className="w-full h-full -rotate-90" viewBox="0 0 120 120">
+                                <circle cx="60" cy="60" r="52" fill="none" stroke="currentColor" strokeWidth="6" className="text-secondary" />
+                                <circle
+                                    cx="60" cy="60" r="52" fill="none"
+                                    stroke="currentColor" strokeWidth="6"
+                                    className="text-destructive transition-all duration-1000 ease-linear"
+                                    strokeDasharray={`${2 * Math.PI * 52}`}
+                                    strokeDashoffset={`${2 * Math.PI * 52 * (1 - progress / 100)}`}
+                                    strokeLinecap="round"
+                                />
+                            </svg>
+                            <div className="absolute inset-0 flex items-center justify-center">
+                                <span className="text-4xl font-bold text-destructive tabular-nums">{countdown}</span>
+                            </div>
+                        </div>
+
+                        <div>
+                            <h3 className="text-lg font-bold text-destructive">Deleting PIN Account {profileNumber}</h3>
+                            <p className="text-sm text-muted-foreground mt-1">
+                                All data will be permanently erased in {countdown} second{countdown !== 1 ? 's' : ''}...
+                            </p>
+                        </div>
+
+                        <Button
+                            variant="outline"
+                            className="w-full border-foreground/20"
+                            onClick={handleAbortCountdown}
+                        >
+                            Abort
+                        </Button>
+                    </CardContent>
+                </Card>
+            </div>
+        );
+    }
 
     if (step === 'change-pin') {
         return (
@@ -684,6 +994,396 @@ function SecuritySettings({ onBack, toast }: { onBack: () => void; toast: (msg: 
                     </div>
                 </CardContent>
             </Card>
+
+            {/* Delete PIN Account */}
+            <button
+                onClick={() => setStep('delete-phrase')}
+                className="flex items-center justify-center gap-2 w-full py-3.5 rounded-xl bg-destructive/10 text-destructive hover:bg-destructive/20 transition-colors cursor-pointer font-medium text-sm"
+            >
+                <Shield className="w-4 h-4" />
+                Delete PIN Account {profileNumber}
+            </button>
+        </div>
+    );
+}
+
+/* ── Blossom Video with server fallback ── */
+function BlossomVideo({ hash, ext, ...videoProps }: {
+    hash: string;
+    ext: string;
+} & React.VideoHTMLAttributes<HTMLVideoElement>) {
+    const servers = blossomServers.getServers();
+    const [serverIndex, setServerIndex] = useState(0);
+    const [allFailed, setAllFailed] = useState(false);
+
+    // Build URL: servers store full URLs like https://video.nostr.build
+    const baseUrl = servers[serverIndex]?.replace(/\/+$/, '');
+    const currentUrl = baseUrl ? `${baseUrl}/${hash}.${ext}` : '';
+
+    const handleError = useCallback(() => {
+        if (serverIndex < servers.length - 1) {
+            console.log(`[BlossomVideo] ${servers[serverIndex]} failed, trying ${servers[serverIndex + 1]}…`);
+            setServerIndex(i => i + 1);
+        } else {
+            console.error('[BlossomVideo] All Blossom servers failed');
+            setAllFailed(true);
+        }
+    }, [serverIndex, servers]);
+
+    if (allFailed || servers.length === 0) {
+        return (
+            <div className="w-full h-full flex items-center justify-center text-muted-foreground text-sm">
+                Video unavailable
+            </div>
+        );
+    }
+
+    return <video key={currentUrl} src={currentUrl} onError={handleError} {...videoProps} />;
+}
+
+/* ── Tutorial items ── */
+const TUTORIALS = [
+    {
+        id: 'signing-into-clients',
+        title: 'Signing into Nostr clients',
+        description: 'If this is your first time using a Nostr signer and account manager, here\'s a short video on how to sign in to different Nostr sites, apps, and software.',
+        hash: '866c604285248a0f2340b02fab7e79b422d0d901a421e539fd89f84a51d80271',
+        ext: 'mp4',
+    },
+];
+
+// ── Tutorials Page Component ──
+function TutorialsPage({ onBack }: { onBack: () => void }) {
+    const [activeTutorial, setActiveTutorial] = useState<string | null>(null);
+    const tutorial = TUTORIALS.find(t => t.id === activeTutorial);
+
+    return (
+        <div className="space-y-4 animate-fade-in">
+            <button
+                onClick={onBack}
+                className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
+            >
+                <ArrowLeft className="w-4 h-4" /> Back
+            </button>
+
+            <Card>
+                <CardHeader>
+                    <CardTitle className="flex items-center gap-2">
+                        <GraduationCap className="w-4.5 h-4.5" />
+                        Tutorials
+                    </CardTitle>
+                </CardHeader>
+                <CardContent className="divide-y divide-border">
+                    {TUTORIALS.map(t => (
+                        <button
+                            key={t.id}
+                            onClick={() => setActiveTutorial(t.id)}
+                            className="flex items-center gap-3 w-full py-4 first:pt-0 last:pb-0 cursor-pointer group text-left hover:opacity-80 transition-opacity"
+                        >
+                            <div className="w-9 h-9 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
+                                <Play className="w-4.5 h-4.5 text-primary" />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                                <p className="text-sm font-medium">{t.title}</p>
+                                <p className="text-xs text-muted-foreground line-clamp-1">{t.description}</p>
+                            </div>
+                            <ChevronRight className="w-4.5 h-4.5 text-muted-foreground shrink-0" />
+                        </button>
+                    ))}
+                </CardContent>
+            </Card>
+
+            {/* Tutorial Video Modal */}
+            <Dialog open={!!activeTutorial} onOpenChange={(open) => { if (!open) setActiveTutorial(null); }}>
+                <DialogContent className="sm:max-w-2xl p-0 overflow-hidden">
+                    <div className="aspect-video w-full bg-black">
+                        {tutorial && (
+                            <BlossomVideo
+                                hash={tutorial.hash}
+                                ext={tutorial.ext}
+                                autoPlay
+                                controls
+                                className="w-full h-full"
+                            />
+                        )}
+                    </div>
+                    <div className="px-6 pb-6 pt-4">
+                        <h3 className="text-lg font-semibold mb-2">{tutorial?.title}</h3>
+                        <p className="text-sm text-muted-foreground">
+                            {tutorial?.description}
+                        </p>
+                    </div>
+                </DialogContent>
+            </Dialog>
+        </div>
+    );
+}
+
+// ── Blossom Servers Page Component ──
+function BlossomServersPage({ onBack, toast }: { onBack: () => void; toast: (msg: string, type?: 'error' | 'success' | 'info') => void }) {
+    const [servers, setServers] = useState<string[]>(() => blossomServers.getServers());
+    const [newServer, setNewServer] = useState('');
+    const [serverHealth, setServerHealth] = useState<Record<string, boolean | null>>({});
+    const [checkingHealth, setCheckingHealth] = useState(false);
+    const [userServers, setUserServers] = useState<string[]>([]);
+    const [fetchingUser, setFetchingUser] = useState(false);
+    const [newUserServer, setNewUserServer] = useState('');
+    const [publishingServers, setPublishingServers] = useState(false);
+    const publishedUserServersRef = useRef<string[] | null>(null);
+
+    // Check health on mount
+    useEffect(() => {
+        checkAllHealth();
+    }, []);
+
+    const checkAllHealth = async () => {
+        setCheckingHealth(true);
+        const health: Record<string, boolean | null> = {};
+        for (const url of servers) health[url] = null;
+        setServerHealth(health);
+
+        await Promise.all(servers.map(async (url) => {
+            const ok = await blossomServers.checkHealth(url);
+            setServerHealth(prev => ({ ...prev, [url]: ok }));
+        }));
+        setCheckingHealth(false);
+    };
+
+    const handleAddServer = () => {
+        let url = newServer.trim().replace(/\/+$/, '');
+        if (!url) return;
+        if (!/^https?:\/\//.test(url)) {
+            url = 'https://' + url;
+        }
+        if (servers.includes(url)) {
+            toast('Server already exists', 'error');
+            return;
+        }
+        blossomServers.addServer(url);
+        setServers(blossomServers.getServers());
+        setNewServer('');
+        toast('Server added', 'success');
+        // Check health of new server
+        blossomServers.checkHealth(url).then(ok => {
+            setServerHealth(prev => ({ ...prev, [url]: ok }));
+        });
+    };
+
+    const handleRemoveServer = (url: string) => {
+        if (servers.length <= 1) {
+            toast('Must keep at least one server', 'error');
+            return;
+        }
+        blossomServers.removeServer(url);
+        setServers(blossomServers.getServers());
+        toast('Server removed', 'success');
+    };
+
+    const handleResetServers = () => {
+        blossomServers.resetToDefaults();
+        setServers(blossomServers.getServers());
+        toast('Blossom servers reset to defaults', 'success');
+        checkAllHealth();
+    };
+
+    const handleFetchUserServers = async () => {
+        setFetchingUser(true);
+        try {
+            const fetched = await invoke<string[]>('fetch_user_blossom_servers');
+            setUserServers(fetched);
+            publishedUserServersRef.current = [...fetched].sort();
+            if (fetched.length > 0) {
+                toast(`Fetched ${fetched.length} Blossom server(s) from Nostr`, 'success');
+            } else {
+                toast('No Blossom server list found on Nostr (kind 10063)');
+            }
+        } catch (e: any) {
+            toast('Error fetching: ' + e, 'error');
+        }
+        setFetchingUser(false);
+    };
+
+    const handleAddUserServer = () => {
+        let url = newUserServer.trim().replace(/\/+$/, '');
+        if (!url) return;
+        if (!/^https?:\/\//.test(url)) url = 'https://' + url;
+        if (userServers.includes(url)) {
+            toast('Server already in list', 'error');
+            return;
+        }
+        setUserServers(prev => [...prev, url]);
+        setNewUserServer('');
+    };
+
+    const handleRemoveUserServer = (url: string) => {
+        setUserServers(prev => prev.filter(s => s !== url));
+    };
+
+    const handlePublishUserServers = async () => {
+        setPublishingServers(true);
+        try {
+            await invoke('publish_user_blossom_servers', { servers: userServers });
+            publishedUserServersRef.current = [...userServers].sort();
+            toast('Blossom server list published!', 'success');
+        } catch (e: any) {
+            toast('Error publishing: ' + e, 'error');
+        }
+        setPublishingServers(false);
+    };
+
+    const currentUserUrls = [...userServers].sort();
+    const publishedUserUrls = publishedUserServersRef.current;
+    const isUserDirty = publishedUserUrls === null
+        ? userServers.length > 0
+        : JSON.stringify(currentUserUrls) !== JSON.stringify(publishedUserUrls);
+
+    return (
+        <div className="space-y-4 pb-[100px] animate-fade-in">
+            <button
+                onClick={onBack}
+                className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
+            >
+                <ArrowLeft className="w-4 h-4" /> Back
+            </button>
+
+            {/* Signer's local Blossom servers */}
+            <Card>
+                <CardContent className="pt-4">
+                    <div className="flex items-center justify-between mb-3">
+                        <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Signer's local Blossom servers</div>
+                        <div className="flex items-center gap-3">
+                            <button
+                                onClick={handleResetServers}
+                                className="text-[10px] text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
+                            >Reset</button>
+                            <button
+                                onClick={checkAllHealth}
+                                disabled={checkingHealth}
+                                className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors cursor-pointer disabled:opacity-50"
+                            >
+                                <RefreshCw className={cn("w-3 h-3", checkingHealth && "animate-spin")} />
+                                Check
+                            </button>
+                        </div>
+                    </div>
+
+                    <div className="flex gap-2 mb-3">
+                        <Input
+                            value={newServer}
+                            onChange={e => setNewServer(e.target.value)}
+                            placeholder="https://..."
+                            className="flex-1 h-9 text-sm"
+                            onKeyDown={e => e.key === 'Enter' && handleAddServer()}
+                        />
+                        <Button
+                            size="sm"
+                            className="h-9"
+                            onClick={handleAddServer}
+                            disabled={!newServer.trim()}
+                        >
+                            <Plus className="w-4 h-4" /> Add
+                        </Button>
+                    </div>
+
+                    {servers.length === 0 ? (
+                        <div className="py-4 text-center text-sm text-muted-foreground">
+                            No servers configured. Add one above.
+                        </div>
+                    ) : (
+                        <div className="divide-y divide-border">
+                            {servers.map(url => (
+                                <div key={url} className="flex items-center gap-3 py-3 first:pt-0 group">
+                                    <div className={cn(
+                                        "w-2 h-2 rounded-full shrink-0",
+                                        serverHealth[url] === true ? "bg-success" :
+                                            serverHealth[url] === false ? "bg-destructive" :
+                                                "bg-muted-foreground"
+                                    )} />
+                                    <span className="text-sm truncate flex-1">{url}</span>
+                                    <Badge variant="secondary" className="text-[10px] shrink-0">
+                                        {serverHealth[url] === true ? 'online' :
+                                            serverHealth[url] === false ? 'offline' :
+                                                'checking…'}
+                                    </Badge>
+                                    <button
+                                        className="text-muted-foreground hover:text-destructive transition-all cursor-pointer shrink-0 p-1"
+                                        onClick={() => handleRemoveServer(url)}
+                                    >
+                                        <X className="w-4 h-4" />
+                                    </button>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </CardContent>
+            </Card>
+
+            {/* User's Blossom servers (kind 10063) */}
+            <Card>
+                <CardContent className="pt-4">
+                    <div className="flex items-center justify-between mb-3">
+                        <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">User's Blossom servers</div>
+                        <button
+                            onClick={handleFetchUserServers}
+                            disabled={fetchingUser}
+                            className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors cursor-pointer disabled:opacity-50"
+                        >
+                            <RefreshCw className={cn("w-3 h-3", fetchingUser && "animate-spin")} />
+                            Fetch from Nostr
+                        </button>
+                    </div>
+
+                    <div className="flex gap-2 mb-3">
+                        <Input
+                            value={newUserServer}
+                            onChange={e => setNewUserServer(e.target.value)}
+                            placeholder="https://..."
+                            className="flex-1 h-9 text-sm"
+                            onKeyDown={e => e.key === 'Enter' && handleAddUserServer()}
+                        />
+                        <Button
+                            size="sm"
+                            className="h-9"
+                            onClick={handleAddUserServer}
+                            disabled={!newUserServer.trim()}
+                        >
+                            <Plus className="w-4 h-4" /> Add
+                        </Button>
+                    </div>
+
+                    {userServers.length === 0 ? (
+                        <div className="py-4 text-center text-sm text-muted-foreground">
+                            No user Blossom servers found. Fetch from Nostr or add manually.
+                        </div>
+                    ) : (
+                        <div className="divide-y divide-border">
+                            {userServers.map(url => (
+                                <div key={url} className="flex items-center gap-3 py-3 first:pt-0">
+                                    <Cloud className="w-4 h-4 text-muted-foreground shrink-0" />
+                                    <span className="text-sm truncate flex-1">{url}</span>
+                                    <button
+                                        className="text-muted-foreground hover:text-destructive transition-all cursor-pointer shrink-0 p-1"
+                                        onClick={() => handleRemoveUserServer(url)}
+                                    >
+                                        <X className="w-4 h-4" />
+                                    </button>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+
+                    <div className="pt-3 mt-2 border-t border-border">
+                        <Button
+                            size="sm"
+                            className="w-full"
+                            onClick={handlePublishUserServers}
+                            disabled={publishingServers || !isUserDirty}
+                        >
+                            {publishingServers ? 'Publishing…' : 'Save / Publish'}
+                        </Button>
+                    </div>
+                </CardContent>
+            </Card>
         </div>
     );
 }
@@ -696,7 +1396,8 @@ const VERSION_HISTORY = [
         title: 'Initial Release',
         changes: [
             'NIP-46 remote signer with multi-relay support',
-            'UPv2 password-based authentication',
+            'NIP-UPV2 password-based authentication',
+            'NIP-PC55 desktop counterpart to NIP-55',
             'Built-in Bitcoin wallet (on-chain)',
             'Cashu eCash wallet with NUT-11 P2PK locking',
             'DNN identity system integration',
@@ -705,7 +1406,7 @@ const VERSION_HISTORY = [
             'PIN-based lock screen with auto-lock timeout',
             'Offline login attempt detection',
             'Multi-keypair management with account switching',
-            'Cross-platform support (Windows, Linux (Android coming soon))',
+            'Cross-platform support',
         ],
     },
 ];
@@ -713,11 +1414,12 @@ const VERSION_HISTORY = [
 const DEV_NPUB = 'npub18n4ysp43ux5c98fs6h9c57qpr4p8r3j8f6e32v0vj8egzy878aqqyzzk9r';
 
 // ── About Page Component ──
-function AboutPage({ onBack, toast, onNavigateToWallet, onNavigateToEcashSend }: {
+function AboutPage({ onBack, toast, onNavigateToWallet, onNavigateToEcashSend, appState }: {
     onBack: () => void;
     toast: (msg: string, type?: 'error' | 'success' | 'info') => void;
     onNavigateToWallet?: (recipient: string) => void;
     onNavigateToEcashSend?: (recipient: string) => void;
+    appState: AppState;
 }) {
     const [expandedVersion, setExpandedVersion] = useState<string | null>(null);
     const [devProfile, setDevProfile] = useState<NostrProfile | null>(null);
@@ -727,6 +1429,190 @@ function AboutPage({ onBack, toast, onNavigateToWallet, onNavigateToEcashSend }:
     const [showTipModal, setShowTipModal] = useState(false);
     const [tipView, setTipView] = useState<'menu' | 'bitcoin' | 'ecash'>('menu');
     const [tipCopied, setTipCopied] = useState(false);
+    // Update state
+    const [checkingUpdate, setCheckingUpdate] = useState(false);
+    const [downloadingUpdate, setDownloadingUpdate] = useState(false);
+    const [updateInfo, setUpdateInfo] = useState<{
+        new_version: string; notes: string; has_platform_binary: boolean;
+        binary_hash?: string; binary_ext?: string;
+    } | null>(null);
+
+    // Developer publish state
+    const [showPublishModal, setShowPublishModal] = useState(false);
+    const [pubVersion, setPubVersion] = useState('');
+    const [pubNotes, setPubNotes] = useState('');
+    const [pubFiles, setPubFiles] = useState<Record<string, File | null>>({
+        'windows-x86_64': null,
+        'linux-x86_64': null,
+        'darwin-x86_64': null,
+        'darwin-aarch64': null,
+    });
+    const [publishing, setPublishing] = useState(false);
+    const [publishStatus, setPublishStatus] = useState('');
+    const [publishPhase, setPublishPhase] = useState<'files' | 'uploading' | 'review' | 'publishing'>('files');
+    type UploadResult = { server: string; method: 'upload'; success: boolean; error?: string };
+    const [uploadResults, setUploadResults] = useState<Record<string, UploadResult[]>>({});
+    const [platformHashes, setPlatformHashes] = useState<Record<string, { hash: string; ext: string }>>({});
+    const [uploadProgress, setUploadProgress] = useState<{ bytes_sent: number; total_bytes: number; startTime: number } | null>(null);
+    const [pubServerToggles, setPubServerToggles] = useState<Record<string, boolean>>(() => {
+        const servers = blossomServers.getServers();
+        return Object.fromEntries(servers.map(s => [s, true]));
+    });
+    const [showServerPicker, setShowServerPicker] = useState(false);
+
+    // Remote version history modal state
+    const [showRemoteVersions, setShowRemoteVersions] = useState(false);
+    const [remoteVersions, setRemoteVersions] = useState<any[]>([]);
+    const [fetchingVersions, setFetchingVersions] = useState(false);
+    const [expandedRemoteVersion, setExpandedRemoteVersion] = useState<string | null>(null);
+
+    // Detect if current user is the DENOS developer
+    const devPubkeyHex = (() => {
+        try {
+            const decoded = nip19.decode(DEV_NPUB);
+            return decoded.type === 'npub' ? decoded.data as string : null;
+        } catch { return null; }
+    })();
+    const isDeveloper = devPubkeyHex && appState.active_keypair === devPubkeyHex;
+
+    const handleCheckForUpdate = async () => {
+        setCheckingUpdate(true);
+        try {
+            const info = await invoke<any>('check_for_update');
+            if (info) {
+                setUpdateInfo(info);
+                toast(`Update available: v${info.new_version}`, 'success');
+            } else {
+                setUpdateInfo(null);
+                toast('You are on the latest version', 'success');
+            }
+        } catch (e: any) {
+            toast('Failed to check: ' + e, 'error');
+        }
+        setCheckingUpdate(false);
+    };
+
+    const handleDownloadUpdate = async () => {
+        if (!updateInfo?.binary_hash || !updateInfo?.binary_ext) {
+            toast('No binary available for your platform', 'error');
+            return;
+        }
+        setDownloadingUpdate(true);
+        try {
+            const servers = blossomServers.getServers();
+            await invoke('download_and_install_update', {
+                hash: updateInfo.binary_hash,
+                ext: updateInfo.binary_ext,
+                blossomServers: servers,
+            });
+            toast('Update installed — restarting…', 'success');
+        } catch (e: any) {
+            toast('Update failed: ' + e, 'error');
+        }
+        setDownloadingUpdate(false);
+    };
+
+    const handleUploadFiles = async () => {
+        if (!pubVersion.trim()) { toast('Version is required', 'error'); return; }
+        const filesToUpload = Object.entries(pubFiles).filter(([, f]) => f !== null) as [string, File][];
+        if (filesToUpload.length === 0) { toast('Add at least one platform binary', 'error'); return; }
+
+        setPublishing(true);
+        setPublishPhase('uploading');
+        const servers = blossomServers.getServers().filter(s => pubServerToggles[s] !== false);
+        if (servers.length === 0) { toast('Enable at least one Blossom server', 'error'); setPublishing(false); setPublishPhase('files'); return; }
+        const results: Record<string, UploadResult[]> = {};
+        const hashes: Record<string, { hash: string; ext: string }> = {};
+
+        for (const [platform, file] of filesToUpload) {
+            results[platform] = [];
+            setPublishStatus(`Preparing ${platform}…`);
+
+            const arrayBuf = await file.arrayBuffer();
+            const bytes = new Uint8Array(arrayBuf);
+            const hashBuf = await crypto.subtle.digest('SHA-256', bytes);
+            const hashArr = Array.from(new Uint8Array(hashBuf));
+            const fileHash = hashArr.map(b => b.toString(16).padStart(2, '0')).join('');
+
+            const ext = file.name.includes('.') ? file.name.substring(file.name.indexOf('.') + 1) : 'bin';
+            // Chunked base64 encoding (spread operator crashes on large arrays)
+            let binStr = '';
+            const chunkSize = 8192;
+            for (let i = 0; i < bytes.length; i += chunkSize) {
+                binStr += String.fromCharCode(...bytes.subarray(i, Math.min(i + chunkSize, bytes.length)));
+            }
+            const b64 = btoa(binStr);
+            let tempPath = '';
+            try {
+                tempPath = await invoke<string>('write_temp_file', {
+                    filename: `denos_pub_${platform}.${ext}`,
+                    dataBase64: b64,
+                });
+            } catch (e: any) {
+                toast(`Failed to stage ${platform}: ${e}`, 'error');
+                continue;
+            }
+
+            // Upload directly to each server
+            for (const server of servers) {
+                const hostname = new URL(server).hostname;
+                try {
+                    setPublishStatus(`Uploading ${platform} to ${hostname}…`);
+                    setUploadProgress({ bytes_sent: 0, total_bytes: bytes.length, startTime: Date.now() });
+                    const unlisten = await listen<{ bytes_sent: number; total_bytes: number }>('upload-progress', (ev) => {
+                        setUploadProgress(prev => prev ? { ...prev, bytes_sent: ev.payload.bytes_sent } : null);
+                    });
+                    try {
+                        await invoke<string>('upload_to_blossom', { filePath: tempPath, serverUrl: server, platform });
+                        results[platform].push({ server: hostname, method: 'upload', success: true });
+                    } finally {
+                        unlisten();
+                        setUploadProgress(null);
+                    }
+                } catch (e: any) {
+                    results[platform].push({ server: hostname, method: 'upload', success: false, error: String(e) });
+                }
+            }
+
+            hashes[platform] = { hash: fileHash, ext };
+        }
+
+        setUploadResults(results);
+        setPlatformHashes(hashes);
+        setPublishing(false);
+        setPublishStatus('');
+        setPublishPhase('review');
+    };
+
+    const handleConfirmPublish = async () => {
+        if (Object.keys(platformHashes).length === 0) {
+            toast('No platform binaries were uploaded successfully', 'error');
+            return;
+        }
+        setPublishPhase('publishing');
+        setPublishing(true);
+        try {
+            const manifest = {
+                version: pubVersion.trim(),
+                notes: pubNotes.trim(),
+                pub_date: new Date().toISOString(),
+                platforms: platformHashes,
+            };
+            const eventId = await invoke<string>('publish_update_event', {
+                manifestJson: JSON.stringify(manifest),
+            });
+            toast(`Update v${pubVersion} published! Event: ${eventId.slice(0, 12)}…`, 'success');
+            setShowPublishModal(false);
+            setPubVersion(''); setPubNotes('');
+            setPubFiles({ 'windows-x86_64': null, 'linux-x86_64': null, 'darwin-x86_64': null, 'darwin-aarch64': null });
+            setPublishPhase('files');
+            setUploadResults({}); setPlatformHashes({});
+        } catch (e: any) {
+            toast('Publish failed: ' + e, 'error');
+            setPublishPhase('review');
+        }
+        setPublishing(false);
+    };
 
     // Derive dev's taproot address from npub
     let devTaprootAddress = '';
@@ -789,12 +1675,49 @@ function AboutPage({ onBack, toast, onNavigateToWallet, onNavigateToEcashSend }:
                 </p>
             </div>
 
+            {/* ── Check for Updates ── */}
+            <Button
+                className="w-full cursor-pointer"
+                variant={updateInfo ? 'default' : 'secondary'}
+                onClick={updateInfo ? handleDownloadUpdate : handleCheckForUpdate}
+                disabled={checkingUpdate || downloadingUpdate}
+            >
+                {checkingUpdate ? (
+                    <><RefreshCw className="w-4 h-4 mr-2 animate-spin" /> Checking…</>
+                ) : downloadingUpdate ? (
+                    <><RefreshCw className="w-4 h-4 mr-2 animate-spin" /> Downloading update…</>
+                ) : updateInfo ? (
+                    <><Download className="w-4 h-4 mr-2" /> Update Now — v{updateInfo.new_version}</>
+                ) : (
+                    <><RefreshCw className="w-4 h-4 mr-2" /> Check for Updates</>
+                )}
+            </Button>
+
             {/* ── Version History ── */}
             <Card>
                 <CardHeader className="pb-2">
-                    <CardTitle className="flex items-center gap-2 text-sm">
-                        Version History
-                    </CardTitle>
+                    <div className="w-full flex items-center justify-between">
+                        <CardTitle className="flex items-center gap-2 text-sm">
+                            Version History
+                        </CardTitle>
+                        <button
+                            onClick={async () => {
+                                setShowRemoteVersions(true);
+                                setFetchingVersions(true);
+                                try {
+                                    const versions = await invoke<any[]>('fetch_version_history');
+                                    setRemoteVersions(versions);
+                                } catch (e: any) {
+                                    toast('Failed to fetch: ' + e, 'error');
+                                }
+                                setFetchingVersions(false);
+                            }}
+                            className="text-muted-foreground hover:text-foreground transition-colors cursor-pointer p-1"
+                            title="View published versions from Nostr"
+                        >
+                            <Cloud className="w-4 h-4" />
+                        </button>
+                    </div>
                 </CardHeader>
                 <CardContent className="space-y-1">
                     {VERSION_HISTORY.map(v => (
@@ -879,6 +1802,342 @@ function AboutPage({ onBack, toast, onNavigateToWallet, onNavigateToEcashSend }:
                     </Button>
                 </CardContent>
             </Card>
+
+            {/* ── Developer Publish (only visible to DENOS creator) ── */}
+            {isDeveloper && (
+                <Button
+                    className="w-full cursor-pointer"
+                    variant="secondary"
+                    onClick={() => setShowPublishModal(true)}
+                >
+                    <Cloud className="w-4 h-4 mr-2" /> Publish New Update
+                </Button>
+            )}
+
+            {/* ── Publish Modal ── */}
+            <Dialog open={showPublishModal} onOpenChange={setShowPublishModal}>
+                <DialogContent className="max-w-md max-h-[80vh] overflow-y-auto">
+                    <DialogHeader>
+                        <DialogTitle className="flex items-center gap-2">
+                            <Cloud className="w-5 h-5" /> Publish New Update
+                        </DialogTitle>
+                    </DialogHeader>
+
+                    <div className="space-y-4 pt-2">
+                        <div className="space-y-1.5">
+                            <label className="text-xs font-medium text-muted-foreground">Version</label>
+                            <Input
+                                value={pubVersion}
+                                onChange={e => setPubVersion(e.target.value)}
+                                placeholder="0.2.0"
+                                className="h-9"
+                            />
+                        </div>
+
+                        <div className="space-y-1.5">
+                            <label className="text-xs font-medium text-muted-foreground">Release Notes</label>
+                            <textarea
+                                value={pubNotes}
+                                onChange={e => setPubNotes(e.target.value)}
+                                placeholder="What's new in this version…"
+                                className="w-full h-20 px-3 py-2 text-sm rounded-lg border border-border bg-secondary/30 resize-none focus:outline-none focus:ring-1 focus:ring-primary"
+                            />
+                        </div>
+
+                        {/* Blossom server picker button */}
+                        {(() => {
+                            const allServers = blossomServers.getServers();
+                            const enabledCount = allServers.filter(s => pubServerToggles[s] !== false).length;
+                            return (
+                                <button
+                                    type="button"
+                                    onClick={() => setShowServerPicker(true)}
+                                    className="w-full flex items-center justify-between px-3 py-2 rounded-lg border border-border bg-secondary/30 hover:bg-secondary/50 transition-colors text-sm cursor-pointer"
+                                >
+                                    <span className="flex items-center gap-2">
+                                        <Cloud className="w-4 h-4 text-muted-foreground" />
+                                        <span>Blossom Servers</span>
+                                    </span>
+                                    <span className={`text-xs font-mono px-2 py-0.5 rounded-full ${enabledCount === allServers.length ? 'bg-green-500/20 text-green-400' : enabledCount === 0 ? 'bg-red-500/20 text-red-400' : 'bg-yellow-500/20 text-yellow-400'}`}>
+                                        {enabledCount}/{allServers.length}
+                                    </span>
+                                </button>
+                            );
+                        })()}
+
+                        <div className="space-y-2">
+                            <label className="text-xs font-medium text-muted-foreground">Platform Binaries</label>
+                            {Object.entries(pubFiles).map(([platform, file]) => {
+                                const labels: Record<string, string> = {
+                                    'windows-x86_64': 'Windows (.exe)',
+                                    'linux-x86_64': 'Linux (.AppImage)',
+                                    'darwin-x86_64': 'macOS Intel (.dmg)',
+                                    'darwin-aarch64': 'macOS ARM (.dmg)',
+                                };
+                                return (
+                                    <div
+                                        key={platform}
+                                        className={`relative flex items-center gap-3 p-3 rounded-lg border-2 border-dashed transition-colors ${file ? 'border-green-500/40 bg-green-500/5' : 'border-border hover:border-primary/40'
+                                            }`}
+                                        onDragOver={e => { e.preventDefault(); e.currentTarget.classList.add('border-primary'); }}
+                                        onDragLeave={e => { e.currentTarget.classList.remove('border-primary'); }}
+                                        onDrop={e => {
+                                            e.preventDefault();
+                                            e.currentTarget.classList.remove('border-primary');
+                                            const f = e.dataTransfer.files[0];
+                                            if (f) setPubFiles(prev => ({ ...prev, [platform]: f }));
+                                        }}
+                                    >
+                                        <div className="flex-1 min-w-0">
+                                            <p className="text-xs font-medium">{labels[platform] || platform}</p>
+                                            {file ? (
+                                                <p className="text-[11px] text-green-500 truncate">{file.name} ({(file.size / 1024 / 1024).toFixed(1)} MB)</p>
+                                            ) : (
+                                                <p className="text-[11px] text-muted-foreground">Drop file here or click to browse</p>
+                                            )}
+                                        </div>
+                                        {file ? (
+                                            <button
+                                                onClick={() => setPubFiles(prev => ({ ...prev, [platform]: null }))}
+                                                className="p-1 text-muted-foreground hover:text-foreground"
+                                            >
+                                                <X className="w-4 h-4" />
+                                            </button>
+                                        ) : (
+                                            <label className="p-1.5 rounded-md bg-secondary hover:bg-secondary/80 cursor-pointer">
+                                                <Plus className="w-4 h-4" />
+                                                <input
+                                                    type="file"
+                                                    className="hidden"
+                                                    onChange={e => {
+                                                        const f = e.target.files?.[0];
+                                                        if (f) setPubFiles(prev => ({ ...prev, [platform]: f }));
+                                                    }}
+                                                />
+                                            </label>
+                                        )}
+                                    </div>
+                                );
+                            })}
+                        </div>
+
+                        {publishStatus && (
+                            <p className="text-xs text-muted-foreground animate-pulse">{publishStatus}</p>
+                        )}
+
+                        {/* Upload progress bar */}
+                        {uploadProgress && (() => {
+                            const pct = Math.round((uploadProgress.bytes_sent / uploadProgress.total_bytes) * 100);
+                            const elapsed = (Date.now() - uploadProgress.startTime) / 1000;
+                            const rate = elapsed > 0.5 ? uploadProgress.bytes_sent / elapsed : 0;
+                            const rateMB = (rate / (1024 * 1024)).toFixed(2);
+                            const sentMB = (uploadProgress.bytes_sent / (1024 * 1024)).toFixed(1);
+                            const totalMB = (uploadProgress.total_bytes / (1024 * 1024)).toFixed(1);
+                            return (
+                                <div className="space-y-1">
+                                    <div className="w-full h-2 rounded-full bg-secondary overflow-hidden">
+                                        <div
+                                            className="h-full rounded-full bg-green-500 transition-all duration-150"
+                                            style={{ width: `${pct}%` }}
+                                        />
+                                    </div>
+                                    <div className="flex justify-between text-[10px] text-muted-foreground font-mono">
+                                        <span>{sentMB} / {totalMB} MB</span>
+                                        <span>{pct}%{rate > 0 ? ` · ${rateMB} MB/s` : ''}</span>
+                                    </div>
+                                </div>
+                            );
+                        })()}
+
+                        {/* Phase: files → Upload button */}
+                        {publishPhase === 'files' && (
+                            <Button
+                                className="w-full cursor-pointer"
+                                onClick={handleUploadFiles}
+                                disabled={!pubVersion.trim() || Object.values(pubFiles).every(f => f === null)}
+                            >
+                                <Cloud className="w-4 h-4 mr-2" /> Upload to Blossom Servers
+                            </Button>
+                        )}
+
+                        {/* Phase: uploading → spinner */}
+                        {publishPhase === 'uploading' && (
+                            <Button className="w-full" disabled>
+                                <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> Uploading…
+                            </Button>
+                        )}
+
+                        {/* Phase: review → results summary + confirm */}
+                        {publishPhase === 'review' && (
+                            <div className="space-y-3">
+                                <h4 className="text-sm font-semibold">Upload Results</h4>
+                                {Object.entries(uploadResults).map(([platform, results]) => {
+                                    const hasSuccess = results.some(r => r.success);
+                                    return (
+                                        <div key={platform} className="rounded-lg border border-border/50 p-3 space-y-1.5">
+                                            <div className="flex items-center gap-2">
+                                                <span className={`w-2 h-2 rounded-full ${hasSuccess ? 'bg-green-500' : 'bg-red-500'}`} />
+                                                <span className="text-sm font-medium">{platform}</span>
+                                                {platformHashes[platform] && (
+                                                    <span className="text-[10px] text-muted-foreground font-mono ml-auto">
+                                                        {platformHashes[platform].hash.slice(0, 12)}…
+                                                    </span>
+                                                )}
+                                            </div>
+                                            {results.map((r, i) => (
+                                                <div key={i} className="flex items-center gap-2 text-xs pl-4">
+                                                    <span className={r.success ? 'text-green-500' : 'text-red-400'}>
+                                                        {r.success ? '✓' : '✗'}
+                                                    </span>
+                                                    <span className="text-muted-foreground">{r.server}</span>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    );
+                                })}
+
+                                {Object.keys(platformHashes).length === 0 && (
+                                    <p className="text-sm text-red-400">All uploads failed. Cannot publish.</p>
+                                )}
+
+                                {Object.keys(platformHashes).length > 0 && (
+                                    <Button
+                                        className="w-full cursor-pointer"
+                                        onClick={handleConfirmPublish}
+                                        disabled={publishing}
+                                    >
+                                        {publishing ? (
+                                            <><RefreshCw className="w-4 h-4 mr-2 animate-spin" /> Signing & Publishing…</>
+                                        ) : (
+                                            <><Shield className="w-4 h-4 mr-2" /> Confirm & Publish kind 30078</>
+                                        )}
+                                    </Button>
+                                )}
+
+                                <button
+                                    onClick={() => { setPublishPhase('files'); setUploadResults({}); setPlatformHashes({}); }}
+                                    className="text-xs text-muted-foreground hover:text-foreground mx-auto block"
+                                >
+                                    ← Back to files
+                                </button>
+                            </div>
+                        )}
+                    </div>
+                </DialogContent>
+            </Dialog>
+
+            {/* ── Server Picker Modal ── */}
+            <Dialog open={showServerPicker} onOpenChange={setShowServerPicker}>
+                <DialogContent className="max-w-sm">
+                    <div className="space-y-4 pt-2">
+                        <h3 className="text-sm font-semibold flex items-center gap-2">
+                            <Cloud className="w-4 h-4" /> Upload Targets
+                        </h3>
+                        <p className="text-xs text-muted-foreground">Choose which Blossom servers to upload to.</p>
+                        <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+                            {blossomServers.getServers().map(server => {
+                                const hostname = new URL(server).hostname;
+                                return (
+                                    <div key={server} className="flex items-center justify-between px-3 py-2.5 rounded-lg border border-border/50 bg-secondary/20">
+                                        <span className="text-sm">{hostname}</span>
+                                        <Switch
+                                            checked={pubServerToggles[server] !== false}
+                                            onCheckedChange={(checked) => setPubServerToggles(prev => ({ ...prev, [server]: checked }))}
+                                        />
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    </div>
+                </DialogContent>
+            </Dialog>
+
+            {/* ── Remote Version History Modal ── */}
+            <Dialog open={showRemoteVersions} onOpenChange={setShowRemoteVersions}>
+                <DialogContent className="max-w-md">
+                    <DialogHeader>
+                        <DialogTitle className="flex items-center gap-2">
+                            <Cloud className="w-5 h-5" /> Published Versions
+                        </DialogTitle>
+                    </DialogHeader>
+                    <div className="max-h-[60vh] overflow-y-auto space-y-1 pr-1">
+                        {fetchingVersions ? (
+                            <div className="flex items-center justify-center py-8">
+                                <RefreshCw className="w-5 h-5 animate-spin text-muted-foreground" />
+                            </div>
+                        ) : remoteVersions.length === 0 ? (
+                            <div className="py-8 text-center text-sm text-muted-foreground">
+                                No published versions found on Nostr.
+                            </div>
+                        ) : (
+                            remoteVersions.map(v => (
+                                <div key={v.version} className="rounded-lg border border-border/50 overflow-hidden">
+                                    <button
+                                        onClick={() => setExpandedRemoteVersion(expandedRemoteVersion === v.version ? null : v.version)}
+                                        className="w-full flex items-center justify-between p-3 text-left cursor-pointer hover:bg-secondary/40 transition-colors"
+                                    >
+                                        <div>
+                                            <span className="text-sm font-semibold">v{v.version}</span>
+                                            <span className="text-xs text-muted-foreground ml-2">
+                                                {v.pub_date ? new Date(v.pub_date).toLocaleDateString('en-US', { month: 'short', year: 'numeric' }) : ''}
+                                            </span>
+                                        </div>
+                                        <ChevronDown className={cn(
+                                            "w-4 h-4 text-muted-foreground transition-transform duration-200",
+                                            expandedRemoteVersion === v.version && "rotate-180"
+                                        )} />
+                                    </button>
+                                    {expandedRemoteVersion === v.version && (
+                                        <div className="px-3 pb-3 space-y-3 animate-fade-in border-t border-border/30 pt-3">
+                                            {v.notes && (
+                                                <p className="text-xs text-muted-foreground leading-relaxed whitespace-pre-wrap">{v.notes}</p>
+                                            )}
+                                            {v.platforms && Object.keys(v.platforms).length > 0 && (
+                                                <div className="space-y-1.5">
+                                                    <div className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">Downloads</div>
+                                                    <div className="grid gap-1.5">
+                                                        {Object.entries(v.platforms).map(([platform, info]: [string, any]) => {
+                                                            const labels: Record<string, string> = {
+                                                                'windows-x86_64': '🪟 Windows',
+                                                                'linux-x86_64': '🐧 Linux',
+                                                                'darwin-x86_64': '🍎 macOS (Intel)',
+                                                                'darwin-aarch64': '🍎 macOS (ARM)',
+                                                            };
+                                                            const label = labels[platform] || platform;
+                                                            // Construct download URL from first available Blossom server
+                                                            const servers = blossomServers.getServers();
+                                                            const downloadUrl = servers.length > 0
+                                                                ? `${servers[0]}/${info.hash}`
+                                                                : null;
+                                                            return (
+                                                                <button
+                                                                    key={platform}
+                                                                    onClick={() => {
+                                                                        if (downloadUrl) {
+                                                                            window.open(downloadUrl, '_blank');
+                                                                        } else {
+                                                                            toast('No Blossom server configured', 'error');
+                                                                        }
+                                                                    }}
+                                                                    className="flex items-center gap-2 px-3 py-2 rounded-lg bg-secondary/30 hover:bg-secondary/60 transition-colors text-sm cursor-pointer"
+                                                                >
+                                                                    <Download className="w-3.5 h-3.5 text-muted-foreground" />
+                                                                    <span>{label}</span>
+                                                                    <span className="text-[10px] text-muted-foreground ml-auto">.{info.ext}</span>
+                                                                </button>
+                                                            );
+                                                        })}
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+                            ))
+                        )}
+                    </div>
+                </DialogContent>
+            </Dialog>
 
             {/* ── Tip Modal ── */}
             <Dialog open={showTipModal} onOpenChange={(open) => { setShowTipModal(open); if (!open) setTipView('menu'); }}>

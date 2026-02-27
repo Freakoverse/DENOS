@@ -22,6 +22,7 @@ tauri-plugin-opener = "2"
 tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
@@ -31,11 +32,15 @@ bech32 = "0.11"
 tokio = { version = "1", features = ["full"] }
 nostr-sdk = { version = "0.39", features = ["nip04", "nip06", "nip44"] }
 bip39 = { version = "2", features = ["std"] }
-uuid = { version = "1", features = ["v4"] }
 hkdf = "0.12"
 sha2 = "0.10"
 tokio-tungstenite = "0.24"
 futures-util = "0.3"
+reqwest = { version = "0.12", features = ["rustls-tls", "stream"], default-features = false }
+base64 = "0.22"
+async-stream = "0.3"
+bytes = "1"
+url = "2"
 
 [profile.dev]
 incremental = true

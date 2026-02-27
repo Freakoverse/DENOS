@@ -3,7 +3,9 @@ import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { X } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-const Dialog = DialogPrimitive.Root;
+const Dialog = ({ modal = false, ...props }: React.ComponentProps<typeof DialogPrimitive.Root>) => (
+    <DialogPrimitive.Root modal={modal} {...props} />
+);
 const DialogTrigger = DialogPrimitive.Trigger;
 const DialogPortal = DialogPrimitive.Portal;
 const DialogClose = DialogPrimitive.Close;
@@ -29,8 +31,14 @@ const DialogContent = React.forwardRef<
     React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content> & { hideClose?: boolean }
 >(({ className, children, hideClose, ...props }, ref) => (
     <DialogPortal>
-        {/* Plain div backdrop — always renders even with modal={false} */}
-        <div className="fixed inset-0 top-[36px] z-[65] bg-black/60 backdrop-blur-sm animate-fade-in" />
+        {/* Backdrop — clicking it closes the dialog (unless hideClose) */}
+        {hideClose ? (
+            <div className="fixed inset-0 top-[36px] z-[65] bg-black/60 backdrop-blur-sm animate-fade-in" />
+        ) : (
+            <DialogPrimitive.Close asChild>
+                <div className="fixed inset-0 top-[36px] z-[65] bg-black/60 backdrop-blur-sm animate-fade-in cursor-default" />
+            </DialogPrimitive.Close>
+        )}
         <DialogPrimitive.Content
             ref={ref}
             className={cn(
@@ -40,8 +48,9 @@ const DialogContent = React.forwardRef<
                 className
             )}
             style={{ translate: '-50% -50%' }}
+            onPointerDownOutside={(e) => e.preventDefault()}
+            onInteractOutside={(e) => e.preventDefault()}
             {...(hideClose ? {
-                onPointerDownOutside: (e: Event) => e.preventDefault(),
                 onEscapeKeyDown: (e: Event) => e.preventDefault(),
             } : {})}
             {...props}

@@ -30,6 +30,11 @@ export interface SeedInfo {
     keypair_pubkeys: string[];
 }
 
+export interface ProfileListItem {
+    id: string;
+    name: string;
+}
+
 export interface AppState {
     keypairs: Keypair[];
     active_keypair: string | null;
@@ -38,6 +43,8 @@ export interface AppState {
     initialized: boolean;
     pin_set: boolean;
     lock_timeout_minutes: number;
+    profiles: ProfileListItem[];
+    active_profile: string | null;
 }
 
 /* ── Fetch profile picture from kind:0 ── */
@@ -115,15 +122,20 @@ function App() {
         initialized: false,
         pin_set: false,
         lock_timeout_minutes: 5,
+        profiles: [],
+        active_profile: null,
     });
     const [logs, setLogs] = useState<string[]>([]);
     const [profilePic, setProfilePic] = useState<string | null>(null);
     const [isLocked, setIsLocked] = useState(true); // Start locked
+    // Reset onboarding state when locking so new profiles see the welcome screen
+    useEffect(() => { if (isLocked) setShowOnboarding(true); }, [isLocked]);
     const [showOnboarding, setShowOnboarding] = useState(true); // stays true until explicitly dismissed
     const [signerStarted, setSignerStarted] = useState(false);
     const inactivityTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const mainDrag = useDragScroll();
     const navDrag = useDragScroll();
+    const [navResetKey, setNavResetKey] = useState(0);
     const [commerceEnabled, setCommerceEnabled] = useState(() => localStorage.getItem('denos-commerce-enabled') === 'true');
 
     // Listen for commerce toggle changes from Settings
@@ -140,6 +152,7 @@ function App() {
     useEffect(() => {
         const unlisten = listen<AppState>('app-state', (event) => {
             setAppState(event.payload);
+            if (event.payload.keypairs.length > 0) setShowOnboarding(false);
         });
         const unlistenLogs = listen<string>('log-event', (event) => {
             setLogs((prev) => [...prev.slice(-200), event.payload]);
@@ -238,6 +251,8 @@ function App() {
             {isLocked && appState.initialized && (
                 <LockScreen
                     pinSet={appState.pin_set}
+                    profiles={appState.profiles}
+                    lastProfileId={appState.active_profile}
                     signerRunning={signerStarted}
                     onUnlock={handleUnlock}
                 />
@@ -263,7 +278,7 @@ function App() {
                 </div>
             </div>
             {/* App header */}
-            <nav className="fixed top-[36px] left-0 right-0 z-50 flex flex-col gap-2.5 pt-2 pointer-events-none">
+            <nav className="fixed top-[36px] left-0 right-0 z-50 flex flex-col gap-2.5 pt-2.5 pointer-events-none">
                 <div className="px-2.5 pointer-events-auto">
                     <div className="top-bar-inner flex w-full items-center justify-between bg-card/85 backdrop-blur-lg rounded-xl px-4 py-2.5 border border-white/5">
                         <button onClick={() => setTab('dashboard')} className="flex items-center gap-2.5 cursor-pointer">
@@ -302,16 +317,12 @@ function App() {
                     <div className="animate-fade-in h-full pt-[115px]">
                         <Onboarding onComplete={() => setShowOnboarding(false)} />
                     </div>
-                ) : showOnboarding ? (
-                    <div className="animate-fade-in h-full pt-[115px]">
-                        <Onboarding onComplete={() => setShowOnboarding(false)} />
-                    </div>
                 ) : (
-                    <div className="animate-fade-in h-full pt-[115px]">
+                    <div key={navResetKey} className="animate-fade-in h-full pt-[115px]">
                         {tab === 'dashboard' && <SignerDashboard activePubkey={appState.active_keypair} activeNpub={appState.keypairs.find(k => k.pubkey === appState.active_keypair)?.npub} />}
                         {tab === 'wallet' && <Wallet activePubkey={appState.active_keypair} sendPrefill={sendPrefill} onPrefillConsumed={() => setSendPrefill(null)} ecashRecipient={ecashPrefill?.recipient} ecashAutoSend={ecashPrefill?.autoSend} onEcashPrefillConsumed={() => setEcashPrefill(null)} />}
                         {tab === 'ids' && <IdsView activePubkey={appState.active_keypair} activeNpub={appState.keypairs.find(k => k.pubkey === appState.active_keypair)?.npub} onNavigateToWallet={(recipient, feeRate, amount) => { setSendPrefill({ recipient, amount: amount || 546, feeRate }); setTab('wallet'); }} />}
-                        {tab === 'settings' && <Settings logs={logs} appState={appState} onNavigateToWallet={(recipient) => { setSendPrefill({ recipient, amount: 546, feeRate: undefined }); setTab('wallet'); }} onNavigateToEcashSend={(recipient) => { setEcashPrefill({ recipient, autoSend: true }); setTab('wallet'); }} />}
+                        {tab === 'settings' && <Settings logs={logs} appState={appState} onLock={() => setIsLocked(true)} onNavigateToWallet={(recipient) => { setSendPrefill({ recipient, amount: 546, feeRate: undefined }); setTab('wallet'); }} onNavigateToEcashSend={(recipient) => { setEcashPrefill({ recipient, autoSend: true }); setTab('wallet'); }} />}
                         {tab === 'commerce' && (
                             <div className="flex flex-col items-center justify-center text-center py-20 px-6 animate-fade-in">
                                 <div className="w-16 h-16 rounded-2xl bg-primary/10 flex items-center justify-center mb-5">
@@ -348,7 +359,7 @@ function App() {
                                         ? "text-primary"
                                         : "text-muted-foreground hover:text-foreground"
                                 )}
-                                onClick={() => { setTab(id); setShowProfile(false); }}
+                                onClick={() => { setTab(id); setShowProfile(false); setNavResetKey(k => k + 1); }}
                             >
                                 <Icon className="w-5 h-5" strokeWidth={isActive ? 2.5 : 1.8} />
                                 <span className={cn(

@@ -1,7 +1,7 @@
 use crate::state::{AppState, PendingReconnect, Upv2LoginKey, Upv2Session, Upv2Challenge, LoginAttempt, PendingRequest, SigningHistoryEntry};
 use crate::nip46::find_existing_by_name;
 use nostr_sdk::prelude::*;
-use nostr_sdk::nips::nip44;
+use nostr_sdk::nips::{nip04, nip44};
 use ::hkdf::Hkdf;
 use sha2::Sha256;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -339,14 +339,20 @@ pub async fn handle_upv2_event(
         return;
     }
 
-    // Decrypt NIP-44 content
-    let decrypted = match nip44::decrypt(signer_keys.secret_key(), &sender_pubkey, &event.content) {
-        Ok(text) => text,
-        Err(e) => {
-            warn!("[UPV2] Failed to decrypt kind 24134 event: {}", e);
-            return;
+    // Try NIP-44 decrypt first, then NIP-04 fallback — track which one worked
+    let (decrypted, use_nip44): (String, bool) = match nip44::decrypt(signer_keys.secret_key(), &sender_pubkey, &event.content) {
+        Ok(text) => (text, true),
+        Err(_) => {
+            match nip04::decrypt(signer_keys.secret_key(), &sender_pubkey, &event.content) {
+                Ok(text) => (text, false),
+                Err(e) => {
+                    warn!("[UPV2] Failed to decrypt kind 24134 event (NIP-44 + NIP-04): {}", e);
+                    return;
+                }
+            }
         }
     };
+    let enc_label = if use_nip44 { "NIP-44" } else { "NIP-04" };
 
     // Extract action and session_id from tags
     let action = event.tags.iter()
@@ -368,18 +374,21 @@ pub async fn handle_upv2_event(
     };
 
     let fp = fingerprint(&sender_hex);
-    info!("[UPV2] action='{}' from {} session={}…", action, fp, &session_id[..8.min(session_id.len())]);
-    emit_log(app, &format!("[UPV2] → action='{}' session={}…", action, &session_id[..8.min(session_id.len())]));
+    info!("[UPV2] action='{}' from {} session={}… ({})", action, fp, &session_id[..8.min(session_id.len())], enc_label);
+    emit_log(app, &format!("[UPV2] → action='{}' session={}… ({})", action, &session_id[..8.min(session_id.len())], enc_label));
 
     match action.as_str() {
         "request_challenge" => {
-            handle_request_challenge(app, signer_keys, client, &sender_pubkey, &sender_hex, &session_id, &decrypted).await;
+            handle_request_challenge(app, signer_keys, client, &sender_pubkey, &sender_hex, &session_id, &decrypted, use_nip44).await;
         }
         "login" => {
-            handle_login(app, signer_keys, client, &sender_pubkey, &sender_hex, &session_id, &decrypted, &event.id.to_hex()).await;
+            handle_login(app, signer_keys, client, &sender_pubkey, &sender_hex, &session_id, &decrypted, &event.id.to_hex(), use_nip44).await;
         }
         "sign_event" => {
-            handle_sign_event(app, signer_keys, client, &sender_pubkey, &sender_hex, &session_id, &decrypted).await;
+            handle_sign_event(app, signer_keys, client, &sender_pubkey, &sender_hex, &session_id, &decrypted, use_nip44).await;
+        }
+        "nip04_encrypt" | "nip04_decrypt" | "nip44_encrypt" | "nip44_decrypt" => {
+            handle_encrypt_decrypt(app, signer_keys, client, &sender_pubkey, &sender_hex, &session_id, &decrypted, &action, use_nip44).await;
         }
         _ => { warn!("[UPV2] Unknown action: {}", action); }
     }
@@ -397,6 +406,7 @@ async fn handle_request_challenge(
     sender_hex: &str,
     session_id: &str,
     _decrypted: &str,
+    use_nip44: bool,
 ) {
     let state: tauri::State<'_, AppState> = app.state();
     let fp = fingerprint(sender_hex);
@@ -416,7 +426,7 @@ async fn handle_request_challenge(
     }
 
     // Issue challenge automatically (the login_pk already matches our stored key)
-    issue_challenge(app, signer_keys, client, sender_pubkey, session_id, sender_hex).await;
+    issue_challenge(app, signer_keys, client, sender_pubkey, session_id, sender_hex, use_nip44).await;
 }
 
 async fn issue_challenge(
@@ -426,6 +436,7 @@ async fn issue_challenge(
     recipient: &PublicKey,
     session_id: &str,
     login_pk: &str,
+    use_nip44: bool,
 ) {
     let state: tauri::State<'_, AppState> = app.state();
 
@@ -450,7 +461,7 @@ async fn issue_challenge(
     });
 
     emit_log(app, &format!("[UPV2] Sending challenge response to {}… session={}…", fingerprint(login_pk), &session_id[..8.min(session_id.len())]));
-    send_upv2_response(signer_keys, client, recipient, session_id, "challenge", &challenge_payload.to_string(), None).await;
+    send_upv2_response(signer_keys, client, recipient, session_id, "challenge", &challenge_payload.to_string(), None, use_nip44).await;
     emit_log(app, "[UPV2] ✅ Challenge response sent to relays");
 
     let fp = fingerprint(login_pk);
@@ -467,6 +478,7 @@ async fn handle_login(
     session_id: &str,
     decrypted: &str,
     event_id: &str,
+    use_nip44: bool,
 ) {
     let state: tauri::State<'_, AppState> = app.state();
     let fp = fingerprint(sender_hex);
@@ -588,7 +600,7 @@ async fn handle_login(
         "expires_at": (now_secs() + 86400) * 1000, // 24h from now, in milliseconds for JS Date
     });
 
-    send_upv2_response(signer_keys, client, sender_pubkey, session_id, "session_created", &confirm_payload.to_string(), None).await;
+    send_upv2_response(signer_keys, client, sender_pubkey, session_id, "session_created", &confirm_payload.to_string(), None, use_nip44).await;
 
     // Record successful login attempt
     {
@@ -619,6 +631,7 @@ async fn handle_sign_event(
     sender_hex: &str,
     session_id: &str,
     decrypted: &str,
+    use_nip44: bool,
 ) {
     let state: tauri::State<'_, AppState> = app.state();
     let fp = fingerprint(sender_hex);
@@ -637,7 +650,7 @@ async fn handle_sign_event(
             warn!("[UPV2] Sign request without session from {}", fp);
             emit_log(app, &format!("[UPV2] ⚠️ Sign without session from {}…", fp));
             let err = serde_json::json!({ "error": "No active session" });
-            send_upv2_response(signer_keys, client, sender_pubkey, session_id, "error", &err.to_string(), None).await;
+            send_upv2_response(signer_keys, client, sender_pubkey, session_id, "error", &err.to_string(), None, use_nip44).await;
             return;
         }
     };
@@ -681,7 +694,7 @@ async fn handle_sign_event(
 
     if should_auto_reject {
         let err = serde_json::json!({ "error": "Request auto-rejected by signer policy" });
-        send_upv2_response(signer_keys, client, sender_pubkey, session_id, "error", &err.to_string(), request_nonce.as_deref()).await;
+        send_upv2_response(signer_keys, client, sender_pubkey, session_id, "error", &err.to_string(), request_nonce.as_deref(), use_nip44).await;
         info!("[UPV2] Auto-rejected sign_event from '{}' ({})", client_name, fp);
         emit_log(app, &format!("[UPV2] ✗ Auto-rejected sign from '{}' ({}…)", client_name, fp));
 
@@ -706,7 +719,7 @@ async fn handle_sign_event(
         Err(e) => {
             error!("[UPV2] Sign failed: {}", e);
             let err = serde_json::json!({ "error": format!("Signing failed: {}", e) });
-            send_upv2_response(signer_keys, client, sender_pubkey, session_id, "error", &err.to_string(), request_nonce.as_deref()).await;
+            send_upv2_response(signer_keys, client, sender_pubkey, session_id, "error", &err.to_string(), request_nonce.as_deref(), use_nip44).await;
             return;
         }
     };
@@ -725,7 +738,7 @@ async fn handle_sign_event(
         let response = serde_json::json!({
             "event": serde_json::from_str::<serde_json::Value>(&signed_json).unwrap_or_default(),
         });
-        send_upv2_response(signer_keys, client, sender_pubkey, session_id, "signed_event", &response.to_string(), request_nonce.as_deref()).await;
+        send_upv2_response(signer_keys, client, sender_pubkey, session_id, "signed_event", &response.to_string(), request_nonce.as_deref(), use_nip44).await;
         info!("[UPV2] ✓ Auto-approved sign_event for '{}' ({})", client_name, fp);
         emit_log(app, &format!("[UPV2] ✓ Auto-signed for '{}' ({}…)", client_name, fp));
 
@@ -761,7 +774,7 @@ async fn handle_sign_event(
             created_at: now_secs(),
             kind: event_kind,
             response_json: Some(response_json),
-            use_nip44: true,
+            use_nip44,
             source: "upv2".to_string(),
             upv2_session_id: Some(session_id.to_string()),
             upv2_nonce: request_nonce.clone(),
@@ -780,6 +793,134 @@ async fn handle_sign_event(
     emit_signer_state(app, &state);
 }
 
+async fn handle_encrypt_decrypt(
+    app: &AppHandle,
+    signer_keys: &Keys,
+    client: &Client,
+    sender_pubkey: &PublicKey,
+    sender_hex: &str,
+    session_id: &str,
+    decrypted: &str,
+    method: &str,
+    use_nip44: bool,
+) {
+    let state: tauri::State<'_, AppState> = app.state();
+    let fp = fingerprint(sender_hex);
+
+    // Get session info + policy
+    let session_info = {
+        let sessions = state.upv2_sessions.lock().unwrap();
+        sessions.iter().find(|s| s.login_pk == sender_hex).map(|s| {
+            (s.client_name.clone(), s.policy.clone(), s.custom_rules.clone())
+        })
+    };
+
+    let (client_name, session_policy, custom_rules) = match session_info {
+        Some(info) => info,
+        None => {
+            warn!("[UPV2] {} request without session from {}", method, fp);
+            emit_log(app, &format!("[UPV2] ⚠️ {} without session from {}…", method, fp));
+            let err = serde_json::json!({ "error": "No active session" });
+            send_upv2_response(signer_keys, client, sender_pubkey, session_id, "error", &err.to_string(), None, use_nip44).await;
+            return;
+        }
+    };
+
+    let payload: serde_json::Value = match serde_json::from_str(decrypted) {
+        Ok(v) => v,
+        Err(e) => { warn!("[UPV2] Invalid {} payload: {}", method, e); return; }
+    };
+
+    let request_nonce = payload.get("nonce").and_then(|n| n.as_str()).map(|s| s.to_string());
+
+    let pubkey_hex = match payload.get("pubkey").and_then(|v| v.as_str()) {
+        Some(pk) => pk,
+        None => {
+            let err = serde_json::json!({ "error": "Missing 'pubkey' parameter" });
+            send_upv2_response(signer_keys, client, sender_pubkey, session_id, "error", &err.to_string(), request_nonce.as_deref(), use_nip44).await;
+            return;
+        }
+    };
+
+    let target_pk = match PublicKey::from_hex(pubkey_hex) {
+        Ok(pk) => pk,
+        Err(e) => {
+            let err = serde_json::json!({ "error": format!("Invalid pubkey: {}", e) });
+            send_upv2_response(signer_keys, client, sender_pubkey, session_id, "error", &err.to_string(), request_nonce.as_deref(), use_nip44).await;
+            return;
+        }
+    };
+
+    // Check policy
+    let custom_rule = if session_policy == "custom" {
+        custom_rules.get(method).cloned()
+    } else {
+        None
+    };
+
+    let _should_auto_approve = session_policy == "auto_approve"
+        || custom_rule.as_deref() == Some("approve");
+    let should_auto_reject = session_policy == "auto_reject"
+        || custom_rule.as_deref() == Some("reject");
+
+    if should_auto_reject {
+        let err = serde_json::json!({ "error": "Request auto-rejected by signer policy" });
+        send_upv2_response(signer_keys, client, sender_pubkey, session_id, "error", &err.to_string(), request_nonce.as_deref(), use_nip44).await;
+        info!("[UPV2] Auto-rejected {} from '{}' ({})", method, client_name, fp);
+        emit_log(app, &format!("[UPV2] ✗ Auto-rejected {} from '{}' ({}…)", method, client_name, fp));
+        return;
+    }
+
+    // For encrypt/decrypt, auto-approve if policy allows (same as NIP-46 behavior)
+    // If manual policy, also auto-approve since encrypt/decrypt are lower-risk than signing
+    let is_encrypt = method.ends_with("_encrypt");
+    let content_key = if is_encrypt { "plaintext" } else { "ciphertext" };
+    let content = match payload.get(content_key).and_then(|v| v.as_str()) {
+        Some(c) => c,
+        None => {
+            let err = serde_json::json!({ "error": format!("Missing '{}' parameter", content_key) });
+            send_upv2_response(signer_keys, client, sender_pubkey, session_id, "error", &err.to_string(), request_nonce.as_deref(), use_nip44).await;
+            return;
+        }
+    };
+
+    let result = match method {
+        "nip04_encrypt" => nip04::encrypt(signer_keys.secret_key(), &target_pk, content)
+            .map_err(|e| format!("NIP-04 encrypt failed: {}", e)),
+        "nip04_decrypt" => nip04::decrypt(signer_keys.secret_key(), &target_pk, content)
+            .map_err(|e| format!("NIP-04 decrypt failed: {}", e)),
+        "nip44_encrypt" => nip44::encrypt(signer_keys.secret_key(), &target_pk, content, nip44::Version::default())
+            .map_err(|e| format!("NIP-44 encrypt failed: {}", e)),
+        "nip44_decrypt" => nip44::decrypt(signer_keys.secret_key(), &target_pk, content)
+            .map_err(|e| format!("NIP-44 decrypt failed: {}", e)),
+        _ => Err(format!("Unknown method: {}", method)),
+    };
+
+    match result {
+        Ok(output) => {
+            let response = serde_json::json!({ "result": output });
+            send_upv2_response(signer_keys, client, sender_pubkey, session_id, method, &response.to_string(), request_nonce.as_deref(), use_nip44).await;
+            info!("[UPV2] ✓ {} for '{}' ({})", method, client_name, fp);
+            emit_log(app, &format!("[UPV2] ✓ {} for '{}' ({}…)", method, client_name, fp));
+        }
+        Err(e) => {
+            let err = serde_json::json!({ "error": e });
+            send_upv2_response(signer_keys, client, sender_pubkey, session_id, "error", &err.to_string(), request_nonce.as_deref(), use_nip44).await;
+            warn!("[UPV2] {} failed for '{}': {}", method, client_name, e);
+            emit_log(app, &format!("[UPV2] ✗ {} failed for '{}': {}", method, client_name, e));
+        }
+    }
+
+    // Update session last_active
+    {
+        let mut sessions = state.upv2_sessions.lock().unwrap();
+        if let Some(session) = sessions.iter_mut().find(|s| s.login_pk == sender_hex) {
+            session.last_active = now_secs();
+        }
+    }
+    let _ = state.save_upv2_sessions();
+}
+
 // --- Helpers ---
 
 async fn send_upv2_response(
@@ -790,12 +931,20 @@ async fn send_upv2_response(
     action: &str,
     payload: &str,
     nonce: Option<&str>,
+    use_nip44: bool,
 ) {
-    let encrypted = match nip44::encrypt(
-        signer_keys.secret_key(), recipient, payload, nip44::Version::default(),
-    ) {
-        Ok(e) => e,
-        Err(err) => { error!("[UPV2] Encrypt failed: {}", err); return; }
+    let encrypted = if use_nip44 {
+        match nip44::encrypt(
+            signer_keys.secret_key(), recipient, payload, nip44::Version::default(),
+        ) {
+            Ok(e) => e,
+            Err(err) => { error!("[UPV2] NIP-44 encrypt failed: {}", err); return; }
+        }
+    } else {
+        match nip04::encrypt(signer_keys.secret_key(), recipient, payload) {
+            Ok(e) => e,
+            Err(err) => { error!("[UPV2] NIP-04 encrypt failed: {}", err); return; }
+        }
     };
 
     let mut event_builder = EventBuilder::new(Kind::Custom(24134), encrypted)
@@ -944,10 +1093,12 @@ pub async fn check_offline_attempts(
             continue;
         }
 
-        // Try to decrypt for client info
+        // Try to decrypt for client info (NIP-44 first, then NIP-04 fallback)
         let mut client_name: Option<String> = None;
         let mut instance_id: Option<String> = None;
-        if let Ok(decrypted) = nip44::decrypt(signer_keys.secret_key(), &event.pubkey, &event.content) {
+        let decrypted_content = nip44::decrypt(signer_keys.secret_key(), &event.pubkey, &event.content)
+            .or_else(|_| nip04::decrypt(signer_keys.secret_key(), &event.pubkey, &event.content));
+        if let Ok(decrypted) = decrypted_content {
             if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&decrypted) {
                 client_name = payload.get("client").and_then(|v| v.as_str()).map(String::from);
                 instance_id = payload.get("instance_id").and_then(|v| v.as_str()).map(String::from);

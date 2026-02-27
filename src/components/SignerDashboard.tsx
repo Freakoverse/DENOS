@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback, memo } from 'react';
 import { createPortal } from 'react-dom';
 import { dnnService } from '@/services/dnn';
 import { fetchNostrProfile } from '@/services/nostrProfile';
+import { blossomServers } from '@/services/blossomServers';
 import { invoke } from '@tauri-apps/api/core';
 import { useFeedback } from '@/components/ui/feedback';
 import { listen } from '@tauri-apps/api/event';
@@ -23,7 +24,7 @@ import {
     AlertTriangle, Shield, ShieldCheck, ShieldX,
     Link2, Unlink, Clock, History,
     Repeat2, ScanLine, QrCode, Copy, Radio,
-    ChevronRight, ArrowLeft, Plug, Loader2,
+    ChevronRight, ArrowLeft, Plug, Loader2, Play, Download,
 } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import jsQR from 'jsqr';
@@ -181,6 +182,38 @@ function PolicySelector({ current, onChange }: { current: string; onChange: (p: 
 }
 
 
+/* ── Blossom Video with server fallback ── */
+function BlossomVideo({ hash, ext, ...videoProps }: {
+    hash: string;
+    ext: string;
+} & React.VideoHTMLAttributes<HTMLVideoElement>) {
+    const servers = blossomServers.getServers();
+    const [serverIndex, setServerIndex] = useState(0);
+    const [allFailed, setAllFailed] = useState(false);
+
+    const baseUrl = servers[serverIndex]?.replace(/\/+$/, '');
+    const currentUrl = baseUrl ? `${baseUrl}/${hash}.${ext}` : '';
+
+    const handleError = useCallback(() => {
+        if (serverIndex < servers.length - 1) {
+            console.log(`[BlossomVideo] ${servers[serverIndex]} failed, trying ${servers[serverIndex + 1]}…`);
+            setServerIndex(i => i + 1);
+        } else {
+            console.error('[BlossomVideo] All Blossom servers failed');
+            setAllFailed(true);
+        }
+    }, [serverIndex, servers]);
+
+    if (allFailed || servers.length === 0) {
+        return (
+            <div className="w-full h-full flex items-center justify-center text-muted-foreground text-sm">
+                Video unavailable — all servers offline
+            </div>
+        );
+    }
+
+    return <video key={currentUrl} src={currentUrl} onError={handleError} {...videoProps} />;
+}
 
 export default function SignerDashboard({ activePubkey, activeNpub }: SignerDashboardProps) {
     const [signerState, setSignerState] = useState<SignerState>({
@@ -210,6 +243,8 @@ export default function SignerDashboard({ activePubkey, activeNpub }: SignerDash
     const [connecting, setConnecting] = useState(false);
     const [npubCopied, setNpubCopied] = useState(false);
     const [showConnectedApps, setShowConnectedApps] = useState(false);
+    const [tutorialDismissed, setTutorialDismissed] = useState(() => localStorage.getItem('denos_tutorial_dismissed') === 'true');
+    const [showTutorialModal, setShowTutorialModal] = useState(false);
     const [connTab, setConnTab] = useState<'bunker' | 'password' | 'local'>('bunker');
     const [customRulesModal, setCustomRulesModal] = useState<{ id: string; name: string; type: 'nip46' | 'upv2' } | null>(null);
     const [disconnectConfirm, setDisconnectConfirm] = useState<{ name: string; onConfirm: () => void } | null>(null);
@@ -227,6 +262,12 @@ export default function SignerDashboard({ activePubkey, activeNpub }: SignerDash
     const [dnnVerifying, setDnnVerifying] = useState(false);
     const [addressDisplay, setAddressDisplay] = useState<'npub' | 'dnn'>('npub');
     const [dnnServiceReady, setDnnServiceReady] = useState(false);
+    // Update state
+    const [updateInfo, setUpdateInfo] = useState<{
+        new_version: string; notes: string; has_platform_binary: boolean;
+        binary_hash?: string; binary_ext?: string;
+    } | null>(null);
+    const [updateDismissed, setUpdateDismissed] = useState(false);
     // Ticking clock for toast expiry (re-renders every second when requests exist)
     const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000));
     const videoRef = useRef<HTMLVideoElement>(null);
@@ -245,6 +286,25 @@ export default function SignerDashboard({ activePubkey, activeNpub }: SignerDash
         invoke('start_pc55_server').catch((e: unknown) => {
             console.log('PC55 auto-start:', e);
         });
+    }, []);
+
+    // Check for updates after a short delay (wait for signer to connect to relays)
+    useEffect(() => {
+        const timer = setTimeout(async () => {
+            try {
+                const info = await invoke<any>('check_for_update');
+                if (info) {
+                    const dismissed = localStorage.getItem('denos_update_dismissed');
+                    if (dismissed === info.new_version) {
+                        setUpdateDismissed(true);
+                    }
+                    setUpdateInfo(info);
+                }
+            } catch (e) {
+                console.log('[Update check]', e);
+            }
+        }, 5000);
+        return () => clearTimeout(timer);
     }, []);
 
     // Tick every second while pending requests exist so expired toasts auto-vanish
@@ -1139,6 +1199,50 @@ export default function SignerDashboard({ activePubkey, activeNpub }: SignerDash
                 );
             })()}
 
+            {/* ── Update Available Banner ── */}
+            {updateInfo && !updateDismissed && (
+                <div className="flex items-center gap-2">
+                    <button
+                        onClick={() => {
+                            localStorage.setItem('denos_update_dismissed', updateInfo.new_version);
+                            setUpdateDismissed(true);
+                        }}
+                        className="w-10 h-10 rounded-xl bg-secondary/60 hover:bg-secondary flex items-center justify-center shrink-0 transition-colors"
+                        title="Dismiss"
+                    >
+                        <X className="w-4 h-4 text-muted-foreground" />
+                    </button>
+                    <button
+                        onClick={async () => {
+                            if (!updateInfo.binary_hash || !updateInfo.binary_ext) {
+                                toast('No binary available for your platform');
+                                return;
+                            }
+                            toast('Downloading update\u2026');
+                            try {
+                                const servers = blossomServers.getServers();
+                                await invoke('download_and_install_update', {
+                                    hash: updateInfo.binary_hash,
+                                    ext: updateInfo.binary_ext,
+                                    blossomServers: servers,
+                                });
+                            } catch (e: any) {
+                                toast('Update failed: ' + e);
+                            }
+                        }}
+                        className="flex-1 flex items-center gap-3 px-4 py-3 rounded-xl bg-green-500/10 hover:bg-green-500/20 border border-green-500/20 transition-colors text-left"
+                    >
+                        <Download className="w-5 h-5 text-green-500 shrink-0" />
+                        <div className="flex-1 min-w-0">
+                            <span className="text-sm font-medium text-green-500">Update Available \u2014 v{updateInfo.new_version}</span>
+                            {updateInfo.notes && (
+                                <p className="text-xs text-muted-foreground line-clamp-1 mt-0.5">{updateInfo.notes}</p>
+                            )}
+                        </div>
+                    </button>
+                </div>
+            )}
+
             {/* ── Connected Apps (compact row) ── */}
             <Card
                 className="cursor-pointer hover:bg-secondary/40 transition-colors"
@@ -1159,6 +1263,52 @@ export default function SignerDashboard({ activePubkey, activeNpub }: SignerDash
                     </div>
                 </CardContent>
             </Card>
+
+            {/* ── Tutorial Banner ── */}
+            {!tutorialDismissed && (
+                <div className="flex items-center gap-2">
+                    <button
+                        onClick={() => {
+                            localStorage.setItem('denos_tutorial_dismissed', 'true');
+                            setTutorialDismissed(true);
+                        }}
+                        className="w-10 h-10 rounded-xl bg-secondary/60 hover:bg-secondary flex items-center justify-center shrink-0 transition-colors"
+                        title="Dismiss"
+                    >
+                        <X className="w-4 h-4 text-muted-foreground" />
+                    </button>
+                    <button
+                        onClick={() => setShowTutorialModal(true)}
+                        className="flex-1 flex items-center gap-3 px-4 py-3 rounded-xl bg-primary/10 hover:bg-primary/20 border border-primary/20 transition-colors text-left"
+                    >
+                        <Play className="w-5 h-5 text-primary shrink-0" />
+                        <span className="text-sm font-medium text-primary">New? Watch Tutorial</span>
+                    </button>
+                </div>
+            )}
+
+            {/* Tutorial Video Modal */}
+            <Dialog open={showTutorialModal} onOpenChange={(open) => { setShowTutorialModal(open); }}>
+                <DialogContent className="sm:max-w-2xl p-0 overflow-hidden">
+                    <div className="aspect-video w-full bg-black">
+                        {showTutorialModal && (
+                            <BlossomVideo
+                                hash="866c604285248a0f2340b02fab7e79b422d0d901a421e539fd89f84a51d80271"
+                                ext="mp4"
+                                autoPlay
+                                controls
+                                className="w-full h-full"
+                            />
+                        )}
+                    </div>
+                    <div className="px-6 pb-6 pt-4">
+                        <h3 className="text-lg font-semibold mb-2">First time?</h3>
+                        <p className="text-sm text-muted-foreground">
+                            If this is your first time using a Nostr signer and account manager, here's a short video on how to sign in to different Nostr sites, apps, and software.
+                        </p>
+                    </div>
+                </DialogContent>
+            </Dialog>
 
             {/* ── NIP-PC55 Local Signer ── */}
             <Card>
