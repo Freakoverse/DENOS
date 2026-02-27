@@ -1,0 +1,59 @@
+# Maintainer: Freakoverse <freakoverse@proton.me>
+pkgname=denos
+pkgver=${PKGVER:-0.1.0}
+pkgrel=1
+pkgdesc="Nostr Signer, Payment System, and ID Manager"
+arch=('x86_64')
+url="https://github.com/Freakoverse/DENOS"
+license=('MIT')
+depends=('webkit2gtk-4.1' 'gtk3' 'libsoup3' 'openssl' 'glib2' 'dbus' 'libsecret')
+makedepends=('rust' 'cargo' 'nodejs' 'npm' 'patchelf')
+source=()
+sha256sums=()
+
+build() {
+    cd "${srcdir}/.."
+    npm ci
+    cargo install tauri-cli --version "^2" --root "${srcdir}/tauri-bin"
+    export PATH="${srcdir}/tauri-bin/bin:$PATH"
+    cargo tauri build --bundles none
+}
+
+package() {
+    cd "${srcdir}/.."
+
+    # Install binary
+    install -Dm755 "src-tauri/target/release/denos" "${pkgdir}/usr/bin/denos"
+
+    # Install icons
+    for size in 32 48 128 256 512; do
+        if [ -f "src-tauri/icons/${size}x${size}.png" ]; then
+            install -Dm644 "src-tauri/icons/${size}x${size}.png" \
+                "${pkgdir}/usr/share/icons/hicolor/${size}x${size}/apps/dnnid.denos.signer.png"
+        fi
+    done
+
+    # Install desktop file
+    install -Dm644 /dev/stdin "${pkgdir}/usr/share/applications/dnnid.denos.signer.desktop" << 'EOF'
+[Desktop Entry]
+Name=DENOS
+Comment=Nostr Signer, Payment System, and ID Manager
+Exec=denos
+Icon=dnnid.denos.signer
+Terminal=false
+Type=Application
+Categories=Finance;Network;
+StartupWMClass=DENOS
+EOF
+
+    # Install metainfo if available
+    if [ -f "src-tauri/dnnid.denos.signer.metainfo.xml" ]; then
+        install -Dm644 "src-tauri/dnnid.denos.signer.metainfo.xml" \
+            "${pkgdir}/usr/share/metainfo/dnnid.denos.signer.metainfo.xml"
+    fi
+
+    # Install license
+    if [ -f "LICENSE" ]; then
+        install -Dm644 "LICENSE" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+    fi
+}
