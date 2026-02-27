@@ -26,7 +26,7 @@ export interface LockScreenProps {
 type Mode = 'unlock' | 'setup' | 'new-profile';
 
 export const LockScreen: React.FC<LockScreenProps> = ({
-    pinSet,
+    pinSet: _pinSet,
     profiles,
     lastProfileId,
     signerRunning = false,
