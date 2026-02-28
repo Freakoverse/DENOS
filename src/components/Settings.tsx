@@ -10,7 +10,7 @@ import { Switch } from '@/components/ui/switch';
 import {
     Radio, X, Plus, Info, Terminal, ChevronRight, ArrowLeft, Shield, Eye, EyeOff, Users,
     Copy, Check, RefreshCw, Heart, Bitcoin, Banknote, ChevronDown, Sun, Moon, Palette, Store, Network, Lock,
-    Play, GraduationCap, Cloud, Download, ExternalLink,
+    Play, GraduationCap, Cloud, Download, ExternalLink, Loader2,
 } from 'lucide-react';
 import { useFeedback } from '@/components/ui/feedback';
 import { KeypairManager } from '@/components/KeypairManager';
@@ -1008,6 +1008,24 @@ function SecuritySettings({ onBack, toast, appState, onLock }: {
 }
 
 /* ── Blossom Video with server fallback ── */
+// Probe codec support without triggering playback — safe even on WebKitGTK
+const canPlayMp4 = (() => {
+    try { return !!document.createElement('video').canPlayType('video/mp4; codecs="avc1.42E01E"'); } catch { return true; }
+})();
+
+/** Find a working Blossom URL by trying HEAD against each server */
+async function findWorkingBlossomUrl(hash: string, ext: string): Promise<string | null> {
+    const servers = blossomServers.getServers();
+    for (const server of servers) {
+        const url = `${server.replace(/\/+$/, '')}/${hash}.${ext}`;
+        try {
+            const res = await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(5000) });
+            if (res.ok) return url;
+        } catch { /* try next */ }
+    }
+    return null;
+}
+
 function BlossomVideo({ hash, ext, ...videoProps }: {
     hash: string;
     ext: string;
@@ -1015,24 +1033,13 @@ function BlossomVideo({ hash, ext, ...videoProps }: {
     const servers = blossomServers.getServers();
     const [serverIndex, setServerIndex] = useState(0);
     const [allFailed, setAllFailed] = useState(false);
-    const [codecError, setCodecError] = useState(false);
+    const [checking, setChecking] = useState(false);
 
     // Build URL: servers store full URLs like https://video.nostr.build
     const baseUrl = servers[serverIndex]?.replace(/\/+$/, '');
     const currentUrl = baseUrl ? `${baseUrl}/${hash}.${ext}` : '';
 
-    const handleError = useCallback((e: React.SyntheticEvent<HTMLVideoElement>) => {
-        const video = e.currentTarget;
-        const error = video?.error;
-
-        // MediaError.MEDIA_ERR_DECODE (3) or MEDIA_ERR_SRC_NOT_SUPPORTED (4) = codec/format issue
-        if (error && (error.code === 3 || error.code === 4)) {
-            console.error('[BlossomVideo] Codec/format error — video cannot be played in this environment');
-            setCodecError(true);
-            return;
-        }
-
-        // Network error — try next server
+    const handleError = useCallback(() => {
         if (serverIndex < servers.length - 1) {
             console.log(`[BlossomVideo] ${servers[serverIndex]} failed, trying ${servers[serverIndex + 1]}…`);
             setServerIndex(i => i + 1);
@@ -1042,22 +1049,40 @@ function BlossomVideo({ hash, ext, ...videoProps }: {
         }
     }, [serverIndex, servers]);
 
-    if (codecError && currentUrl) {
+    const openInBrowser = useCallback(async () => {
+        setChecking(true);
+        const url = await findWorkingBlossomUrl(hash, ext);
+        setChecking(false);
+        if (url) {
+            window.open(url, '_blank');
+        } else {
+            setAllFailed(true);
+        }
+    }, [hash, ext]);
+
+    // If the system can't play MP4 (missing GStreamer codecs on Linux), show browser link
+    if (!canPlayMp4) {
+        if (allFailed || servers.length === 0) {
+            return (
+                <div className="w-full h-full flex items-center justify-center text-muted-foreground text-sm">
+                    Video unavailable — all servers offline
+                </div>
+            );
+        }
         return (
             <div className="w-full h-full flex flex-col items-center justify-center gap-3 p-4 text-center">
+                <Play className="w-10 h-10 text-primary" />
                 <p className="text-sm text-muted-foreground">
-                    Video can't play — your system may be missing media codecs.
+                    Video playback opens in your browser.
                 </p>
                 <button
-                    onClick={() => window.open(currentUrl, '_blank')}
-                    className="flex items-center gap-2 px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/80 transition-colors cursor-pointer"
+                    onClick={openInBrowser}
+                    disabled={checking}
+                    className="flex items-center gap-2 px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/80 transition-colors cursor-pointer disabled:opacity-60"
                 >
-                    <ExternalLink className="w-4 h-4" />
-                    Open in Browser
+                    {checking ? <Loader2 className="w-4 h-4 animate-spin" /> : <ExternalLink className="w-4 h-4" />}
+                    {checking ? 'Finding server…' : 'Watch Tutorial'}
                 </button>
-                <p className="text-xs text-muted-foreground/60">
-                    Linux users: install <code className="bg-secondary px-1 rounded">gst-plugins-good gst-plugins-bad gst-libav</code>
-                </p>
             </div>
         );
     }

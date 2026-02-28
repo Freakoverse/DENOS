@@ -12,7 +12,7 @@
     "app": {
         "windows": [
             {
-                "title": "DENOS — Nostr Signer, Payment System, and ID Manager",
+                "title": "DENOS — Nostr Signer, ID Manager, and Payment System",
                 "width": 460,
                 "height": 780,
                 "resizable": true,
