@@ -334,6 +334,19 @@ jobs:
           path: extras
         continue-on-error: true
 
+      - name: Download Linux binary artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: denos-linux-binary
+          path: extras
+        continue-on-error: true
+
+      - name: Rename raw binary for release
+        run: |
+          if [ -f extras/denos ]; then
+            mv extras/denos extras/DENOS_x64_linux
+          fi
+
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:

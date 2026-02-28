@@ -117,7 +117,20 @@ pub async fn check_for_update(
     info!("[Updater] Update available: {} → {}", current_version, manifest.version);
 
     let platform = get_current_platform();
-    let platform_binary = manifest.platforms.get(&platform);
+    // On Linux, prefer the raw binary for package-managed installs (deb/rpm/pkg)
+    // AppImage users get the AppImage, package-managed users get the raw binary
+    let platform_binary = if platform == "linux-x86_64" || platform == "linux-aarch64" {
+        let is_appimage = std::env::var("APPIMAGE").is_ok();
+        if is_appimage {
+            manifest.platforms.get(&platform)
+        } else {
+            // Try linux-x86_64-bin first, fall back to the AppImage entry
+            let bin_key = format!("{}-bin", platform);
+            manifest.platforms.get(&bin_key).or_else(|| manifest.platforms.get(&platform))
+        }
+    } else {
+        manifest.platforms.get(&platform)
+    };
 
     Ok(Some(UpdateInfo {
         current_version,
@@ -254,18 +267,42 @@ pub async fn download_and_install_update(
         }
         #[cfg(target_os = "linux")]
         "linux" => {
-            // For AppImage: make executable and replace current binary
             use std::os::unix::fs::PermissionsExt;
-            let current_exe = std::env::current_exe()
-                .map_err(|e| format!("Failed to get current exe: {}", e))?;
 
             std::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(0o755))
                 .map_err(|e| format!("Failed to chmod: {}", e))?;
 
-            std::fs::rename(&temp_path, &current_exe)
-                .map_err(|e| format!("Failed to replace binary: {}", e))?;
+            let is_appimage = std::env::var("APPIMAGE").is_ok();
 
-            info!("[Updater] AppImage replaced, restarting…");
+            if is_appimage {
+                // AppImage: replace the AppImage file directly
+                let current_exe = std::env::current_exe()
+                    .map_err(|e| format!("Failed to get current exe: {}", e))?;
+
+                std::fs::rename(&temp_path, &current_exe)
+                    .map_err(|e| format!("Failed to replace AppImage: {}", e))?;
+
+                info!("[Updater] AppImage replaced, restarting…");
+            } else {
+                // Package-managed (deb/rpm/pkg): use pkexec to copy with root permissions
+                let current_exe = std::env::current_exe()
+                    .map_err(|e| format!("Failed to get current exe: {}", e))?;
+
+                let status = std::process::Command::new("pkexec")
+                    .args(&["cp", &temp_path.to_string_lossy(), &current_exe.to_string_lossy()])
+                    .status()
+                    .map_err(|e| format!("Failed to run pkexec: {}", e))?;
+
+                if !status.success() {
+                    return Err("Update cancelled or pkexec failed".to_string());
+                }
+
+                // Clean up temp file
+                let _ = std::fs::remove_file(&temp_path);
+
+                info!("[Updater] Binary replaced via pkexec, restarting…");
+            }
+
             app.restart();
         }
         "macos" | "linux" => {
@@ -402,7 +439,14 @@ pub async fn publish_update_event(
     };
 
     // 1) Publish the "latest" pointer (replaceable — overwritten each release)
-    let latest_builder = EventBuilder::new(Kind::Custom(30078), &manifest_json)
+    //    Strip "source" field — updaters don't need it, only the versioned event keeps it
+    let latest_json = {
+        let mut val: serde_json::Value = serde_json::from_str(&manifest_json)
+            .map_err(|e| format!("Invalid manifest JSON: {}", e))?;
+        if let Some(obj) = val.as_object_mut() { obj.remove("source"); }
+        serde_json::to_string(&val).unwrap_or_else(|_| manifest_json.clone())
+    };
+    let latest_builder = EventBuilder::new(Kind::Custom(30078), &latest_json)
         .tag(Tag::identifier(UPDATE_D_TAG_LATEST));
 
     let latest_event = client.sign_event_builder(latest_builder).await

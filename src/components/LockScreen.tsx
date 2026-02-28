@@ -214,7 +214,7 @@ export const LockScreen: React.FC<LockScreenProps> = ({
             : 'Confirm your PIN');
 
     return createPortal(
-        <div className="fixed inset-0 z-[200] bg-background flex flex-col items-center justify-center select-none">
+        <div className="fixed inset-0 z-[90] bg-background flex flex-col items-center justify-center select-none">
             {/* Background pattern */}
             <div className="absolute inset-0 opacity-[0.02]"
                 style={{

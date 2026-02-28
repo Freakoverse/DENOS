@@ -1501,9 +1501,11 @@ function AboutPage({ onBack, toast, onNavigateToWallet, onNavigateToEcashSend, a
     const [pubFiles, setPubFiles] = useState<Record<string, File | null>>({
         'windows-x86_64': null,
         'linux-x86_64': null,
+        'linux-x86_64-bin': null,
         'darwin-x86_64': null,
         'darwin-aarch64': null,
     });
+    const [pubSourceFile, setPubSourceFile] = useState<File | null>(null);
     const [publishing, setPublishing] = useState(false);
     const [publishStatus, setPublishStatus] = useState('');
     const [publishPhase, setPublishPhase] = useState<'files' | 'uploading' | 'review' | 'publishing'>('files');
@@ -1572,6 +1574,8 @@ function AboutPage({ onBack, toast, onNavigateToWallet, onNavigateToEcashSend, a
     const handleUploadFiles = async () => {
         if (!pubVersion.trim()) { toast('Version is required', 'error'); return; }
         const filesToUpload = Object.entries(pubFiles).filter(([, f]) => f !== null) as [string, File][];
+        // Include source code file if provided
+        if (pubSourceFile) filesToUpload.push(['source-code', pubSourceFile]);
         if (filesToUpload.length === 0) { toast('Add at least one platform binary', 'error'); return; }
 
         setPublishing(true);
@@ -1649,19 +1653,22 @@ function AboutPage({ onBack, toast, onNavigateToWallet, onNavigateToEcashSend, a
         setPublishPhase('publishing');
         setPublishing(true);
         try {
-            const manifest = {
+            const { 'source-code': sourceHash, ...binaryHashes } = platformHashes;
+            const manifest: Record<string, unknown> = {
                 version: pubVersion.trim(),
                 notes: pubNotes.trim(),
                 pub_date: new Date().toISOString(),
-                platforms: platformHashes,
+                platforms: binaryHashes,
             };
+            if (sourceHash) manifest.source = sourceHash;
             const eventId = await invoke<string>('publish_update_event', {
                 manifestJson: JSON.stringify(manifest),
             });
             toast(`Update v${pubVersion} published! Event: ${eventId.slice(0, 12)}…`, 'success');
             setShowPublishModal(false);
             setPubVersion(''); setPubNotes('');
-            setPubFiles({ 'windows-x86_64': null, 'linux-x86_64': null, 'darwin-x86_64': null, 'darwin-aarch64': null });
+            setPubFiles({ 'windows-x86_64': null, 'linux-x86_64': null, 'linux-x86_64-bin': null, 'darwin-x86_64': null, 'darwin-aarch64': null });
+            setPubSourceFile(null);
             setPublishPhase('files');
             setUploadResults({}); setPlatformHashes({});
         } catch (e: any) {
@@ -1928,6 +1935,7 @@ function AboutPage({ onBack, toast, onNavigateToWallet, onNavigateToEcashSend, a
                                 const labels: Record<string, string> = {
                                     'windows-x86_64': 'Windows (.exe)',
                                     'linux-x86_64': 'Linux (.AppImage)',
+                                    'linux-x86_64-bin': 'Linux Binary (.bin)',
                                     'darwin-x86_64': 'macOS Intel (.dmg)',
                                     'darwin-aarch64': 'macOS ARM (.dmg)',
                                 };
@@ -1976,6 +1984,52 @@ function AboutPage({ onBack, toast, onNavigateToWallet, onNavigateToEcashSend, a
                                     </div>
                                 );
                             })}
+                        </div>
+
+                        {/* Source Code dropzone */}
+                        <div className="space-y-2">
+                            <label className="text-xs font-medium text-muted-foreground">Source Code (optional)</label>
+                            <div
+                                className={`relative flex items-center gap-3 p-3 rounded-lg border-2 border-dashed transition-colors ${pubSourceFile ? 'border-green-500/40 bg-green-500/5' : 'border-border hover:border-primary/40'}`}
+                                onDragOver={e => { e.preventDefault(); e.currentTarget.classList.add('border-primary'); }}
+                                onDragLeave={e => { e.currentTarget.classList.remove('border-primary'); }}
+                                onDrop={e => {
+                                    e.preventDefault();
+                                    e.currentTarget.classList.remove('border-primary');
+                                    const f = e.dataTransfer.files[0];
+                                    if (f) setPubSourceFile(f);
+                                }}
+                            >
+                                <div className="flex-1 min-w-0">
+                                    <p className="text-xs font-medium">Source Code (.zip / .tar.gz)</p>
+                                    {pubSourceFile ? (
+                                        <p className="text-[11px] text-green-500 truncate">{pubSourceFile.name} ({(pubSourceFile.size / 1024 / 1024).toFixed(1)} MB)</p>
+                                    ) : (
+                                        <p className="text-[11px] text-muted-foreground">Drop file here or click to browse</p>
+                                    )}
+                                </div>
+                                {pubSourceFile ? (
+                                    <button
+                                        onClick={() => setPubSourceFile(null)}
+                                        className="p-1 text-muted-foreground hover:text-foreground"
+                                    >
+                                        <X className="w-4 h-4" />
+                                    </button>
+                                ) : (
+                                    <label className="p-1.5 rounded-md bg-secondary hover:bg-secondary/80 cursor-pointer">
+                                        <Plus className="w-4 h-4" />
+                                        <input
+                                            type="file"
+                                            className="hidden"
+                                            accept=".zip,.tar.gz,.tgz"
+                                            onChange={e => {
+                                                const f = e.target.files?.[0];
+                                                if (f) setPubSourceFile(f);
+                                            }}
+                                        />
+                                    </label>
+                                )}
+                            </div>
                         </div>
 
                         {publishStatus && (
