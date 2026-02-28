@@ -83,6 +83,14 @@ jobs:
           args: ${{ matrix.args }}
           includeUpdaterJson: false
 
+      # Upload the raw Linux binary for repackaging jobs
+      - name: Upload Linux binary for repackaging
+        if: matrix.platform == 'ubuntu-22.04'
+        uses: actions/upload-artifact@v4
+        with:
+          name: denos-linux-binary
+          path: src-tauri/target/release/denos
+
   # ── Linux ARM64 (cross-compiled) ──
   linux-arm64:
     runs-on: ubuntu-22.04
@@ -104,9 +112,7 @@ jobs:
             libc6-dev-arm64-cross \
             pkg-config
 
-          # Install aarch64 libraries
           sudo dpkg --add-architecture arm64
-          # Add arm64 sources
           sudo sed -i 's/^deb /deb [arch=amd64] /' /etc/apt/sources.list
           echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
           echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
@@ -156,61 +162,144 @@ jobs:
           name: denos-linux-arm64
           path: artifacts/*
 
-  # ── Arch Linux (PKGBUILD) ──
+  # ── Arch Linux (packages pre-built binary) ──
   arch-linux:
+    needs: release
     runs-on: ubuntu-latest
     container:
       image: archlinux:latest
     steps:
-      - name: Install base dependencies
-        run: |
-          pacman -Syu --noconfirm
-          pacman -S --noconfirm \
-            base-devel git \
-            rust cargo \
-            nodejs npm \
-            webkit2gtk-4.1 gtk3 libsoup3 openssl glib2 dbus libsecret \
-            patchelf librsvg libappindicator-gtk3
+      - name: Install base tools
+        run: pacman -Syu --noconfirm base-devel
 
-      - name: Checkout
+      - name: Checkout (for icons and desktop file)
         uses: actions/checkout@v4
+
+      - name: Download pre-built binary
+        uses: actions/download-artifact@v4
+        with:
+          name: denos-linux-binary
+          path: binary
 
       - name: Set version from tag
         run: echo "PKGVER=${GITHUB_REF_NAME#v}" >> $GITHUB_ENV
+
+      - name: Create packaging PKGBUILD
+        run: |
+          mkdir -p pkg-build
+          cat > pkg-build/PKGBUILD << 'PKGEOF'
+          # Maintainer: Freakoverse
+          pkgname=denos
+          pkgver=${PKGVER}
+          pkgrel=1
+          pkgdesc="Nostr Signer, Payment System, and ID Manager"
+          arch=('x86_64')
+          url="https://github.com/Freakoverse/DENOS"
+          license=('MIT')
+          depends=('webkit2gtk-4.1' 'gtk3' 'libsoup3' 'openssl' 'glib2' 'dbus' 'libsecret')
+
+          package() {
+              install -Dm755 "${startdir}/../binary/denos" "${pkgdir}/usr/bin/denos"
+
+              for size in 32 48 128 256 512; do
+                  if [ -f "${startdir}/../src-tauri/icons/${size}x${size}.png" ]; then
+                      install -Dm644 "${startdir}/../src-tauri/icons/${size}x${size}.png" \
+                          "${pkgdir}/usr/share/icons/hicolor/${size}x${size}/apps/dnnid.denos.signer.png"
+                  fi
+              done
+
+              if [ -f "${startdir}/../packaging/flatpak/dnnid.denos.signer.desktop" ]; then
+                  install -Dm644 "${startdir}/../packaging/flatpak/dnnid.denos.signer.desktop" \
+                      "${pkgdir}/usr/share/applications/dnnid.denos.signer.desktop"
+              fi
+
+              if [ -f "${startdir}/../src-tauri/dnnid.denos.signer.metainfo.xml" ]; then
+                  install -Dm644 "${startdir}/../src-tauri/dnnid.denos.signer.metainfo.xml" \
+                      "${pkgdir}/usr/share/metainfo/dnnid.denos.signer.metainfo.xml"
+              fi
+          }
+          PKGEOF
+          # Replace ${PKGVER} with actual version
+          sed -i "s/\${PKGVER}/${{ env.PKGVER }}/" pkg-build/PKGBUILD
 
       - name: Build Arch package
         run: |
           useradd -m builder
           chown -R builder:builder .
-          cd packaging/arch
-          su builder -c "REPO_ROOT=$GITHUB_WORKSPACE PKGVER=${{ env.PKGVER }} makepkg -s --noconfirm --skipchecksums 2>&1" || {
-            echo "makepkg failed, showing log:"
-            cat /tmp/makepkg.log 2>/dev/null || true
-            exit 1
-          }
+          cd pkg-build
+          su builder -c "makepkg -d --noconfirm --skipchecksums 2>&1"
 
       - name: Upload Arch package
         uses: actions/upload-artifact@v4
         with:
           name: denos-arch-linux
-          path: packaging/arch/*.pkg.tar.zst
+          path: pkg-build/*.pkg.tar.zst
 
-  # ── Flatpak ──
+  # ── Flatpak (packages pre-built binary) ──
   flatpak:
+    needs: release
     runs-on: ubuntu-latest
-    container:
-      image: bilelmoussaoui/flatpak-github-actions:freedesktop-24.08
     steps:
-      - name: Checkout
+      - name: Checkout (for icons and desktop file)
         uses: actions/checkout@v4
 
-      - name: Build Flatpak
-        uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+      - name: Download pre-built binary
+        uses: actions/download-artifact@v4
         with:
-          manifest-path: packaging/flatpak/dnnid.denos.signer.yml
-          bundle: DENOS.flatpak
-          cache-key: flatpak-builder-${{ github.sha }}
-          disable-rofiles-fuse: true
+          name: denos-linux-binary
+          path: binary
+
+      - name: Install Flatpak tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+          sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          sudo flatpak install -y flathub org.freedesktop.Platform//24.08 org.freedesktop.Sdk//24.08
+
+      - name: Create Flatpak manifest for binary
+        run: |
+          chmod +x binary/denos
+          cat > flatpak-manifest.yml << 'EOF'
+          app-id: dnnid.denos.signer
+          runtime: org.freedesktop.Platform
+          runtime-version: '24.08'
+          sdk: org.freedesktop.Sdk
+          command: denos
+          finish-args:
+            - --share=network
+            - --socket=wayland
+            - --socket=x11
+            - --share=ipc
+            - --talk-name=org.freedesktop.secrets
+            - --talk-name=org.kde.StatusNotifierWatcher
+            - --talk-name=org.freedesktop.Notifications
+            - --device=dri
+          modules:
+            - name: denos
+              buildsystem: simple
+              build-commands:
+                - install -Dm755 denos /app/bin/denos
+                - install -Dm644 dnnid.denos.signer.desktop /app/share/applications/dnnid.denos.signer.desktop
+                - install -Dm644 128x128.png /app/share/icons/hicolor/128x128/apps/dnnid.denos.signer.png
+                - install -Dm644 256x256.png /app/share/icons/hicolor/256x256/apps/dnnid.denos.signer.png
+                - install -Dm644 512x512.png /app/share/icons/hicolor/512x512/apps/dnnid.denos.signer.png
+              sources:
+                - type: file
+                  path: binary/denos
+                - type: file
+                  path: packaging/flatpak/dnnid.denos.signer.desktop
+                - type: file
+                  path: src-tauri/icons/128x128.png
+                - type: file
+                  path: src-tauri/icons/256x256.png
+                - type: file
+                  path: src-tauri/icons/512x512.png
+          EOF
+
+      - name: Build Flatpak
+        run: |
+          flatpak-builder --force-clean --repo=repo build-dir flatpak-manifest.yml
+          flatpak build-bundle repo DENOS.flatpak dnnid.denos.signer
 
       - name: Upload Flatpak artifact
         uses: actions/upload-artifact@v4
