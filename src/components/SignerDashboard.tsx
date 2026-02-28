@@ -24,7 +24,7 @@ import {
     AlertTriangle, Shield, ShieldCheck, ShieldX,
     Link2, Unlink, Clock, History,
     Repeat2, ScanLine, QrCode, Copy, Radio,
-    ChevronRight, ArrowLeft, Plug, Loader2, Play, Download,
+    ChevronRight, ArrowLeft, Plug, Loader2, Play, Download, ExternalLink,
 } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import jsQR from 'jsqr';
@@ -190,11 +190,23 @@ function BlossomVideo({ hash, ext, ...videoProps }: {
     const servers = blossomServers.getServers();
     const [serverIndex, setServerIndex] = useState(0);
     const [allFailed, setAllFailed] = useState(false);
+    const [codecError, setCodecError] = useState(false);
 
     const baseUrl = servers[serverIndex]?.replace(/\/+$/, '');
     const currentUrl = baseUrl ? `${baseUrl}/${hash}.${ext}` : '';
 
-    const handleError = useCallback(() => {
+    const handleError = useCallback((e: React.SyntheticEvent<HTMLVideoElement>) => {
+        const video = e.currentTarget;
+        const error = video?.error;
+
+        // MediaError.MEDIA_ERR_DECODE (3) or MEDIA_ERR_SRC_NOT_SUPPORTED (4) = codec/format issue
+        if (error && (error.code === 3 || error.code === 4)) {
+            console.error('[BlossomVideo] Codec/format error — video cannot be played in this environment');
+            setCodecError(true);
+            return;
+        }
+
+        // Network error — try next server
         if (serverIndex < servers.length - 1) {
             console.log(`[BlossomVideo] ${servers[serverIndex]} failed, trying ${servers[serverIndex + 1]}…`);
             setServerIndex(i => i + 1);
@@ -203,6 +215,26 @@ function BlossomVideo({ hash, ext, ...videoProps }: {
             setAllFailed(true);
         }
     }, [serverIndex, servers]);
+
+    if (codecError && currentUrl) {
+        return (
+            <div className="w-full h-full flex flex-col items-center justify-center gap-3 p-4 text-center">
+                <p className="text-sm text-muted-foreground">
+                    Video can't play — your system may be missing media codecs.
+                </p>
+                <button
+                    onClick={() => window.open(currentUrl, '_blank')}
+                    className="flex items-center gap-2 px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/80 transition-colors cursor-pointer"
+                >
+                    <ExternalLink className="w-4 h-4" />
+                    Open in Browser
+                </button>
+                <p className="text-xs text-muted-foreground/60">
+                    Linux users: install <code className="bg-secondary px-1 rounded">gst-plugins-good gst-plugins-bad gst-libav</code>
+                </p>
+            </div>
+        );
+    }
 
     if (allFailed || servers.length === 0) {
         return (
@@ -1535,206 +1567,205 @@ export default function SignerDashboard({ activePubkey, activeNpub }: SignerDash
                 </DialogContent>
             </Dialog>
             {/* ── Password Login (UPV2) ── */}
-            {
-                signerState.running && (
-                    <Card>
-                        <CardContent className="space-y-3 pt-5">
+            {(
+                <Card>
+                    <CardContent className="space-y-3 pt-5">
 
-                            {offlineAttempts.length > 0 && (
-                                <div
-                                    className="flex items-center gap-3 p-3 bg-destructive/10 border border-destructive/20 rounded-xl cursor-pointer hover:bg-destructive/15 transition-colors"
-                                    onClick={() => setShowLoginHistory(true)}
-                                >
-                                    <AlertTriangle className="w-5 h-5 text-destructive shrink-0" />
-                                    <span className="flex-1 text-sm font-medium text-destructive">
-                                        {offlineAttempts.length} security alert{offlineAttempts.length > 1 ? 's' : ''}
-                                    </span>
-                                    <ChevronRight className="w-5 h-5 text-destructive/60 shrink-0" />
-                                </div>
-                            )}
+                        {offlineAttempts.length > 0 && (
+                            <div
+                                className="flex items-center gap-3 p-3 bg-destructive/10 border border-destructive/20 rounded-xl cursor-pointer hover:bg-destructive/15 transition-colors"
+                                onClick={() => setShowLoginHistory(true)}
+                            >
+                                <AlertTriangle className="w-5 h-5 text-destructive shrink-0" />
+                                <span className="flex-1 text-sm font-medium text-destructive">
+                                    {offlineAttempts.length} security alert{offlineAttempts.length > 1 ? 's' : ''}
+                                </span>
+                                <ChevronRight className="w-5 h-5 text-destructive/60 shrink-0" />
+                            </div>
+                        )}
 
-                            {/* Security Alerts Modal */}
-                            <Dialog open={showLoginHistory} onOpenChange={setShowLoginHistory}>
-                                <DialogContent>
-                                    <DialogHeader>
-                                        <DialogTitle className="flex items-center gap-2">
-                                            <AlertTriangle className="w-5 h-5 text-destructive" /> Security Alerts
-                                        </DialogTitle>
-                                        <DialogDescription>
-                                            Someone tried to log in while your signer was offline. Review the attempts below.
-                                        </DialogDescription>
-                                    </DialogHeader>
-                                    <div className="max-h-64 overflow-y-auto rounded-xl border border-border">
-                                        {signerState.login_attempts.slice().sort((a, b) => b.timestamp - a.timestamp).map(attempt => (
-                                            <div key={attempt.id} className={cn(
-                                                "flex justify-between items-center px-4 py-2.5 text-sm border-b border-border last:border-0",
-                                                attempt.status === 'offline_missed' && !attempt.dismissed && "bg-destructive/5"
-                                            )}>
-                                                <div className="flex items-center gap-2.5">
-                                                    <div className={cn(
-                                                        "w-2 h-2 rounded-full shrink-0",
-                                                        attempt.status === 'offline_missed' && !attempt.dismissed ? "bg-destructive" : "bg-success"
-                                                    )} />
-                                                    <div>
-                                                        <div className="font-medium">{attempt.client_name || 'Unknown client'}</div>
-                                                        <div className="text-xs text-muted-foreground">
-                                                            {new Date(attempt.timestamp * 1000).toLocaleString()}
-                                                        </div>
+                        {/* Security Alerts Modal */}
+                        <Dialog open={showLoginHistory} onOpenChange={setShowLoginHistory}>
+                            <DialogContent>
+                                <DialogHeader>
+                                    <DialogTitle className="flex items-center gap-2">
+                                        <AlertTriangle className="w-5 h-5 text-destructive" /> Security Alerts
+                                    </DialogTitle>
+                                    <DialogDescription>
+                                        Someone tried to log in while your signer was offline. Review the attempts below.
+                                    </DialogDescription>
+                                </DialogHeader>
+                                <div className="max-h-64 overflow-y-auto rounded-xl border border-border">
+                                    {signerState.login_attempts.slice().sort((a, b) => b.timestamp - a.timestamp).map(attempt => (
+                                        <div key={attempt.id} className={cn(
+                                            "flex justify-between items-center px-4 py-2.5 text-sm border-b border-border last:border-0",
+                                            attempt.status === 'offline_missed' && !attempt.dismissed && "bg-destructive/5"
+                                        )}>
+                                            <div className="flex items-center gap-2.5">
+                                                <div className={cn(
+                                                    "w-2 h-2 rounded-full shrink-0",
+                                                    attempt.status === 'offline_missed' && !attempt.dismissed ? "bg-destructive" : "bg-success"
+                                                )} />
+                                                <div>
+                                                    <div className="font-medium">{attempt.client_name || 'Unknown client'}</div>
+                                                    <div className="text-xs text-muted-foreground">
+                                                        {new Date(attempt.timestamp * 1000).toLocaleString()}
                                                     </div>
                                                 </div>
-                                                <div className="flex items-center gap-2">
-                                                    <Badge variant={attempt.status === 'offline_missed' ? 'destructive' : 'success'}>
-                                                        {attempt.status === 'offline_missed' ? (attempt.dismissed ? 'Dismissed' : 'Offline') : 'OK'}
-                                                    </Badge>
-                                                    {attempt.status === 'offline_missed' && !attempt.dismissed && (
-                                                        <Button variant="ghost" size="xs" onClick={() => invoke('dismiss_login_attempt', { attemptId: attempt.id })}>
-                                                            <X className="w-3.5 h-3.5" />
-                                                        </Button>
-                                                    )}
-                                                </div>
                                             </div>
-                                        ))}
-                                        {signerState.login_attempts.length === 0 && (
-                                            <div className="py-8 text-center text-sm text-muted-foreground">
-                                                No login attempts recorded yet.
-                                            </div>
-                                        )}
-                                    </div>
-                                    <DialogFooter>
-                                        <Button variant="outline" size="sm" onClick={() => { invoke('dismiss_all_offline_attempts'); setShowLoginHistory(false); }}>
-                                            Dismiss All
-                                        </Button>
-                                    </DialogFooter>
-                                </DialogContent>
-                            </Dialog>
-
-                            {signerState.upv2_login_key ? (
-                                <>
-                                    {/* Main row: icon + title/key + toggle */}
-                                    <div className="flex items-center gap-3">
-                                        <div className={cn(
-                                            "w-10 h-10 rounded-full flex items-center justify-center shrink-0",
-                                            signerState.upv2_login_key.enabled ? "bg-success/15" : "bg-muted"
-                                        )}>
-                                            <ShieldCheck className={cn(
-                                                "w-5 h-5",
-                                                signerState.upv2_login_key.enabled ? "text-success" : "text-muted-foreground"
-                                            )} />
-                                        </div>
-                                        <div className="flex-1 min-w-0">
-                                            <div className="text-sm font-semibold">Password Login</div>
-                                            <div className="text-xs text-muted-foreground font-mono mt-0.5">
-                                                {(() => {
-                                                    const signerRelays = signerState.relays ?? [];
-                                                    const userRelays = signerState.user_relays ?? [];
-                                                    // Deduplicate: count user relays not already in signer list
-                                                    const signerUrlSet = new Set(signerRelays.map(r => r.url.replace(/\/$/, '')));
-                                                    const extraUserRelays = userRelays.filter(r => !signerUrlSet.has(r.url.replace(/\/$/, '')));
-                                                    const totalRelays = signerRelays.length + extraUserRelays.length;
-                                                    const connectedCount = signerRelays.filter(r => r.connected).length + extraUserRelays.filter(r => r.connected).length;
-                                                    return (
-                                                        <button
-                                                            onClick={(e) => { e.stopPropagation(); setShowRelayModal(true); }}
-                                                            className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
-                                                        >
-                                                            <Radio className="w-3 h-3" />
-                                                            listening on {connectedCount}/{totalRelays} relay{totalRelays !== 1 ? 's' : ''}
-                                                        </button>
-                                                    );
-                                                })()}
-                                            </div>
-                                        </div>
-                                        <Switch
-                                            checked={signerState.upv2_login_key.enabled}
-                                            onCheckedChange={() => invoke('toggle_upv2_enabled')}
-                                        />
-                                    </div>
-                                    {/* Username / DNN ID row */}
-                                    {activeNpub && (
-                                        <div className="flex items-center gap-2">
-                                            {/* Toggle button — only show if DNN ID exists */}
-                                            {dnnId && (
-                                                <button
-                                                    onClick={() => setAddressDisplay(prev => prev === 'npub' ? 'dnn' : 'npub')}
-                                                    className="p-1 text-muted-foreground hover:text-foreground transition-colors cursor-pointer shrink-0"
-                                                    title={addressDisplay === 'dnn' ? 'Show npub' : 'Show DNN ID'}
-                                                >
-                                                    <Repeat2 className="w-3.5 h-3.5" />
-                                                </button>
-                                            )}
-                                            <div className="flex-1 bg-secondary rounded-lg px-3 py-2 text-sm text-muted-foreground font-mono truncate">
-                                                {addressDisplay === 'dnn' && dnnId ? (
-                                                    <span className="truncate flex items-center gap-1.5">
-                                                        @{dnnId}
-                                                        {dnnVerifying ? (
-                                                            <RefreshCw className="w-3 h-3 animate-spin text-muted-foreground shrink-0" />
-                                                        ) : dnnVerified === true ? (
-                                                            <Check className="w-3 h-3 text-success shrink-0" />
-                                                        ) : dnnVerified === false ? (
-                                                            <AlertTriangle className="w-3 h-3 text-warning shrink-0" />
-                                                        ) : null}
-                                                    </span>
-                                                ) : (
-                                                    <span className="truncate">@{activeNpub.slice(0, 12)}…{activeNpub.slice(-5)}</span>
+                                            <div className="flex items-center gap-2">
+                                                <Badge variant={attempt.status === 'offline_missed' ? 'destructive' : 'success'}>
+                                                    {attempt.status === 'offline_missed' ? (attempt.dismissed ? 'Dismissed' : 'Offline') : 'OK'}
+                                                </Badge>
+                                                {attempt.status === 'offline_missed' && !attempt.dismissed && (
+                                                    <Button variant="ghost" size="xs" onClick={() => invoke('dismiss_login_attempt', { attemptId: attempt.id })}>
+                                                        <X className="w-3.5 h-3.5" />
+                                                    </Button>
                                                 )}
                                             </div>
                                         </div>
+                                    ))}
+                                    {signerState.login_attempts.length === 0 && (
+                                        <div className="py-8 text-center text-sm text-muted-foreground">
+                                            No login attempts recorded yet.
+                                        </div>
                                     )}
-                                    {/* Action row: trash | copy username | gear */}
-                                    <div className="flex gap-2">
-                                        <Button
-                                            variant="destructive"
-                                            size="sm"
-                                            className="px-2.5"
-                                            onClick={() => showConfirm({ title: 'Delete Password?', description: 'All active sessions will be invalidated. This cannot be undone.', confirmLabel: 'Delete', variant: 'destructive', onConfirm: () => invoke('delete_upv2_password') })}
-                                        >
-                                            <Trash2 className="w-3.5 h-3.5" />
-                                        </Button>
-                                        <Button
-                                            variant="outline"
-                                            size="sm"
-                                            className="flex-1"
-                                            onClick={() => {
-                                                const text = addressDisplay === 'dnn' && dnnId ? dnnId : (activeNpub ?? '');
-                                                navigator.clipboard.writeText(text);
-                                                toast('Copied!', 'success');
-                                                setNpubCopied(true);
-                                                setTimeout(() => setNpubCopied(false), 2000);
-                                            }}
-                                        >
-                                            {npubCopied ? <><Check className="w-3 h-3 text-success" /> Copied</> : <><Copy className="w-3 h-3" /> Copy Username</>}
-                                        </Button>
-                                        <Button
-                                            variant="outline"
-                                            size="sm"
-                                            className="px-2.5"
-                                            onClick={() => { setUpv2SetupMode('change'); setUpv2Error(''); setUpv2Password(''); setUpv2ConfirmPassword(''); }}
-                                        >
-                                            <Settings2 className="w-3.5 h-3.5" />
-                                        </Button>
-                                    </div>
-                                </>
-                            ) : (
-                                /* No password set */
+                                </div>
+                                <DialogFooter>
+                                    <Button variant="outline" size="sm" onClick={() => { invoke('dismiss_all_offline_attempts'); setShowLoginHistory(false); }}>
+                                        Dismiss All
+                                    </Button>
+                                </DialogFooter>
+                            </DialogContent>
+                        </Dialog>
+
+                        {signerState.upv2_login_key ? (
+                            <>
+                                {/* Main row: icon + title/key + toggle */}
                                 <div className="flex items-center gap-3">
-                                    <div className="w-10 h-10 rounded-full bg-muted flex items-center justify-center shrink-0">
-                                        <Lock className="w-5 h-5 text-muted-foreground" />
+                                    <div className={cn(
+                                        "w-10 h-10 rounded-full flex items-center justify-center shrink-0",
+                                        signerState.upv2_login_key.enabled ? "bg-success/15" : "bg-muted"
+                                    )}>
+                                        <ShieldCheck className={cn(
+                                            "w-5 h-5",
+                                            signerState.upv2_login_key.enabled ? "text-success" : "text-muted-foreground"
+                                        )} />
                                     </div>
                                     <div className="flex-1 min-w-0">
                                         <div className="text-sm font-semibold">Password Login</div>
-                                        <div className="text-xs text-muted-foreground mt-0.5">
-                                            Not configured
+                                        <div className="text-xs text-muted-foreground font-mono mt-0.5">
+                                            {(() => {
+                                                const signerRelays = signerState.relays ?? [];
+                                                const userRelays = signerState.user_relays ?? [];
+                                                // Deduplicate: count user relays not already in signer list
+                                                const signerUrlSet = new Set(signerRelays.map(r => r.url.replace(/\/$/, '')));
+                                                const extraUserRelays = userRelays.filter(r => !signerUrlSet.has(r.url.replace(/\/$/, '')));
+                                                const totalRelays = signerRelays.length + extraUserRelays.length;
+                                                const connectedCount = signerRelays.filter(r => r.connected).length + extraUserRelays.filter(r => r.connected).length;
+                                                return (
+                                                    <button
+                                                        onClick={(e) => { e.stopPropagation(); setShowRelayModal(true); }}
+                                                        className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
+                                                    >
+                                                        <Radio className="w-3 h-3" />
+                                                        listening on {connectedCount}/{totalRelays} relay{totalRelays !== 1 ? 's' : ''}
+                                                    </button>
+                                                );
+                                            })()}
                                         </div>
                                     </div>
-                                    <Button size="sm" onClick={() => { setUpv2SetupMode('setup'); setUpv2Error(''); setUpv2Password(''); setUpv2ConfirmPassword(''); }}>
-                                        Set Up
+                                    <Switch
+                                        checked={signerState.upv2_login_key.enabled}
+                                        onCheckedChange={() => invoke('toggle_upv2_enabled')}
+                                    />
+                                </div>
+                                {/* Username / DNN ID row */}
+                                {activeNpub && (
+                                    <div className="flex items-center gap-2">
+                                        {/* Toggle button — only show if DNN ID exists */}
+                                        {dnnId && (
+                                            <button
+                                                onClick={() => setAddressDisplay(prev => prev === 'npub' ? 'dnn' : 'npub')}
+                                                className="p-1 text-muted-foreground hover:text-foreground transition-colors cursor-pointer shrink-0"
+                                                title={addressDisplay === 'dnn' ? 'Show npub' : 'Show DNN ID'}
+                                            >
+                                                <Repeat2 className="w-3.5 h-3.5" />
+                                            </button>
+                                        )}
+                                        <div className="flex-1 bg-secondary rounded-lg px-3 py-2 text-sm text-muted-foreground font-mono truncate">
+                                            {addressDisplay === 'dnn' && dnnId ? (
+                                                <span className="truncate flex items-center gap-1.5">
+                                                    @{dnnId}
+                                                    {dnnVerifying ? (
+                                                        <RefreshCw className="w-3 h-3 animate-spin text-muted-foreground shrink-0" />
+                                                    ) : dnnVerified === true ? (
+                                                        <Check className="w-3 h-3 text-success shrink-0" />
+                                                    ) : dnnVerified === false ? (
+                                                        <AlertTriangle className="w-3 h-3 text-warning shrink-0" />
+                                                    ) : null}
+                                                </span>
+                                            ) : (
+                                                <span className="truncate">@{activeNpub.slice(0, 12)}…{activeNpub.slice(-5)}</span>
+                                            )}
+                                        </div>
+                                    </div>
+                                )}
+                                {/* Action row: trash | copy username | gear */}
+                                <div className="flex gap-2">
+                                    <Button
+                                        variant="destructive"
+                                        size="sm"
+                                        className="px-2.5"
+                                        onClick={() => showConfirm({ title: 'Delete Password?', description: 'All active sessions will be invalidated. This cannot be undone.', confirmLabel: 'Delete', variant: 'destructive', onConfirm: () => invoke('delete_upv2_password') })}
+                                    >
+                                        <Trash2 className="w-3.5 h-3.5" />
+                                    </Button>
+                                    <Button
+                                        variant="outline"
+                                        size="sm"
+                                        className="flex-1"
+                                        onClick={() => {
+                                            const text = addressDisplay === 'dnn' && dnnId ? dnnId : (activeNpub ?? '');
+                                            navigator.clipboard.writeText(text);
+                                            toast('Copied!', 'success');
+                                            setNpubCopied(true);
+                                            setTimeout(() => setNpubCopied(false), 2000);
+                                        }}
+                                    >
+                                        {npubCopied ? <><Check className="w-3 h-3 text-success" /> Copied</> : <><Copy className="w-3 h-3" /> Copy Username</>}
+                                    </Button>
+                                    <Button
+                                        variant="outline"
+                                        size="sm"
+                                        className="px-2.5"
+                                        onClick={() => { setUpv2SetupMode('change'); setUpv2Error(''); setUpv2Password(''); setUpv2ConfirmPassword(''); }}
+                                    >
+                                        <Settings2 className="w-3.5 h-3.5" />
                                     </Button>
                                 </div>
-                            )}
+                            </>
+                        ) : (
+                            /* No password set */
+                            <div className="flex items-center gap-3">
+                                <div className="w-10 h-10 rounded-full bg-muted flex items-center justify-center shrink-0">
+                                    <Lock className="w-5 h-5 text-muted-foreground" />
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                    <div className="text-sm font-semibold">Password Login</div>
+                                    <div className="text-xs text-muted-foreground mt-0.5">
+                                        Not configured
+                                    </div>
+                                </div>
+                                <Button size="sm" onClick={() => { setUpv2SetupMode('setup'); setUpv2Error(''); setUpv2Password(''); setUpv2ConfirmPassword(''); }}>
+                                    Set Up
+                                </Button>
+                            </div>
+                        )}
 
-                        </CardContent>
-                    </Card>
-                )
+                    </CardContent>
+                </Card>
+            )
             }
 
             {/* Connected Apps row moved above Bunker Connection */}

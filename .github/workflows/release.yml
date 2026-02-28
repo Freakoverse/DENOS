@@ -196,7 +196,7 @@ jobs:
           arch=('x86_64')
           url="https://github.com/Freakoverse/DENOS"
           license=('MIT')
-          depends=('webkit2gtk-4.1' 'gtk3' 'libsoup3' 'openssl' 'glib2' 'dbus' 'libsecret')
+          depends=('webkit2gtk-4.1' 'gtk3' 'libsoup3' 'openssl' 'glib2' 'dbus' 'libsecret' 'gst-plugins-good' 'gst-plugins-bad' 'gst-libav')
 
           package() {
               install -Dm755 "${startdir}/../binary/denos" "${pkgdir}/usr/bin/denos"

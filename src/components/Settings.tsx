@@ -10,7 +10,7 @@ import { Switch } from '@/components/ui/switch';
 import {
     Radio, X, Plus, Info, Terminal, ChevronRight, ArrowLeft, Shield, Eye, EyeOff, Users,
     Copy, Check, RefreshCw, Heart, Bitcoin, Banknote, ChevronDown, Sun, Moon, Palette, Store, Network, Lock,
-    Play, GraduationCap, Cloud, Download,
+    Play, GraduationCap, Cloud, Download, ExternalLink,
 } from 'lucide-react';
 import { useFeedback } from '@/components/ui/feedback';
 import { KeypairManager } from '@/components/KeypairManager';
@@ -1015,12 +1015,24 @@ function BlossomVideo({ hash, ext, ...videoProps }: {
     const servers = blossomServers.getServers();
     const [serverIndex, setServerIndex] = useState(0);
     const [allFailed, setAllFailed] = useState(false);
+    const [codecError, setCodecError] = useState(false);
 
     // Build URL: servers store full URLs like https://video.nostr.build
     const baseUrl = servers[serverIndex]?.replace(/\/+$/, '');
     const currentUrl = baseUrl ? `${baseUrl}/${hash}.${ext}` : '';
 
-    const handleError = useCallback(() => {
+    const handleError = useCallback((e: React.SyntheticEvent<HTMLVideoElement>) => {
+        const video = e.currentTarget;
+        const error = video?.error;
+
+        // MediaError.MEDIA_ERR_DECODE (3) or MEDIA_ERR_SRC_NOT_SUPPORTED (4) = codec/format issue
+        if (error && (error.code === 3 || error.code === 4)) {
+            console.error('[BlossomVideo] Codec/format error — video cannot be played in this environment');
+            setCodecError(true);
+            return;
+        }
+
+        // Network error — try next server
         if (serverIndex < servers.length - 1) {
             console.log(`[BlossomVideo] ${servers[serverIndex]} failed, trying ${servers[serverIndex + 1]}…`);
             setServerIndex(i => i + 1);
@@ -1029,6 +1041,26 @@ function BlossomVideo({ hash, ext, ...videoProps }: {
             setAllFailed(true);
         }
     }, [serverIndex, servers]);
+
+    if (codecError && currentUrl) {
+        return (
+            <div className="w-full h-full flex flex-col items-center justify-center gap-3 p-4 text-center">
+                <p className="text-sm text-muted-foreground">
+                    Video can't play — your system may be missing media codecs.
+                </p>
+                <button
+                    onClick={() => window.open(currentUrl, '_blank')}
+                    className="flex items-center gap-2 px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/80 transition-colors cursor-pointer"
+                >
+                    <ExternalLink className="w-4 h-4" />
+                    Open in Browser
+                </button>
+                <p className="text-xs text-muted-foreground/60">
+                    Linux users: install <code className="bg-secondary px-1 rounded">gst-plugins-good gst-plugins-bad gst-libav</code>
+                </p>
+            </div>
+        );
+    }
 
     if (allFailed || servers.length === 0) {
         return (
