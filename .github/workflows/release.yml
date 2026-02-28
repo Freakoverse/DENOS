@@ -183,8 +183,9 @@ jobs:
           useradd -m builder
           chown -R builder:builder .
           cd packaging/arch
-          su builder -c "PKGVER=${{ env.PKGVER }} makepkg -s --noconfirm --skipchecksums 2>&1" || {
-            echo "makepkg failed"
+          su builder -c "REPO_ROOT=$GITHUB_WORKSPACE PKGVER=${{ env.PKGVER }} makepkg -s --noconfirm --skipchecksums 2>&1" || {
+            echo "makepkg failed, showing log:"
+            cat /tmp/makepkg.log 2>/dev/null || true
             exit 1
           }
 
@@ -203,17 +204,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Update Flatpak manifest tag
-        run: |
-          TAG_NAME=${GITHUB_REF_NAME}
-          sed -i "s/tag: v.*/tag: ${TAG_NAME}/" packaging/flatpak/dnnid.denos.signer.yml
-
       - name: Build Flatpak
         uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
           manifest-path: packaging/flatpak/dnnid.denos.signer.yml
           bundle: DENOS.flatpak
           cache-key: flatpak-builder-${{ github.sha }}
+          disable-rofiles-fuse: true
 
       - name: Upload Flatpak artifact
         uses: actions/upload-artifact@v4

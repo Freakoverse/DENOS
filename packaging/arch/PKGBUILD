@@ -11,8 +11,12 @@ makedepends=('rust' 'cargo' 'nodejs' 'npm' 'patchelf')
 source=()
 sha256sums=()
 
+# The repo root is passed via REPO_ROOT env var in CI,
+# or defaults to two directories up from this PKGBUILD.
+_reporoot="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+
 build() {
-    cd "${srcdir}/.."
+    cd "${_reporoot}"
     npm ci
     cargo install tauri-cli --version "^2" --root "${srcdir}/tauri-bin"
     export PATH="${srcdir}/tauri-bin/bin:$PATH"
@@ -20,7 +24,7 @@ build() {
 }
 
 package() {
-    cd "${srcdir}/.."
+    cd "${_reporoot}"
 
     # Install binary
     install -Dm755 "src-tauri/target/release/denos" "${pkgdir}/usr/bin/denos"
@@ -34,7 +38,11 @@ package() {
     done
 
     # Install desktop file
-    install -Dm644 /dev/stdin "${pkgdir}/usr/share/applications/dnnid.denos.signer.desktop" << 'EOF'
+    if [ -f "packaging/flatpak/dnnid.denos.signer.desktop" ]; then
+        install -Dm644 "packaging/flatpak/dnnid.denos.signer.desktop" \
+            "${pkgdir}/usr/share/applications/dnnid.denos.signer.desktop"
+    else
+        install -Dm644 /dev/stdin "${pkgdir}/usr/share/applications/dnnid.denos.signer.desktop" << 'EOF'
 [Desktop Entry]
 Name=DENOS
 Comment=Nostr Signer, Payment System, and ID Manager
@@ -45,6 +53,7 @@ Type=Application
 Categories=Finance;Network;
 StartupWMClass=DENOS
 EOF
+    fi
 
     # Install metainfo if available
     if [ -f "src-tauri/dnnid.denos.signer.metainfo.xml" ]; then

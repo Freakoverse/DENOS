@@ -32,7 +32,7 @@ modules:
         CARGO_HOME: /run/build/denos/cargo
         npm_config_nodedir: /usr/lib/sdk/node22
     build-commands:
-      - npm ci --offline
+      - npm ci --offline || npm ci
       - cargo build --release --manifest-path src-tauri/Cargo.toml
       - install -Dm755 src-tauri/target/release/denos /app/bin/denos
       - install -Dm644 packaging/flatpak/dnnid.denos.signer.desktop /app/share/applications/dnnid.denos.signer.desktop
@@ -40,6 +40,5 @@ modules:
       - install -Dm644 src-tauri/icons/256x256.png /app/share/icons/hicolor/256x256/apps/dnnid.denos.signer.png
       - install -Dm644 src-tauri/icons/512x512.png /app/share/icons/hicolor/512x512/apps/dnnid.denos.signer.png
     sources:
-      - type: git
-        url: https://github.com/Freakoverse/DENOS.git
-        tag: v0.1.0
+      - type: dir
+        path: ../..
