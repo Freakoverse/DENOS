@@ -34,10 +34,14 @@ Pre-built binaries are available on the Releases page:
 
 | Platform | Format |
 |----------|--------|
-| Windows | `.msi` installer |
+| Windows | `.exe` / `.msi` installer |
+| macOS (Intel) | `.dmg` |
+| macOS (Apple Silicon) | `.dmg` |
 | Linux (Ubuntu/Debian/Zorin) | `.deb` package |
 | Linux (Fedora/RHEL) | `.rpm` package |
+| Linux (Arch/CachyOS) | `.pkg.tar.zst` package |
 | Linux (Universal) | `.AppImage` portable |
+| Linux (Flatpak) | `.flatpak` |
 
 ## Building from Source
 

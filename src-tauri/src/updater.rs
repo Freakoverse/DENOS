@@ -305,9 +305,70 @@ pub async fn download_and_install_update(
 
             app.restart();
         }
-        "macos" | "linux" => {
-            info!("[Updater] Update downloaded to {:?}", temp_path);
-            return Ok(format!("Downloaded to: {}", temp_path.display()));
+        #[cfg(target_os = "macos")]
+        "macos" => {
+            // Mount the DMG
+            let mount_output = std::process::Command::new("hdiutil")
+                .args(&["attach", &temp_path.to_string_lossy(), "-nobrowse", "-noautoopen"])
+                .output()
+                .map_err(|e| format!("Failed to mount DMG: {}", e))?;
+
+            if !mount_output.status.success() {
+                return Err(format!("Failed to mount DMG: {}", String::from_utf8_lossy(&mount_output.stderr)));
+            }
+
+            // Parse mount point from hdiutil output (last column of last line with /Volumes/)
+            let stdout = String::from_utf8_lossy(&mount_output.stdout);
+            let mount_point = stdout.lines()
+                .filter_map(|line| {
+                    let trimmed = line.trim();
+                    if let Some(idx) = trimmed.find("/Volumes/") {
+                        Some(trimmed[idx..].to_string())
+                    } else {
+                        None
+                    }
+                })
+                .last()
+                .ok_or_else(|| "Could not find mount point in hdiutil output".to_string())?;
+
+            info!("[Updater] DMG mounted at: {}", mount_point);
+
+            // Find the .app inside the mounted DMG
+            let mount_dir = std::path::Path::new(&mount_point);
+            let app_bundle = std::fs::read_dir(mount_dir)
+                .map_err(|e| format!("Failed to read DMG contents: {}", e))?
+                .filter_map(|e| e.ok())
+                .find(|e| e.path().extension().map_or(false, |ext| ext == "app"))
+                .ok_or_else(|| "No .app found in DMG".to_string())?;
+
+            let app_name = app_bundle.file_name();
+            let dest = std::path::Path::new("/Applications").join(&app_name);
+
+            info!("[Updater] Copying {:?} to {:?}", app_bundle.path(), dest);
+
+            // Remove old app and copy new one
+            let _ = std::fs::remove_dir_all(&dest);
+            let copy_status = std::process::Command::new("cp")
+                .args(&["-R", &app_bundle.path().to_string_lossy(), &dest.to_string_lossy()])
+                .status()
+                .map_err(|e| format!("Failed to copy app: {}", e))?;
+
+            if !copy_status.success() {
+                // Unmount before returning error
+                let _ = std::process::Command::new("hdiutil").args(&["detach", &mount_point]).status();
+                return Err("Failed to copy .app to /Applications".to_string());
+            }
+
+            // Unmount DMG
+            let _ = std::process::Command::new("hdiutil")
+                .args(&["detach", &mount_point])
+                .status();
+
+            // Clean up temp DMG
+            let _ = std::fs::remove_file(&temp_path);
+
+            info!("[Updater] macOS app updated, restarting…");
+            app.restart();
         }
         _ => {
             return Err(format!("Unsupported OS: {}", os));
