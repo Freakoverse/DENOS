@@ -995,14 +995,24 @@ function SecuritySettings({ onBack, toast, appState, onLock }: {
                 </CardContent>
             </Card>
 
-            {/* Delete PIN Account */}
-            <button
-                onClick={() => setStep('delete-phrase')}
-                className="flex items-center justify-center gap-2 w-full py-3.5 rounded-xl bg-destructive/10 text-destructive hover:bg-destructive/20 transition-colors cursor-pointer font-medium text-sm"
-            >
-                <Shield className="w-4 h-4" />
-                Delete PIN Account {profileNumber}
-            </button>
+            {/* Data persistence disclaimer + Delete PIN Account */}
+            <div className="rounded-xl border border-border/50 bg-secondary/20 p-4 space-y-3">
+                <div className="flex gap-2 text-xs text-muted-foreground">
+                    <Info className="w-4 h-4 mt-0.5 shrink-0 text-amber-500" />
+                    <p>
+                        Uninstalling DENOS does <strong className="text-foreground">not</strong> delete your PIN accounts, seeds, or keys.
+                        They are stored securely in your operating system's credential manager and persist across reinstalls.
+                        To fully remove your data, delete your PIN account(s) first, then uninstall.
+                    </p>
+                </div>
+                <button
+                    onClick={() => setStep('delete-phrase')}
+                    className="flex items-center justify-center gap-2 w-full py-3.5 rounded-xl bg-destructive/10 text-destructive hover:bg-destructive/20 transition-colors cursor-pointer font-medium text-sm"
+                >
+                    <Shield className="w-4 h-4" />
+                    Delete PIN Account {profileNumber}
+                </button>
+            </div>
         </div>
     );
 }
