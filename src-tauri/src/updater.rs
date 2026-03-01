@@ -72,14 +72,31 @@ pub async fn check_for_update(
     state: State<'_, AppState>,
 ) -> Result<Option<UpdateInfo>, String> {
     let current_version = env!("CARGO_PKG_VERSION").to_string();
+    info!("[Updater] Current compiled version (CARGO_PKG_VERSION): {}", current_version);
+    info!("[Updater] Looking for events from creator: {}", DENOS_CREATOR_PUBKEY);
 
     let creator_pk = PublicKey::from_hex(DENOS_CREATOR_PUBKEY)
         .map_err(|e| format!("Invalid creator pubkey: {}", e))?;
 
     let client = {
         let sc = state.signer_client.lock().unwrap();
-        sc.clone().ok_or_else(|| "Signer not running".to_string())?
+        match sc.clone() {
+            Some(c) => {
+                info!("[Updater] Signer client available");
+                c
+            },
+            None => {
+                warn!("[Updater] Signer client NOT available — signer not running");
+                return Err("Signer not running".to_string());
+            }
+        }
     };
+
+    // Log connected relays
+    {
+        let connected = state.connected_relays.lock().unwrap();
+        info!("[Updater] Connected relays ({}): {:?}", connected.len(), connected);
+    }
 
     // Fetch the latest kind:30078 event with d=denos-latest from the creator
     let filter = Filter::new()
@@ -88,8 +105,14 @@ pub async fn check_for_update(
         .identifier(UPDATE_D_TAG_LATEST)
         .limit(1);
 
-    let events: Vec<Event> = match client.fetch_events(filter, std::time::Duration::from_secs(8)).await {
-        Ok(evs) => evs.into_iter().collect(),
+    info!("[Updater] Fetching with filter: kind=30078, author={}, d={}, limit=1", DENOS_CREATOR_PUBKEY, UPDATE_D_TAG_LATEST);
+
+    let events: Vec<Event> = match client.fetch_events(filter, std::time::Duration::from_secs(10)).await {
+        Ok(evs) => {
+            let collected: Vec<Event> = evs.into_iter().collect();
+            info!("[Updater] fetch_events returned {} event(s)", collected.len());
+            collected
+        },
         Err(e) => {
             warn!("[Updater] Failed to fetch update event: {}", e);
             return Err(format!("Failed to fetch update info: {}", e));
@@ -97,19 +120,34 @@ pub async fn check_for_update(
     };
 
     let event = match events.first() {
-        Some(e) => e,
+        Some(e) => {
+            info!("[Updater] Found event id={}, pubkey={}, created_at={}", e.id.to_hex(), e.pubkey.to_hex(), e.created_at);
+            info!("[Updater] Event content (first 200 chars): {}", &e.content.chars().take(200).collect::<String>());
+            e
+        },
         None => {
-            info!("[Updater] No update event found on relays");
+            info!("[Updater] No update event found on relays — returning 'up to date'");
             return Ok(None);
         }
     };
 
     // Parse the manifest from event content
-    let manifest: UpdateManifest = serde_json::from_str(&event.content)
-        .map_err(|e| format!("Failed to parse update manifest: {}", e))?;
+    let manifest: UpdateManifest = match serde_json::from_str::<UpdateManifest>(&event.content) {
+        Ok(m) => {
+            info!("[Updater] Parsed manifest: version={}", m.version);
+            m
+        },
+        Err(e) => {
+            warn!("[Updater] Failed to parse manifest JSON: {}", e);
+            return Err(format!("Failed to parse update manifest: {}", e));
+        }
+    };
 
     // Compare versions (simple string comparison — works for semver)
-    if !is_newer_version(&current_version, &manifest.version) {
+    let newer = is_newer_version(&current_version, &manifest.version);
+    info!("[Updater] Version comparison: current={} vs manifest={} → newer={}", current_version, manifest.version, newer);
+
+    if !newer {
         info!("[Updater] Current version {} is up to date (latest: {})", current_version, manifest.version);
         return Ok(None);
     }
@@ -121,16 +159,20 @@ pub async fn check_for_update(
     // AppImage users get the AppImage, package-managed users get the raw binary
     let platform_binary = if platform == "linux-x86_64" || platform == "linux-aarch64" {
         let is_appimage = std::env::var("APPIMAGE").is_ok();
+        info!("[Updater] Linux detected: platform={}, is_appimage={}", platform, is_appimage);
         if is_appimage {
             manifest.platforms.get(&platform)
         } else {
             // Try linux-x86_64-bin first, fall back to the AppImage entry
             let bin_key = format!("{}-bin", platform);
+            info!("[Updater] Looking for platform key '{}' (fallback: '{}')", bin_key, platform);
             manifest.platforms.get(&bin_key).or_else(|| manifest.platforms.get(&platform))
         }
     } else {
         manifest.platforms.get(&platform)
     };
+
+    info!("[Updater] Platform binary found: {}", platform_binary.is_some());
 
     Ok(Some(UpdateInfo {
         current_version,
