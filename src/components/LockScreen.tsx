@@ -64,6 +64,7 @@ export const LockScreen: React.FC<LockScreenProps> = ({
     const [shake, setShake] = useState(false);
     const [showPin, setShowPin] = useState(false);
     const [loading, setLoading] = useState(false);
+    const [showTerms, setShowTerms] = useState(false);
 
     const inputRef = useRef<HTMLInputElement>(null);
     const dropdownRef = useRef<HTMLDivElement>(null);
@@ -322,6 +323,28 @@ export const LockScreen: React.FC<LockScreenProps> = ({
                             />
                         ))}
                     </div>
+
+                    {/* Terms disclaimer (setup & new-profile only) */}
+                    {(mode === 'setup' || mode === 'new-profile') && setupStep === 'create' && (
+                        <div className="space-y-2">
+                            <p className="text-xs text-muted-foreground text-center">
+                                By continuing, you accept{' '}
+                                <button
+                                    onClick={() => setShowTerms(!showTerms)}
+                                    className="underline hover:text-foreground transition-colors cursor-pointer"
+                                >
+                                    these terms
+                                </button>
+                            </p>
+                            {showTerms && (
+                                <div className="rounded-xl border border-border/50 bg-secondary/30 p-3 text-xs text-muted-foreground leading-relaxed">
+                                    DENOS is experimental software and may contain bugs or unexpected behavior.
+                                    The creators are not liable for any damages, losses, or other issues arising
+                                    from its use. By continuing to use DENOS, you acknowledge and accept these terms.
+                                </div>
+                            )}
+                        </div>
+                    )}
 
                     {/* Error */}
                     {error && (

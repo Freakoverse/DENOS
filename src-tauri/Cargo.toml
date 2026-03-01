@@ -1,7 +1,7 @@
 [package]
 name = "denos"
-version = "0.1.7"
-description = "DENOS — Nostr Signer, Payment System, and ID Manager"
+version = "0.1.9"
+description = "DENOS — Nostr Signer, ID Manager, and Payment System"
 authors = ["DNN"]
 edition = "2021"
 license = "MIT"
