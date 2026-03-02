@@ -504,7 +504,7 @@ export function Settings({ logs, appState, onNavigateToWallet, onNavigateToEcash
         { id: 'merchant', label: 'Merchant', desc: 'Manage commercial settings', icon: Store },
         { id: 'blossom', label: 'Blossom Servers', desc: 'Media server fallbacks', icon: Cloud },
         { id: 'tutorials', label: 'Tutorials', desc: 'Learn how to use DENOS', icon: GraduationCap },
-        { id: 'about', label: 'About DENOS', desc: 'Version 0.1', icon: Info },
+        { id: 'about', label: 'About DENOS', desc: 'Version 0.2.0', icon: Info },
     ];
 
 
@@ -1513,7 +1513,7 @@ function BlossomServersPage({ onBack, toast }: { onBack: () => void; toast: (msg
 // ── Version History Data ──
 const VERSION_HISTORY = [
     {
-        version: '0.1',
+        version: '0.2.0',
         date: 'Feb 2026',
         title: 'Initial Release',
         changes: [
@@ -1568,8 +1568,11 @@ function AboutPage({ onBack, toast, onNavigateToWallet, onNavigateToEcashSend, a
     const [pubNotes, setPubNotes] = useState('');
     const [pubFiles, setPubFiles] = useState<Record<string, File | null>>({
         'windows-x86_64': null,
+        'windows-aarch64': null,
         'linux-x86_64': null,
         'linux-x86_64-bin': null,
+        'linux-aarch64': null,
+        'linux-aarch64-bin': null,
         'darwin-x86_64': null,
         'darwin-aarch64': null,
     });
@@ -1745,7 +1748,7 @@ function AboutPage({ onBack, toast, onNavigateToWallet, onNavigateToEcashSend, a
             toast(`Update v${pubVersion} published! Event: ${eventId.slice(0, 12)}…`, 'success');
             setShowPublishModal(false);
             setPubVersion(''); setPubNotes('');
-            setPubFiles({ 'windows-x86_64': null, 'linux-x86_64': null, 'linux-x86_64-bin': null, 'darwin-x86_64': null, 'darwin-aarch64': null });
+            setPubFiles({ 'windows-x86_64': null, 'windows-aarch64': null, 'linux-x86_64': null, 'linux-x86_64-bin': null, 'linux-aarch64': null, 'linux-aarch64-bin': null, 'darwin-x86_64': null, 'darwin-aarch64': null });
             setPubSourceFile(null);
             setPublishPhase('files');
             setUploadResults({}); setPlatformHashes({});
@@ -2036,9 +2039,12 @@ function AboutPage({ onBack, toast, onNavigateToWallet, onNavigateToEcashSend, a
                                 <label className="text-xs font-medium text-muted-foreground">Platform Binaries</label>
                                 {Object.entries(pubFiles).map(([platform, file]) => {
                                     const labels: Record<string, string> = {
-                                        'windows-x86_64': 'Windows (.exe)',
-                                        'linux-x86_64': 'Linux (.AppImage)',
-                                        'linux-x86_64-bin': 'Linux Binary (.bin)',
+                                        'windows-x86_64': 'Windows x64 (.exe)',
+                                        'windows-aarch64': 'Windows ARM (.exe)',
+                                        'linux-x86_64': 'Linux x64 (.AppImage)',
+                                        'linux-x86_64-bin': 'Linux x64 Binary (.bin)',
+                                        'linux-aarch64': 'Linux ARM (.AppImage)',
+                                        'linux-aarch64-bin': 'Linux ARM Binary (.bin)',
                                         'darwin-x86_64': 'macOS Intel (.dmg)',
                                         'darwin-aarch64': 'macOS ARM (.dmg)',
                                     };

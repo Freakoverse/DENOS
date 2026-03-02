@@ -43,6 +43,35 @@ Pre-built binaries are available on the Releases page:
 | Linux (Universal) | `.AppImage` portable |
 | Linux (Flatpak) | `.flatpak` |
 
+### macOS Installation
+
+macOS may show **"DENOS is damaged and can't be opened"** because the app is not code-signed with Apple. To fix this, open **Terminal** and run:
+
+```bash
+xattr -cr ~/Downloads/DENOS*.dmg
+```
+
+Then open the `.dmg` normally and drag **DENOS.app** to your Applications folder.
+
+> **Note:** This only needs to be done once per download. The warning is caused by macOS Gatekeeper quarantining unsigned apps — the app itself is safe.
+
+### Browser Compatibility (Local Signer / NIP-PC55)
+
+The Local Signer (NIP-PC55) enables "Login with DENOS" on supported Nostr websites by running a WebSocket server on `ws://localhost:7777`. Some browsers block this connection from HTTPS pages due to mixed content security policies:
+
+| Browser | Status |
+|---------|--------|
+| Chrome / Edge | ✅ Works out of the box |
+| Firefox | ✅ Works out of the box |
+| Brave | ⚠️ Blocked by Shields — see fix below |
+| Safari | ❌ Blocks `ws://localhost` — use Chrome or Firefox instead |
+
+> **Other browsers** with similar security shields or mixed content policies may also block the connection. If you don't see the "Login with DENOS" button on a supported site, your browser is likely blocking the local WebSocket.
+
+**Brave fix:** Open the site where you want to use DENOS → click the **Brave Shields icon** (lion) in the address bar → **disable Shields** for that site. Reload the page and the "Login with DENOS" button should appear.
+
+**Safari:** Safari strictly blocks insecure WebSocket connections (`ws://`) from HTTPS pages and there is no simple toggle to allow it. We recommend using **Chrome** or **Firefox** on macOS for the Local Signer feature. NIP-46 (Bunker) and NIP-UPV2 (Password Login) work on all browsers including Safari.
+
 ## Building from Source
 
 ### Prerequisites (All Platforms)
