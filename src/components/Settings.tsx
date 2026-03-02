@@ -504,7 +504,7 @@ export function Settings({ logs, appState, onNavigateToWallet, onNavigateToEcash
         { id: 'merchant', label: 'Merchant', desc: 'Manage commercial settings', icon: Store },
         { id: 'blossom', label: 'Blossom Servers', desc: 'Media server fallbacks', icon: Cloud },
         { id: 'tutorials', label: 'Tutorials', desc: 'Learn how to use DENOS', icon: GraduationCap },
-        { id: 'about', label: 'About DENOS', desc: 'Version 0.2.0', icon: Info },
+        { id: 'about', label: 'About DENOS', desc: 'Version 0.2.1', icon: Info },
     ];
 
 
@@ -1160,6 +1160,13 @@ const TUTORIALS = [
         title: 'Signing into Nostr clients',
         description: 'If this is your first time using a Nostr signer and account manager, here\'s a short video on how to sign in to different Nostr sites, apps, and software.',
         hash: '866c604285248a0f2340b02fab7e79b422d0d901a421e539fd89f84a51d80271',
+        ext: 'mp4',
+    },
+    {
+        id: 'acquiring-dnn-id',
+        title: 'Acquiring a DNN ID',
+        description: 'A short video guide showcasing how to acquire a DNN ID through the DENOS app.',
+        hash: '6fd5ec7ed7c8b58487366b3bbc102e46e30d8b87c43770b8ad848ae443a610e1',
         ext: 'mp4',
     },
 ];

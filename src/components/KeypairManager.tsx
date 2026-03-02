@@ -328,68 +328,69 @@ export function KeypairManager({ appState, onBack }: Props) {
         }
     };
 
+    // ── Shared export function ──
+    const exportEncrypted = async (mnemonic: string) => {
+        setExportError('');
+        if (!exportPassword) {
+            setExportError('Password is required.');
+            return;
+        }
+        if (exportPassword !== exportConfirmPassword) {
+            setExportError('Passwords do not match.');
+            return;
+        }
+        try {
+            const enc = new TextEncoder();
+            const keyMaterial = await crypto.subtle.importKey(
+                'raw', enc.encode(exportPassword), 'PBKDF2', false, ['deriveKey']
+            );
+            const salt = crypto.getRandomValues(new Uint8Array(16));
+            const key = await crypto.subtle.deriveKey(
+                { name: 'PBKDF2', salt, iterations: 600000, hash: 'SHA-256' },
+                keyMaterial,
+                { name: 'AES-GCM', length: 256 },
+                false,
+                ['encrypt']
+            );
+            const iv = crypto.getRandomValues(new Uint8Array(12));
+            const ciphertext = await crypto.subtle.encrypt(
+                { name: 'AES-GCM', iv },
+                key,
+                enc.encode(mnemonic)
+            );
+            const payload = JSON.stringify({
+                version: 1,
+                alg: 'AES-256-GCM',
+                kdf: 'PBKDF2-SHA256',
+                iterations: 600000,
+                salt: btoa(String.fromCharCode(...salt)),
+                iv: btoa(String.fromCharCode(...iv)),
+                ciphertext: btoa(String.fromCharCode(...new Uint8Array(ciphertext))),
+            });
+
+            // Download as file via blob URL
+            const blob = new Blob([payload], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'denos-seed-backup.json';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+
+            toast('Seed backup exported!', 'success');
+            setShowExportModal(false);
+            setExportPassword('');
+            setExportConfirmPassword('');
+        } catch (e) {
+            setExportError(String(e));
+        }
+    };
+
     // ── SHOW MNEMONIC PAGE ──
     if (view.page === 'show-mnemonic') {
         const words = view.mnemonic.split(' ');
-
-        const exportEncrypted = async () => {
-            setExportError('');
-            if (!exportPassword) {
-                setExportError('Password is required.');
-                return;
-            }
-            if (exportPassword !== exportConfirmPassword) {
-                setExportError('Passwords do not match.');
-                return;
-            }
-            try {
-                const enc = new TextEncoder();
-                const keyMaterial = await crypto.subtle.importKey(
-                    'raw', enc.encode(exportPassword), 'PBKDF2', false, ['deriveKey']
-                );
-                const salt = crypto.getRandomValues(new Uint8Array(16));
-                const key = await crypto.subtle.deriveKey(
-                    { name: 'PBKDF2', salt, iterations: 600000, hash: 'SHA-256' },
-                    keyMaterial,
-                    { name: 'AES-GCM', length: 256 },
-                    false,
-                    ['encrypt']
-                );
-                const iv = crypto.getRandomValues(new Uint8Array(12));
-                const ciphertext = await crypto.subtle.encrypt(
-                    { name: 'AES-GCM', iv },
-                    key,
-                    enc.encode(view.mnemonic)
-                );
-                const payload = JSON.stringify({
-                    version: 1,
-                    alg: 'AES-256-GCM',
-                    kdf: 'PBKDF2-SHA256',
-                    iterations: 600000,
-                    salt: btoa(String.fromCharCode(...salt)),
-                    iv: btoa(String.fromCharCode(...iv)),
-                    ciphertext: btoa(String.fromCharCode(...new Uint8Array(ciphertext))),
-                });
-
-                // Download as file via blob URL
-                const blob = new Blob([payload], { type: 'application/json' });
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = 'denos-seed-backup.json';
-                document.body.appendChild(a);
-                a.click();
-                document.body.removeChild(a);
-                URL.revokeObjectURL(url);
-
-                toast('Seed backup exported!', 'success');
-                setShowExportModal(false);
-                setExportPassword('');
-                setExportConfirmPassword('');
-            } catch (e) {
-                setExportError(String(e));
-            }
-        };
 
         return (
             <div className="space-y-4 animate-fade-in pb-[100px]">
@@ -484,7 +485,7 @@ export function KeypairManager({ appState, onBack }: Props) {
                                             value={exportConfirmPassword}
                                             onChange={e => setExportConfirmPassword(e.target.value)}
                                             placeholder="Confirm password"
-                                            onKeyDown={e => e.key === 'Enter' && exportEncrypted()}
+                                            onKeyDown={e => e.key === 'Enter' && exportEncrypted(view.mnemonic)}
                                         />
                                     </div>
                                     <div className="flex gap-2 pt-1">
@@ -497,7 +498,7 @@ export function KeypairManager({ appState, onBack }: Props) {
                                         </Button>
                                         <Button
                                             className="flex-1 gap-1.5"
-                                            onClick={exportEncrypted}
+                                            onClick={() => exportEncrypted(view.mnemonic)}
                                             disabled={!exportPassword}
                                         >
                                             <FileDown className="w-4 h-4" /> Export
@@ -1107,12 +1108,7 @@ export function KeypairManager({ appState, onBack }: Props) {
                                                 ))}
                                             </div>
                                             <div className="flex gap-2">
-                                                <Button
-                                                    variant="outline"
-                                                    size="xs"
-                                                    className="flex-1"
-                                                    onClick={() => setSeedWordsRevealed(r => !r)}
-                                                >
+                                                <Button variant="outline" size="xs" className="flex-1" onClick={() => setSeedWordsRevealed(r => !r)}>
                                                     {seedWordsRevealed
                                                         ? <><EyeOff className="w-3 h-3" /> Hide</>
                                                         : <><Eye className="w-3 h-3" /> Show</>
@@ -1122,11 +1118,79 @@ export function KeypairManager({ appState, onBack }: Props) {
                                                     <Copy className="w-3 h-3" /> Copy
                                                 </Button>
                                             </div>
+                                            <Button
+                                                variant="outline"
+                                                size="xs"
+                                                className="w-full gap-1.5"
+                                                onClick={() => { setShowExportModal(true); setExportError(''); }}
+                                            >
+                                                <FileDown className="w-3 h-3" /> Export Encrypted Backup
+                                            </Button>
                                         </div>
                                     </Alert>
                                 )}
                             </CardContent>
                         </Card>
+
+                        {/* Export password modal (seed detail view) */}
+                        {showExportModal && (
+                            <div className="fixed inset-0 z-50 overflow-y-auto bg-black/60 backdrop-blur-sm animate-fade-in">
+                                <div className="flex min-h-full items-center justify-center px-4 py-20">
+                                    <Card className="w-[340px] shadow-2xl">
+                                        <CardHeader>
+                                            <CardTitle className="flex items-center gap-2 text-base">
+                                                <Lock className="w-4 h-4" />
+                                                Encrypt Backup
+                                            </CardTitle>
+                                        </CardHeader>
+                                        <CardContent className="space-y-3">
+                                            <p className="text-xs text-muted-foreground">
+                                                Choose a password to encrypt your seed backup file. You'll need this password to decrypt it later.
+                                            </p>
+                                            {exportError && (
+                                                <Alert variant="destructive">
+                                                    <AlertDescription className="text-xs">{exportError}</AlertDescription>
+                                                </Alert>
+                                            )}
+                                            <div className="space-y-1.5">
+                                                <label className="text-xs font-medium text-muted-foreground">Password</label>
+                                                <Input
+                                                    type="password"
+                                                    value={exportPassword}
+                                                    onChange={e => setExportPassword(e.target.value)}
+                                                    placeholder="Enter password"
+                                                />
+                                            </div>
+                                            <div className="space-y-1.5">
+                                                <label className="text-xs font-medium text-muted-foreground">Confirm Password</label>
+                                                <Input
+                                                    type="password"
+                                                    value={exportConfirmPassword}
+                                                    onChange={e => setExportConfirmPassword(e.target.value)}
+                                                    onKeyDown={e => e.key === 'Enter' && exportEncrypted(seedWordsDisplay)}
+                                                />
+                                            </div>
+                                            <div className="flex gap-2 pt-1">
+                                                <Button
+                                                    variant="outline"
+                                                    className="flex-1"
+                                                    onClick={() => { setShowExportModal(false); setExportPassword(''); setExportConfirmPassword(''); }}
+                                                >
+                                                    Cancel
+                                                </Button>
+                                                <Button
+                                                    className="flex-1 gap-1.5"
+                                                    onClick={() => exportEncrypted(seedWordsDisplay)}
+                                                    disabled={!exportPassword}
+                                                >
+                                                    <FileDown className="w-4 h-4" /> Export
+                                                </Button>
+                                            </div>
+                                        </CardContent>
+                                    </Card>
+                                </div>
+                            </div>
+                        )}
 
                         {/* Danger zone */}
                         <Card className="border-destructive/30">

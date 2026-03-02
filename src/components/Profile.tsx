@@ -153,26 +153,28 @@ export function Profile({ pubkey, npub, onBack }: Props) {
 
     useEffect(() => { fetchProfile(); }, [fetchProfile]);
 
-    // Verify DNN ID ownership
+    // Verify DNN ID ownership (use profile's nip05 — if no '@', it's a DNN ID)
     useEffect(() => {
-        if (!npub) return;
+        if (!npub || !meta?.nip05) {
+            setVerifiedDnnName(null);
+            setDnnVerified(null);
+            return;
+        }
+        const nip05 = meta.nip05;
+        // DNN IDs don't contain '@' — regular NIP-05 does
+        const isDnn = !nip05.includes('@');
+        if (!isDnn) {
+            setVerifiedDnnName(null);
+            setDnnVerified(null);
+            return;
+        }
+        setVerifiedDnnName(nip05);
         dnnService.initialize().then(() => {
-            dnnService.getUserNames(npub).then(async names => {
-                if (names.length > 0) {
-                    const name = names[0];
-                    const displayName = name.camelCase || name.encoded || name.name;
-                    const verified = await dnnService.verifyDnnId(
-                        name.dnnId || name.encoded || name.name,
-                        npub
-                    );
-                    setVerifiedDnnName(displayName);
-                    setDnnVerified(verified);
-                } else {
-                    setDnnVerified(false);
-                }
+            dnnService.verifyDnnId(nip05, npub).then(verified => {
+                setDnnVerified(verified);
             }).catch(() => setDnnVerified(false));
         }).catch(() => setDnnVerified(false));
-    }, [npub]);
+    }, [npub, meta?.nip05]);
 
     const startEdit = () => {
         setEditMeta(meta ? { ...meta } : {});
@@ -221,163 +223,170 @@ export function Profile({ pubkey, npub, onBack }: Props) {
     }
 
     return (
-        <div className="animate-fade-in space-y-4 pb-[100px]">
-            {/* Back button */}
-            <button
-                onClick={onBack}
-                className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
-            >
-                <ArrowLeft className="w-4 h-4" /> Back
-            </button>
+        <div className="flex flex-col h-[calc(100vh-115px)] animate-fade-in">
+            {/* ── Sticky header ── */}
+            <div className="flex items-center gap-3 shrink-0 pb-3">
+                <button
+                    onClick={onBack}
+                    className="w-8 h-8 rounded-lg bg-secondary hover:bg-secondary/80 flex items-center justify-center transition-colors cursor-pointer shrink-0"
+                >
+                    <ArrowLeft className="w-4 h-4" />
+                </button>
+                <h2 className="text-lg font-semibold">Profile</h2>
+            </div>
 
-            {/* Banner + Avatar */}
-            <div className="relative">
-                {/* Banner */}
-                <div
-                    className="w-full h-28 bg-gradient-to-br from-primary/30 to-primary/5 rounded-2xl overflow-hidden"
-                    style={meta?.banner ? { backgroundImage: `url(${meta.banner})`, backgroundSize: 'cover', backgroundPosition: 'center' } : {}}
-                />
-                {/* Avatar */}
-                <div className="absolute -bottom-10 left-4">
-                    <div className="w-20 h-20 rounded-full border-4 border-background overflow-hidden bg-secondary">
-                        {meta?.picture ? (
-                            <img src={meta.picture} alt="" className="w-full h-full object-cover" />
+            {/* ── Scrollable content ── */}
+            <div className="flex-1 overflow-y-auto space-y-4 pb-[100px]">
+
+                {/* Banner + Avatar */}
+                <div className="relative">
+                    {/* Banner */}
+                    <div
+                        className="w-full h-28 bg-gradient-to-br from-primary/30 to-primary/5 rounded-2xl overflow-hidden"
+                        style={meta?.banner ? { backgroundImage: `url(${meta.banner})`, backgroundSize: 'cover', backgroundPosition: 'center' } : {}}
+                    />
+                    {/* Avatar */}
+                    <div className="absolute -bottom-10 left-4">
+                        <div className="w-20 h-20 rounded-full border-4 border-background overflow-hidden bg-secondary">
+                            {meta?.picture ? (
+                                <img src={meta.picture} alt="" className="w-full h-full object-cover" />
+                            ) : (
+                                <div className="w-full h-full flex items-center justify-center">
+                                    <User className="w-8 h-8 text-muted-foreground" />
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                    {/* Edit button */}
+                    <div className="absolute top-2 right-2">
+                        {!editing ? (
+                            <Button size="sm" variant="secondary" onClick={startEdit} className="gap-1.5 rounded-xl text-xs">
+                                <Pencil className="w-3.5 h-3.5" /> Edit Profile
+                            </Button>
                         ) : (
-                            <div className="w-full h-full flex items-center justify-center">
-                                <User className="w-8 h-8 text-muted-foreground" />
+                            <div className="flex gap-1.5">
+                                <Button size="sm" variant="ghost" onClick={cancelEdit} className="gap-1 rounded-xl text-xs bg-secondary text-secondary-foreground hover:bg-secondary/80">
+                                    <X className="w-3.5 h-3.5" /> Cancel
+                                </Button>
+                                <Button size="sm" onClick={saveProfile} disabled={saving} className="gap-1 rounded-xl text-xs bg-primary text-primary-foreground hover:bg-primary/80">
+                                    {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+                                    Save
+                                </Button>
                             </div>
                         )}
                     </div>
                 </div>
-                {/* Edit button */}
-                <div className="absolute top-2 right-2">
-                    {!editing ? (
-                        <Button size="sm" variant="secondary" onClick={startEdit} className="gap-1.5 rounded-xl text-xs">
-                            <Pencil className="w-3.5 h-3.5" /> Edit Profile
-                        </Button>
-                    ) : (
-                        <div className="flex gap-1.5">
-                            <Button size="sm" variant="ghost" onClick={cancelEdit} className="gap-1 rounded-xl text-xs bg-secondary text-secondary-foreground hover:bg-secondary/80">
-                                <X className="w-3.5 h-3.5" /> Cancel
-                            </Button>
-                            <Button size="sm" onClick={saveProfile} disabled={saving} className="gap-1 rounded-xl text-xs bg-primary text-primary-foreground hover:bg-primary/80">
-                                {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
-                                Save
-                            </Button>
+
+                {/* Name / handle area */}
+                <div className="pt-8 px-1 space-y-1">
+                    {editing ? (
+                        <div className="space-y-2">
+                            <Input
+                                value={editMeta.display_name ?? editMeta.name ?? ''}
+                                onChange={e => { updateField('display_name', e.target.value); updateField('name', e.target.value); }}
+                                placeholder="Display name"
+                                className="text-lg font-bold"
+                            />
                         </div>
-                    )}
-                </div>
-            </div>
-
-            {/* Name / handle area */}
-            <div className="pt-8 px-1 space-y-1">
-                {editing ? (
-                    <div className="space-y-2">
-                        <Input
-                            value={editMeta.display_name ?? editMeta.name ?? ''}
-                            onChange={e => { updateField('display_name', e.target.value); updateField('name', e.target.value); }}
-                            placeholder="Display name"
-                            className="text-lg font-bold"
-                        />
-                    </div>
-                ) : (
-                    <>
-                        <h2 className="text-xl font-bold">{meta?.display_name || meta?.name || 'Anonymous'}</h2>
-                        {verifiedDnnName && dnnVerified === true && (
-                            <p className="text-sm text-primary flex items-center gap-1">
-                                <BadgeCheck className="w-3.5 h-3.5" /> {verifiedDnnName}
-                                <button
-                                    onClick={() => copyToClipboard(verifiedDnnName, 'dnn')}
-                                    className="p-0.5 text-primary/60 hover:text-primary transition-colors cursor-pointer"
-                                    title="Copy DNN ID"
-                                >
-                                    {copiedField === 'dnn' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
-                                </button>
-                            </p>
-                        )}
-                        {!verifiedDnnName && meta?.nip05 && (
-                            <p className="text-sm text-muted-foreground flex items-center gap-1">
-                                <ShieldAlert className="w-3.5 h-3.5" /> {meta.nip05} <span className="text-xs opacity-60">(unverified)</span>
-                                <button
-                                    onClick={() => copyToClipboard(meta.nip05!, 'nip05')}
-                                    className="p-0.5 text-muted-foreground/60 hover:text-foreground transition-colors cursor-pointer"
-                                    title="Copy NIP-05"
-                                >
-                                    {copiedField === 'nip05' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
-                                </button>
-                            </p>
-                        )}
-                        <p className="text-xs text-muted-foreground font-mono flex items-center gap-1">
-                            {npub.slice(0, 20)}…{npub.slice(-8)}
-                            <button
-                                onClick={() => copyToClipboard(npub, 'npub')}
-                                className="p-0.5 text-muted-foreground/60 hover:text-foreground transition-colors cursor-pointer"
-                                title="Copy npub"
-                            >
-                                {copiedField === 'npub' ? <Check className="w-3 h-3 text-green-400" /> : <Copy className="w-3 h-3" />}
-                            </button>
-                        </p>
-                    </>
-                )}
-            </div>
-
-            {/* Profile fields */}
-            <Card>
-                <CardContent className="pt-4 space-y-4">
-                    <ProfileField
-                        icon={<FileText className="w-4 h-4" />}
-                        label="Bio"
-                        value={editing ? editMeta.about : meta?.about}
-                        editing={editing}
-                        multiline
-                        onChange={v => updateField('about', v)}
-                    />
-                    <ProfileField
-                        icon={<AtSign className="w-4 h-4" />}
-                        label="NIP-05"
-                        value={editing ? editMeta.nip05 : meta?.nip05}
-                        editing={editing}
-                        onChange={v => updateField('nip05', v)}
-                        placeholder="you@example.com"
-                    />
-                    <ProfileField
-                        icon={<Zap className="w-4 h-4" />}
-                        label="Lightning Address"
-                        value={editing ? editMeta.lud16 : meta?.lud16}
-                        editing={editing}
-                        onChange={v => updateField('lud16', v)}
-                        placeholder="you@wallet.com"
-                    />
-                    <ProfileField
-                        icon={<Globe className="w-4 h-4" />}
-                        label="Website"
-                        value={editing ? editMeta.website : meta?.website}
-                        editing={editing}
-                        onChange={v => updateField('website', v)}
-                        placeholder="https://example.com"
-                    />
-                    {editing && (
+                    ) : (
                         <>
-                            <ProfileField
-                                icon={<User className="w-4 h-4" />}
-                                label="Profile Picture URL"
-                                value={editMeta.picture}
-                                editing
-                                onChange={v => updateField('picture', v)}
-                                placeholder="https://..."
-                            />
-                            <ProfileField
-                                icon={<FileText className="w-4 h-4" />}
-                                label="Banner URL"
-                                value={editMeta.banner}
-                                editing
-                                onChange={v => updateField('banner', v)}
-                                placeholder="https://..."
-                            />
+                            <h2 className="text-xl font-bold">{meta?.display_name || meta?.name || 'Anonymous'}</h2>
+                            {verifiedDnnName && dnnVerified === true && (
+                                <p className="text-sm text-primary flex items-center gap-1">
+                                    <BadgeCheck className="w-3.5 h-3.5" /> {verifiedDnnName}
+                                    <button
+                                        onClick={() => copyToClipboard(verifiedDnnName, 'dnn')}
+                                        className="p-0.5 text-primary/60 hover:text-primary transition-colors cursor-pointer"
+                                        title="Copy DNN ID"
+                                    >
+                                        {copiedField === 'dnn' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                                    </button>
+                                </p>
+                            )}
+                            {!verifiedDnnName && meta?.nip05 && (
+                                <p className="text-sm text-muted-foreground flex items-center gap-1">
+                                    <ShieldAlert className="w-3.5 h-3.5" /> {meta.nip05} <span className="text-xs opacity-60">(unverified)</span>
+                                    <button
+                                        onClick={() => copyToClipboard(meta.nip05!, 'nip05')}
+                                        className="p-0.5 text-muted-foreground/60 hover:text-foreground transition-colors cursor-pointer"
+                                        title="Copy NIP-05"
+                                    >
+                                        {copiedField === 'nip05' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                                    </button>
+                                </p>
+                            )}
+                            <p className="text-xs text-muted-foreground font-mono flex items-center gap-1">
+                                {npub.slice(0, 20)}…{npub.slice(-8)}
+                                <button
+                                    onClick={() => copyToClipboard(npub, 'npub')}
+                                    className="p-0.5 text-muted-foreground/60 hover:text-foreground transition-colors cursor-pointer"
+                                    title="Copy npub"
+                                >
+                                    {copiedField === 'npub' ? <Check className="w-3 h-3 text-green-400" /> : <Copy className="w-3 h-3" />}
+                                </button>
+                            </p>
                         </>
                     )}
-                </CardContent>
-            </Card>
+                </div>
+
+                {/* Profile fields */}
+                <Card>
+                    <CardContent className="pt-4 space-y-4">
+                        <ProfileField
+                            icon={<FileText className="w-4 h-4" />}
+                            label="Bio"
+                            value={editing ? editMeta.about : meta?.about}
+                            editing={editing}
+                            multiline
+                            onChange={v => updateField('about', v)}
+                        />
+                        <ProfileField
+                            icon={<AtSign className="w-4 h-4" />}
+                            label="NIP-05"
+                            value={editing ? editMeta.nip05 : meta?.nip05}
+                            editing={editing}
+                            onChange={v => updateField('nip05', v)}
+                            placeholder="you@example.com"
+                        />
+                        <ProfileField
+                            icon={<Zap className="w-4 h-4" />}
+                            label="Lightning Address"
+                            value={editing ? editMeta.lud16 : meta?.lud16}
+                            editing={editing}
+                            onChange={v => updateField('lud16', v)}
+                            placeholder="you@wallet.com"
+                        />
+                        <ProfileField
+                            icon={<Globe className="w-4 h-4" />}
+                            label="Website"
+                            value={editing ? editMeta.website : meta?.website}
+                            editing={editing}
+                            onChange={v => updateField('website', v)}
+                            placeholder="https://example.com"
+                        />
+                        {editing && (
+                            <>
+                                <ProfileField
+                                    icon={<User className="w-4 h-4" />}
+                                    label="Profile Picture URL"
+                                    value={editMeta.picture}
+                                    editing
+                                    onChange={v => updateField('picture', v)}
+                                    placeholder="https://..."
+                                />
+                                <ProfileField
+                                    icon={<FileText className="w-4 h-4" />}
+                                    label="Banner URL"
+                                    value={editMeta.banner}
+                                    editing
+                                    onChange={v => updateField('banner', v)}
+                                    placeholder="https://..."
+                                />
+                            </>
+                        )}
+                    </CardContent>
+                </Card>
+            </div>
         </div>
     );
 }

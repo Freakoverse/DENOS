@@ -55,6 +55,32 @@ Then open the `.dmg` normally and drag **DENOS.app** to your Applications folder
 
 > **Note:** This only needs to be done once per download. The warning is caused by macOS Gatekeeper quarantining unsigned apps — the app itself is safe.
 
+**Fixing Keychain password prompts:** macOS may repeatedly ask for your Keychain password every time you use DENOS. This happens because the app is unsigned and macOS can't remember the "Always Allow" setting. You can fix this permanently by creating a free self-signed certificate:
+
+**Step 1 — Create a self-signed certificate (one-time):**
+1. Open **Keychain Access** (search for it in Spotlight with `Cmd + Space`)
+2. In the menu bar, click **Keychain Access → Certificate Assistant → Create a Certificate…**
+3. Fill in the form:
+   - **Name:** `DENOS Dev` (or any name you'll remember)
+   - **Identity Type:** `Self Signed Root`
+   - **Certificate Type:** `Code Signing`
+4. Click **Create**, then **Done**
+
+**Step 2 — Sign the app:**
+1. Open **Terminal** (search for it in Spotlight)
+2. Run this command:
+   ```bash
+   codesign --force --deep --sign "DENOS Dev" /Applications/DENOS.app
+   ```
+3. You should see no error output — that means it worked
+
+**Step 3 — Allow Keychain access (one-time):**
+1. Open DENOS — macOS will ask for your Keychain password one last time
+2. Click **"Always Allow"**
+3. From now on, DENOS will access the Keychain silently without prompts
+
+> **Note:** You'll need to re-sign after each DENOS update (repeat Step 2 only).
+
 ### Browser Compatibility (Local Signer / NIP-PC55)
 
 The Local Signer (NIP-PC55) enables "Login with DENOS" on supported Nostr websites by running a WebSocket server on `ws://localhost:7777`. Some browsers block this connection from HTTPS pages due to mixed content security policies:
