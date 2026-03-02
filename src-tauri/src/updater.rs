@@ -220,6 +220,7 @@ pub async fn download_and_install_update(
 ) -> Result<String, String> {
     use sha2::{Sha256, Digest};
     use std::io::Write;
+    use tauri::Emitter;
 
     if blossom_servers.is_empty() {
         return Err("No Blossom servers configured".to_string());
@@ -244,24 +245,47 @@ pub async fn download_and_install_update(
         match http_client.get(&url).send().await {
             Ok(resp) => {
                 if resp.status().is_success() {
-                    match resp.bytes().await {
-                        Ok(bytes) => {
-                            // Verify SHA-256
-                            let mut hasher = Sha256::new();
-                            hasher.update(&bytes);
-                            let computed = format!("{:x}", hasher.finalize());
+                    // Get total size from Content-Length header
+                    let total_bytes = resp.content_length().unwrap_or(0);
 
-                            if computed == hash {
-                                info!("[Updater] SHA-256 verified: {} ({} bytes)", computed, bytes.len());
-                                binary_data = Some(bytes.to_vec());
-                                break;
-                            } else {
-                                last_error = format!("Hash mismatch from {}: expected {} got {}", server, hash, computed);
+                    // Stream the download and emit progress events
+                    let mut bytes_downloaded: u64 = 0;
+                    let mut buffer = Vec::with_capacity(total_bytes as usize);
+
+                    let mut stream = resp;
+                    loop {
+                        match stream.chunk().await {
+                            Ok(Some(chunk)) => {
+                                bytes_downloaded += chunk.len() as u64;
+                                buffer.extend_from_slice(&chunk);
+
+                                let _ = app.emit("download-progress", serde_json::json!({
+                                    "bytes_downloaded": bytes_downloaded,
+                                    "total_bytes": total_bytes,
+                                }));
+                            }
+                            Ok(None) => break, // Download complete
+                            Err(e) => {
+                                last_error = format!("Failed to read body from {}: {}", server, e);
                                 warn!("[Updater] {}", last_error);
+                                buffer.clear();
+                                break;
                             }
                         }
-                        Err(e) => {
-                            last_error = format!("Failed to read body from {}: {}", server, e);
+                    }
+
+                    if !buffer.is_empty() {
+                        // Verify SHA-256
+                        let mut hasher = Sha256::new();
+                        hasher.update(&buffer);
+                        let computed = format!("{:x}", hasher.finalize());
+
+                        if computed == hash {
+                            info!("[Updater] SHA-256 verified: {} ({} bytes)", computed, buffer.len());
+                            binary_data = Some(buffer);
+                            break;
+                        } else {
+                            last_error = format!("Hash mismatch from {}: expected {} got {}", server, hash, computed);
                             warn!("[Updater] {}", last_error);
                         }
                     }

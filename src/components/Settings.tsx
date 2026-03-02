@@ -1554,6 +1554,9 @@ function AboutPage({ onBack, toast, onNavigateToWallet, onNavigateToEcashSend, a
     // Update state
     const [checkingUpdate, setCheckingUpdate] = useState(false);
     const [downloadingUpdate, setDownloadingUpdate] = useState(false);
+    const [downloadProgress, setDownloadProgress] = useState<{
+        bytesDownloaded: number; totalBytes: number; startTime: number;
+    } | null>(null);
     const [updateInfo, setUpdateInfo] = useState<{
         new_version: string; notes: string; has_platform_binary: boolean;
         binary_hash?: string; binary_ext?: string;
@@ -1622,6 +1625,14 @@ function AboutPage({ onBack, toast, onNavigateToWallet, onNavigateToEcashSend, a
             return;
         }
         setDownloadingUpdate(true);
+        setDownloadProgress({ bytesDownloaded: 0, totalBytes: 0, startTime: Date.now() });
+        const unlisten = await listen<{ bytes_downloaded: number; total_bytes: number }>('download-progress', (event) => {
+            setDownloadProgress(prev => ({
+                bytesDownloaded: event.payload.bytes_downloaded,
+                totalBytes: event.payload.total_bytes,
+                startTime: prev?.startTime || Date.now(),
+            }));
+        });
         try {
             const servers = blossomServers.getServers();
             await invoke('download_and_install_update', {
@@ -1633,7 +1644,9 @@ function AboutPage({ onBack, toast, onNavigateToWallet, onNavigateToEcashSend, a
         } catch (e: any) {
             toast('Update failed: ' + e, 'error');
         }
+        unlisten();
         setDownloadingUpdate(false);
+        setDownloadProgress(null);
     };
 
     const handleUploadFiles = async () => {
@@ -1819,7 +1832,27 @@ function AboutPage({ onBack, toast, onNavigateToWallet, onNavigateToEcashSend, a
                     {checkingUpdate ? (
                         <><RefreshCw className="w-4 h-4 mr-2 animate-spin" /> Checking…</>
                     ) : downloadingUpdate ? (
-                        <><RefreshCw className="w-4 h-4 mr-2 animate-spin" /> Downloading update…</>
+                        <div className="w-full">
+                            {(() => {
+                                const pct = downloadProgress && downloadProgress.totalBytes > 0
+                                    ? Math.round((downloadProgress.bytesDownloaded / downloadProgress.totalBytes) * 100)
+                                    : 0;
+                                const elapsed = downloadProgress ? (Date.now() - downloadProgress.startTime) / 1000 : 0;
+                                const speed = elapsed > 0 && downloadProgress ? downloadProgress.bytesDownloaded / elapsed : 0;
+                                const speedStr = speed > 1048576 ? `${(speed / 1048576).toFixed(1)} MB/s` : `${(speed / 1024).toFixed(0)} KB/s`;
+                                return (
+                                    <>
+                                        <span className="text-sm">Downloading… {pct}% · {speedStr}</span>
+                                        <div className="w-full h-1.5 bg-primary-foreground/20 rounded-full mt-1.5 overflow-hidden">
+                                            <div
+                                                className="h-full bg-primary-foreground rounded-full transition-all duration-300 ease-out"
+                                                style={{ width: `${pct}%` }}
+                                            />
+                                        </div>
+                                    </>
+                                );
+                            })()}
+                        </div>
                     ) : updateInfo ? (
                         <><Download className="w-4 h-4 mr-2" /> Update Now — v{updateInfo.new_version}</>
                     ) : (

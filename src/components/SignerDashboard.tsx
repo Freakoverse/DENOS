@@ -325,6 +325,9 @@ export default function SignerDashboard({ activePubkey, activeNpub }: SignerDash
         binary_hash?: string; binary_ext?: string;
     } | null>(null);
     const [updateDismissed, setUpdateDismissed] = useState(false);
+    const [downloadProgress, setDownloadProgress] = useState<{
+        bytesDownloaded: number; totalBytes: number; startTime: number;
+    } | null>(null);
     // Ticking clock for toast expiry (re-renders every second when requests exist)
     const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000));
     const videoRef = useRef<HTMLVideoElement>(null);
@@ -1275,7 +1278,15 @@ export default function SignerDashboard({ activePubkey, activeNpub }: SignerDash
                                 toast('No binary available for your platform');
                                 return;
                             }
-                            toast('Downloading update\u2026');
+                            toast('Downloading update…', 'info');
+                            setDownloadProgress({ bytesDownloaded: 0, totalBytes: 0, startTime: Date.now() });
+                            const unlisten = await listen<{ bytes_downloaded: number; total_bytes: number }>('download-progress', (event) => {
+                                setDownloadProgress(prev => ({
+                                    bytesDownloaded: event.payload.bytes_downloaded,
+                                    totalBytes: event.payload.total_bytes,
+                                    startTime: prev?.startTime || Date.now(),
+                                }));
+                            });
                             try {
                                 const servers = blossomServers.getServers();
                                 await invoke('download_and_install_update', {
@@ -1285,15 +1296,40 @@ export default function SignerDashboard({ activePubkey, activeNpub }: SignerDash
                                 });
                             } catch (e: any) {
                                 toast('Update failed: ' + e);
+                                setDownloadProgress(null);
+                            } finally {
+                                unlisten();
                             }
                         }}
                         className="flex-1 flex items-center gap-3 px-4 py-3 rounded-xl bg-green-500/10 hover:bg-green-500/20 border border-green-500/20 transition-colors text-left"
                     >
                         <Download className="w-5 h-5 text-green-500 shrink-0" />
                         <div className="flex-1 min-w-0">
-                            <span className="text-sm font-medium text-green-500">Update Available \u2014 v{updateInfo.new_version}</span>
-                            {updateInfo.notes && (
-                                <p className="text-xs text-muted-foreground line-clamp-1 mt-0.5">{updateInfo.notes}</p>
+                            {downloadProgress ? (() => {
+                                const pct = downloadProgress.totalBytes > 0
+                                    ? Math.round((downloadProgress.bytesDownloaded / downloadProgress.totalBytes) * 100)
+                                    : 0;
+                                const elapsed = (Date.now() - downloadProgress.startTime) / 1000;
+                                const speed = elapsed > 0 ? downloadProgress.bytesDownloaded / elapsed : 0;
+                                const speedStr = speed > 1048576 ? `${(speed / 1048576).toFixed(1)} MB/s` : `${(speed / 1024).toFixed(0)} KB/s`;
+                                return (
+                                    <>
+                                        <span className="text-sm font-medium text-green-500">Downloading… {pct}% · {speedStr}</span>
+                                        <div className="w-full h-1.5 bg-green-500/20 rounded-full mt-1.5 overflow-hidden">
+                                            <div
+                                                className="h-full bg-green-500 rounded-full transition-all duration-300 ease-out"
+                                                style={{ width: `${pct}%` }}
+                                            />
+                                        </div>
+                                    </>
+                                );
+                            })() : (
+                                <>
+                                    <span className="text-sm font-medium text-green-500">Update available · v{updateInfo.new_version}</span>
+                                    {updateInfo.notes && (
+                                        <p className="text-xs text-muted-foreground line-clamp-1 mt-0.5">{updateInfo.notes}</p>
+                                    )}
+                                </>
                             )}
                         </div>
                     </button>
