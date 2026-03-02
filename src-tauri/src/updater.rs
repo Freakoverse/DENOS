@@ -326,17 +326,32 @@ pub async fn download_and_install_update(
 
                 info!("[Updater] AppImage replaced, restarting…");
             } else {
-                // Package-managed (deb/rpm/pkg): use pkexec to copy with root permissions
+                // Package-managed (deb/rpm/pkg): use pkexec to replace with root permissions
+                // NOTE: Can't use plain `cp` because it fails with ETXTBSY ("Text file busy")
+                // when the destination binary is currently running. Instead, we rm the old
+                // binary first (safe on Linux — the inode stays alive until all handles close),
+                // then cp the new one into place and chmod it executable.
                 let current_exe = std::env::current_exe()
                     .map_err(|e| format!("Failed to get current exe: {}", e))?;
 
+                let script = format!(
+                    "rm -f '{}' && cp '{}' '{}' && chmod 755 '{}'",
+                    current_exe.to_string_lossy(),
+                    temp_path.to_string_lossy(),
+                    current_exe.to_string_lossy(),
+                    current_exe.to_string_lossy(),
+                );
+
+                info!("[Updater] Running pkexec: sh -c \"{}\"", script);
+
                 let status = std::process::Command::new("pkexec")
-                    .args(&["cp", &temp_path.to_string_lossy(), &current_exe.to_string_lossy()])
+                    .args(&["sh", "-c", &script])
                     .status()
                     .map_err(|e| format!("Failed to run pkexec: {}", e))?;
 
                 if !status.success() {
-                    return Err("Update cancelled or pkexec failed".to_string());
+                    let code = status.code().map(|c| c.to_string()).unwrap_or_else(|| "signal".to_string());
+                    return Err(format!("Update failed (pkexec exit code {}). Was the password prompt cancelled?", code));
                 }
 
                 // Clean up temp file
