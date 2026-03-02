@@ -856,7 +856,7 @@ dependencies = [
 
 [[package]]
 name = "denos"
-version = "0.1.92"
+version = "0.1.93"
 dependencies = [
  "async-stream",
  "base64 0.22.1",
