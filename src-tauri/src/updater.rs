@@ -296,14 +296,34 @@ pub async fn download_and_install_update(
     let os = std::env::consts::OS;
     match os {
         "windows" => {
-            // Launch NSIS installer silently, then exit the current app
-            info!("[Updater] Launching Windows installer: {:?}", temp_path);
-            std::process::Command::new(&temp_path)
-                .args(&["/S", "/NCRC"])
-                .spawn()
-                .map_err(|e| format!("Failed to launch installer: {}", e))?;
+            // Launch NSIS installer silently, then relaunch the app after it finishes.
+            // We create a helper batch script that:
+            //   1. Waits for the current process to exit
+            //   2. Runs the NSIS installer silently
+            //   3. Relaunches the updated app
+            //   4. Cleans up after itself
+            let current_exe = std::env::current_exe()
+                .map_err(|e| format!("Failed to get current exe: {}", e))?;
 
-            // Give installer a moment to start, then exit
+            let restart_script = temp_dir.join("denos_update_restart.bat");
+            let script_content = format!(
+                "@echo off\r\ntimeout /t 2 /nobreak >nul\r\n\"{}\" /S /NCRC\r\ntimeout /t 2 /nobreak >nul\r\nstart \"\" \"{}\"\r\ndel \"%~f0\"\r\n",
+                temp_path.to_string_lossy(),
+                current_exe.to_string_lossy(),
+            );
+
+            std::fs::write(&restart_script, &script_content)
+                .map_err(|e| format!("Failed to create restart script: {}", e))?;
+
+            info!("[Updater] Launching Windows update+restart script: {:?}", restart_script);
+
+            // Launch the script hidden (no console window)
+            std::process::Command::new("cmd")
+                .args(&["/C", "start", "/min", "", &restart_script.to_string_lossy()])
+                .spawn()
+                .map_err(|e| format!("Failed to launch update script: {}", e))?;
+
+            // Give the script a moment to start, then exit so the installer can replace files
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             std::process::exit(0);
         }
@@ -358,6 +378,17 @@ pub async fn download_and_install_update(
                 let _ = std::fs::remove_file(&temp_path);
 
                 info!("[Updater] Binary replaced via pkexec, restarting…");
+
+                // Can't use app.restart() here because after rm+cp, /proc/self/exe
+                // points to the deleted old binary (different inode), not the new one.
+                // So we explicitly spawn the new binary by its known path and exit.
+                std::process::Command::new(&current_exe)
+                    .spawn()
+                    .map_err(|e| format!("Failed to restart after update: {}", e))?;
+
+                // Give the new process a moment to start
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                std::process::exit(0);
             }
 
             app.restart();
@@ -425,7 +456,17 @@ pub async fn download_and_install_update(
             let _ = std::fs::remove_file(&temp_path);
 
             info!("[Updater] macOS app updated, restarting…");
-            app.restart();
+
+            // Can't use app.restart() here — after remove_dir_all + cp -R,
+            // the current exe inside the old .app bundle no longer exists.
+            // Use `open` to launch the new .app bundle from /Applications.
+            std::process::Command::new("open")
+                .arg(&dest)
+                .spawn()
+                .map_err(|e| format!("Failed to relaunch app: {}", e))?;
+
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            std::process::exit(0);
         }
         _ => {
             return Err(format!("Unsupported OS: {}", os));
