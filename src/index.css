@@ -145,6 +145,12 @@ html.light [data-state="unchecked"]>[data-state="unchecked"] {
         height: 100%;
         width: 100%;
         overflow: hidden;
+        overscroll-behavior: none;
+    }
+
+    html {
+        position: fixed;
+        inset: 0;
     }
 
     body {

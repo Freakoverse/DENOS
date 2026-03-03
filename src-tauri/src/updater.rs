@@ -323,15 +323,27 @@ pub async fn download_and_install_update(
             // Launch NSIS installer silently, then relaunch the app after it finishes.
             // We create a helper batch script that:
             //   1. Waits for the current process to exit
-            //   2. Runs the NSIS installer silently
-            //   3. Relaunches the updated app
-            //   4. Cleans up after itself
+            //   2. Uninstalls the old version silently (prevents duplicate entries)
+            //   3. Runs the NSIS installer silently
+            //   4. Relaunches the updated app
+            //   5. Cleans up after itself
             let current_exe = std::env::current_exe()
                 .map_err(|e| format!("Failed to get current exe: {}", e))?;
 
             let restart_script = temp_dir.join("denos_update_restart.bat");
             let script_content = format!(
-                "@echo off\r\ntimeout /t 2 /nobreak >nul\r\n\"{}\" /S /NCRC\r\ntimeout /t 2 /nobreak >nul\r\nstart \"\" \"{}\"\r\ndel \"%~f0\"\r\n",
+                concat!(
+                    "@echo off\r\n",
+                    "timeout /t 2 /nobreak >nul\r\n",
+                    "if exist \"%LOCALAPPDATA%\\DENOS\\uninstall.exe\" (\r\n",
+                    "\"%LOCALAPPDATA%\\DENOS\\uninstall.exe\" /S\r\n",
+                    "timeout /t 3 /nobreak >nul\r\n",
+                    ")\r\n",
+                    "\"{}\" /S /NCRC\r\n",
+                    "timeout /t 2 /nobreak >nul\r\n",
+                    "start \"\" \"{}\"\r\n",
+                    "del \"%~f0\"\r\n"
+                ),
                 temp_path.to_string_lossy(),
                 current_exe.to_string_lossy(),
             );
