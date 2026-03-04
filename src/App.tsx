@@ -245,7 +245,7 @@ function App() {
             onMouseMove={mainDrag.onMouseMove}
             onMouseUp={mainDrag.onMouseUp}
             onMouseLeave={mainDrag.onMouseLeave}
-            className="h-full bg-background overflow-y-auto select-none"
+            className="h-full bg-background overflow-hidden select-none"
         >
             {/* Lock Screen */}
             {isLocked && appState.initialized && (
@@ -304,9 +304,9 @@ function App() {
             </nav>
 
             {/* Content */}
-            <main className="px-4 h-full">
+            <main className="px-4 h-full overflow-y-auto pt-[115px] pb-[80px]">
                 {showProfile ? (
-                    <div className="animate-fade-in pt-[115px]">
+                    <div className="animate-fade-in">
                         <Profile
                             pubkey={appState.active_keypair}
                             npub={activeKeypair?.npub ?? ''}
@@ -314,11 +314,11 @@ function App() {
                         />
                     </div>
                 ) : showOnboarding && !hasKeypairs ? (
-                    <div className="animate-fade-in h-full pt-[115px]">
+                    <div className="animate-fade-in h-full">
                         <Onboarding onComplete={() => setShowOnboarding(false)} />
                     </div>
                 ) : (
-                    <div key={navResetKey} className="animate-fade-in h-full pt-[115px]">
+                    <div key={navResetKey} className="animate-fade-in h-full">
                         {tab === 'dashboard' && <SignerDashboard activePubkey={appState.active_keypair} activeNpub={appState.keypairs.find(k => k.pubkey === appState.active_keypair)?.npub} />}
                         {tab === 'wallet' && <Wallet activePubkey={appState.active_keypair} sendPrefill={sendPrefill} onPrefillConsumed={() => setSendPrefill(null)} ecashRecipient={ecashPrefill?.recipient} ecashAutoSend={ecashPrefill?.autoSend} onEcashPrefillConsumed={() => setEcashPrefill(null)} />}
                         {tab === 'ids' && <IdsView activePubkey={appState.active_keypair} activeNpub={appState.keypairs.find(k => k.pubkey === appState.active_keypair)?.npub} onNavigateToWallet={(recipient, feeRate, amount) => { setSendPrefill({ recipient, amount: amount || 546, feeRate }); setTab('wallet'); }} />}

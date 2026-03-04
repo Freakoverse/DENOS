@@ -146,11 +146,7 @@ html.light [data-state="unchecked"]>[data-state="unchecked"] {
         width: 100%;
         overflow: hidden;
         overscroll-behavior: none;
-    }
-
-    html {
-        position: fixed;
-        inset: 0;
+        touch-action: none;
     }
 
     body {
