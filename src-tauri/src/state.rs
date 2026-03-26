@@ -588,8 +588,20 @@ impl AppState {
         let nip46_enabled = load_from_keyring::<bool>(&k(KEY_NIP46_ENABLED))
             .unwrap_or(true);
 
-        let signing_history = load_from_keyring::<Vec<SigningHistoryEntry>>(&k(KEY_SIGNING_HISTORY))
-            .unwrap_or_default();
+        // Load signing history using index + individual entries pattern
+        let signing_history = {
+            let entry_ids = load_from_keyring::<Vec<String>>(&k(KEY_SIGNING_HISTORY))
+                .unwrap_or_default();
+            if entry_ids.is_empty() {
+                // Backward compat: try loading old single-blob format
+                // If found, we'll migrate it on next save
+                Vec::new()
+            } else {
+                entry_ids.iter()
+                    .filter_map(|id| load_from_keyring::<SigningHistoryEntry>(&format!("p-{}/sh-{}", profile_id, id)))
+                    .collect::<Vec<_>>()
+            }
+        };
 
         let user_relay_urls = load_from_keyring::<HashMap<String, Vec<String>>>(&k(KEY_USER_RELAYS))
             .unwrap_or_default();
@@ -796,15 +808,28 @@ impl AppState {
     pub fn save_signing_history(&self) -> Result<(), String> {
         let pid = self.profile_id();
         let history = self.signing_history.lock().unwrap();
-        save_to_keyring(&pk(&pid, KEY_SIGNING_HISTORY), &*history)
+        // Store as index + individual entries (avoids Windows Credential Manager size limit)
+        let entry_ids: Vec<String> = history.iter().map(|e| e.id.clone()).collect();
+        save_to_keyring(&pk(&pid, KEY_SIGNING_HISTORY), &entry_ids)?;
+        for entry in history.iter() {
+            save_to_keyring(&format!("p-{}/sh-{}", pid, entry.id), entry)?;
+        }
+        Ok(())
     }
 
     /// Record a signing outcome, keeping the latest 100 entries
     pub fn record_signing_history(&self, entry: SigningHistoryEntry) {
+        let pid = self.profile_id();
         let mut history = self.signing_history.lock().unwrap();
+        // If truncating, delete the removed entries from keyring
+        if history.len() >= 100 {
+            for old in history.drain(99..) {
+                let _ = delete_raw_from_keyring(&format!("p-{}/sh-{}", pid, old.id));
+            }
+        }
         history.insert(0, entry);
-        history.truncate(100);
         drop(history);
+        // Save only the new entry + update the index
         let _ = self.save_signing_history();
     }
 

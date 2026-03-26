@@ -1140,6 +1140,14 @@ pub fn delete_profile(
             }
         }
     }
+    // Delete signing history individual entries
+    if let Ok(index_json) = get_raw_from_keyring(&format!("p-{}/signing-history", pid)) {
+        if let Ok(entry_ids) = serde_json::from_str::<Vec<String>>(&index_json) {
+            for eid in &entry_ids {
+                let _ = delete_raw_from_keyring(&format!("p-{}/sh-{}", pid, eid));
+            }
+        }
+    }
 
     // Delete index keys
     let suffixes = [
