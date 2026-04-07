@@ -718,7 +718,16 @@ impl AppState {
     pub fn save_keypairs(&self) -> Result<(), String> {
         let pid = self.profile_id();
         let keypairs = self.keypairs.lock().unwrap();
+        // Load old index to find removed entries
+        let old_ids = load_from_keyring::<Vec<String>>(&pk(&pid, KEY_KEYPAIRS_INDEX))
+            .unwrap_or_default();
         let pubkeys: Vec<String> = keypairs.iter().map(|kp| kp.pubkey.clone()).collect();
+        // Delete credential entries for removed keypairs
+        for old_id in &old_ids {
+            if !pubkeys.contains(old_id) {
+                let _ = delete_raw_from_keyring(&format!("p-{}/kp-{}", pid, old_id));
+            }
+        }
         save_to_keyring(&pk(&pid, KEY_KEYPAIRS_INDEX), &pubkeys)?;
         for kp in keypairs.iter() {
             save_to_keyring(&format!("p-{}/kp-{}", pid, kp.pubkey), kp)?;
@@ -729,7 +738,14 @@ impl AppState {
     pub fn save_seeds(&self) -> Result<(), String> {
         let pid = self.profile_id();
         let seeds = self.seeds.lock().unwrap();
+        let old_ids = load_from_keyring::<Vec<String>>(&pk(&pid, KEY_SEEDS_INDEX))
+            .unwrap_or_default();
         let seed_ids: Vec<String> = seeds.iter().map(|s| s.id.clone()).collect();
+        for old_id in &old_ids {
+            if !seed_ids.contains(old_id) {
+                let _ = delete_raw_from_keyring(&format!("p-{}/seed-info-{}", pid, old_id));
+            }
+        }
         save_to_keyring(&pk(&pid, KEY_SEEDS_INDEX), &seed_ids)?;
         for s in seeds.iter() {
             save_to_keyring(&format!("p-{}/seed-info-{}", pid, s.id), s)?;
@@ -740,7 +756,16 @@ impl AppState {
     pub fn save_connections(&self) -> Result<(), String> {
         let pid = self.profile_id();
         let connections = self.connections.lock().unwrap();
+        // Load old index to find removed entries
+        let old_ids = load_from_keyring::<Vec<String>>(&pk(&pid, KEY_CONNECTIONS))
+            .unwrap_or_default();
         let conn_ids: Vec<String> = connections.iter().map(|c| c.id.clone()).collect();
+        // Delete credential entries for removed connections
+        for old_id in &old_ids {
+            if !conn_ids.contains(old_id) {
+                let _ = delete_raw_from_keyring(&format!("p-{}/conn-{}", pid, old_id));
+            }
+        }
         save_to_keyring(&pk(&pid, KEY_CONNECTIONS), &conn_ids)?;
         for c in connections.iter() {
             save_to_keyring(&format!("p-{}/conn-{}", pid, c.id), c)?;
@@ -774,7 +799,14 @@ impl AppState {
     pub fn save_upv2_sessions(&self) -> Result<(), String> {
         let pid = self.profile_id();
         let sessions = self.upv2_sessions.lock().unwrap();
+        let old_ids = load_from_keyring::<Vec<String>>(&pk(&pid, KEY_UPV2_SESSIONS))
+            .unwrap_or_default();
         let sess_ids: Vec<String> = sessions.iter().map(|s| s.session_id.clone()).collect();
+        for old_id in &old_ids {
+            if !sess_ids.contains(old_id) {
+                let _ = delete_raw_from_keyring(&format!("p-{}/upv2-sess-{}", pid, old_id));
+            }
+        }
         save_to_keyring(&pk(&pid, KEY_UPV2_SESSIONS), &sess_ids)?;
         for s in sessions.iter() {
             save_to_keyring(&format!("p-{}/upv2-sess-{}", pid, s.session_id), s)?;
@@ -785,7 +817,14 @@ impl AppState {
     pub fn save_login_attempts(&self) -> Result<(), String> {
         let pid = self.profile_id();
         let attempts = self.login_attempts.lock().unwrap();
+        let old_ids = load_from_keyring::<Vec<String>>(&pk(&pid, KEY_LOGIN_ATTEMPTS))
+            .unwrap_or_default();
         let attempt_ids: Vec<String> = attempts.iter().map(|a| a.id.clone()).collect();
+        for old_id in &old_ids {
+            if !attempt_ids.contains(old_id) {
+                let _ = delete_raw_from_keyring(&format!("p-{}/login-attempt-{}", pid, old_id));
+            }
+        }
         save_to_keyring(&pk(&pid, KEY_LOGIN_ATTEMPTS), &attempt_ids)?;
         for a in attempts.iter() {
             save_to_keyring(&format!("p-{}/login-attempt-{}", pid, a.id), a)?;
