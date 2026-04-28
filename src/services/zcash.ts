@@ -215,7 +215,7 @@ export async function fetchZcashTxHistory(address: string): Promise<ZcashTx[]> {
  */
 function hash160(data: Uint8Array): Buffer {
     bitcoin.initEccLib(ecc);
-    return bitcoin.crypto.hash160(Buffer.from(data));
+    return Buffer.from(bitcoin.crypto.hash160(Buffer.from(data)));
 }
 
 /**

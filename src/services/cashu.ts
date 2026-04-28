@@ -7,7 +7,6 @@ import {
     CashuWallet,
     getDecodedToken,
     getEncodedTokenV4,
-    type Proof as CashuProof,
     type MintKeys as CashuMintKeys,
     type MintKeyset,
     CheckStateEnum,

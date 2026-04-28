@@ -16,7 +16,6 @@ import {
     type UTXO,
     type TxHistory,
     type FeeRates,
-    type AddressType as BtcAddressType,
 } from '@/services/bitcoin';
 import {
     deriveEvmAddress,
@@ -35,8 +34,6 @@ import {
     parseUnits,
     etherscanApiKey,
     goldrushApiKey,
-    type EvmChain,
-    type EvmToken,
     type EvmTx,
     type GasEstimate,
 } from '@/services/evm';
@@ -68,7 +65,7 @@ import { useFeedback } from '@/components/ui/feedback';
 import { SatoshiIcon } from '@/components/SatoshiIcon';
 import { EcashWallet } from '@/components/EcashWallet';
 import { FollowsSelector } from '@/components/FollowsSelector';
-import { chainIcons, tokenIcons } from '@/assets/icons/blockchain';
+import { chainIcons } from '@/assets/icons/blockchain';
 import { Users } from 'lucide-react';
 
 type ChainId = 'bitcoin' | 'ethereum' | 'bnb' | 'polygon' | 'avalanche' | 'base' | 'zcash';

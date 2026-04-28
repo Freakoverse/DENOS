@@ -801,7 +801,7 @@ export const EcashSendModal: React.FC<EcashSendModalProps> = ({
                     onClose={() => setShowFollowsSelector(false)}
                     onSelect={(npub) => setRecipient(npub)}
                     activePubkey={activePubkey}
-                    showTaprootAddress={false}
+                    chainType="none"
                 />
             )}
         </>

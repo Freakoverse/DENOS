@@ -192,7 +192,7 @@ function deriveEvenYKeys(privateKeyHex: string): {
         const uncompressed = Buffer.from(ecc.pointCompress(compressed, false));
         return {
             effectivePrivateKey: privateKeyBuffer,
-            compressedPubkey: compressed,
+            compressedPubkey: Buffer.from(compressed),
             uncompressedXY: uncompressed.slice(1), // strip 04 prefix
         };
     } else {
@@ -208,7 +208,7 @@ function deriveEvenYKeys(privateKeyHex: string): {
         const uncompressed = Buffer.from(ecc.pointCompress(negCompressed, false));
         return {
             effectivePrivateKey: negatedBuffer,
-            compressedPubkey: negCompressed,
+            compressedPubkey: Buffer.from(negCompressed),
             uncompressedXY: uncompressed.slice(1),
         };
     }
@@ -226,7 +226,7 @@ function deriveNaturalKeys(privateKeyHex: string): {
     const compressed = keyPair.publicKey;
     const uncompressed = Buffer.from(ecc.pointCompress(compressed, false));
     return {
-        compressedPubkey: compressed,
+        compressedPubkey: Buffer.from(compressed),
         uncompressedXY: uncompressed.slice(1),
     };
 }
