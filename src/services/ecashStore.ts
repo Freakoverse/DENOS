@@ -4,7 +4,10 @@
  */
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
-import type { Proof } from '@cashu/cashu-ts';
+import type { Proof as CashuProof } from '@cashu/cashu-ts';
+
+// Extend Cashu Proof with our mint URL tag
+export type Proof = CashuProof & { mintUrl?: string };
 
 // ── Types ──
 
@@ -70,7 +73,7 @@ interface EcashState {
     updateMintKeys: (url: string, keys: MintKeys) => void;
 
     // Proof management
-    addProofs: (proofs: Proof[], skipPublish?: boolean) => void;
+    addProofs: (proofs: Proof[], skipPublish?: boolean, mintUrl?: string) => void;
     removeProofs: (proofs: Proof[], skipPublish?: boolean) => void;
 
     // History
@@ -88,7 +91,7 @@ interface EcashState {
 
     // NIP-60
     publishProofsToNostr: (skipMerge?: boolean) => Promise<void>;
-    mergeWalletState: (incoming: { proofs: Proof[]; history: HistoryItem[] }) => void;
+    reconcileWithRelayState: (relayState: { proofs: Proof[]; history: HistoryItem[] }) => Promise<{ localOnlyKept: number; spent: number }>;
 
     // Persistence
     saveSession: () => Promise<void>;
@@ -107,6 +110,8 @@ const SAVE_DEBOUNCE_MS = 2000;
 // NIP-60 publish debounce
 let publishTimer: ReturnType<typeof setTimeout> | null = null;
 const PUBLISH_DEBOUNCE_MS = 5000;
+
+
 
 function debouncedSave(state: EcashState) {
     if (saveTimer) clearTimeout(saveTimer);
@@ -160,9 +165,13 @@ export const useEcashStore = create<EcashState>((set, get) => ({
 
     // ── Proof management ──
 
-    addProofs: (newProofs: Proof[], skipPublish = false) => {
+    addProofs: (newProofs: Proof[], skipPublish = false, mintUrl?: string) => {
+        // Tag each proof with its mint URL if provided
+        const taggedProofs = mintUrl
+            ? newProofs.map(p => ({ ...p, mintUrl: p.mintUrl || mintUrl }))
+            : newProofs;
         set(state => ({
-            proofs: [...state.proofs, ...newProofs]
+            proofs: [...state.proofs, ...taggedProofs]
         }));
         debouncedSave(get());
         if (!skipPublish) {
@@ -202,7 +211,8 @@ export const useEcashStore = create<EcashState>((set, get) => ({
             const newHistory = [item, ...state.history].slice(0, 1000);
             return { history: newHistory };
         });
-        debouncedSave(get());
+        // Save immediately — history must not be lost on tab switch
+        get().saveSession().catch(e => console.error('History save failed:', e));
     },
 
     // ── Discovered mints (NIP-87) ──
@@ -303,26 +313,136 @@ export const useEcashStore = create<EcashState>((set, get) => ({
         }
     },
 
-    mergeWalletState: (incoming: { proofs: Proof[]; history: HistoryItem[] }) => {
-        set(state => {
-            // Merge proofs — deduplicate by secret
-            const existingSecrets = new Set(state.proofs.map(p => p.secret));
-            const newProofs = incoming.proofs.filter(p => !existingSecrets.has(p.secret));
+    reconcileWithRelayState: async (relayState: { proofs: Proof[]; history: HistoryItem[] }) => {
+        const localProofs = get().proofs;
 
-            // Merge history — deduplicate by id
-            const existingIds = new Set(state.history.map(h => h.id));
-            const newHistory = incoming.history.filter(h => !existingIds.has(h.id));
+        // Step 1: Union all proofs from local + relay, deduplicated by secret
+        const seenSecrets = new Set<string>();
+        const allProofs: Proof[] = [];
+        for (const p of [...localProofs, ...relayState.proofs]) {
+            if (!seenSecrets.has(p.secret)) {
+                seenSecrets.add(p.secret);
+                allProofs.push(p);
+            }
+        }
 
-            if (newProofs.length === 0 && newHistory.length === 0) return state;
+        console.log(`🔍 Reconcile: ${allProofs.length} total proofs (${localProofs.length} local + ${relayState.proofs.length} relay, deduplicated)`);
 
-            console.log(`📥 Merged ${newProofs.length} new proofs, ${newHistory.length} new history items from NIP-60`);
+        // Step 2: Group all proofs by mint
+        // Use proof.mintUrl first (tagged at receive time), fall back to keyset matching
+        const { mints: storeMints } = get();
+        const proofsByMint: Record<string, Proof[]> = {};
+        const unmatchedProofs: Proof[] = [];
 
-            return {
-                proofs: [...state.proofs, ...newProofs],
-                history: [...newHistory, ...state.history].slice(0, 1000)
-            };
+        allProofs.forEach(proof => {
+            // Try tagged mintUrl first
+            if (proof.mintUrl && storeMints[proof.mintUrl]) {
+                if (!proofsByMint[proof.mintUrl]) proofsByMint[proof.mintUrl] = [];
+                proofsByMint[proof.mintUrl].push(proof);
+                return;
+            }
+
+            // Fallback: keyset ID matching (for legacy proofs without mintUrl)
+            const mint = Object.keys(storeMints).find(m => {
+                const mk = storeMints[m].keys as any;
+                return (mk.keysets && Array.isArray(mk.keysets) &&
+                    mk.keysets.some((k: any) => k.id === proof.id)) ||
+                    mk[proof.id];
+            });
+            if (!mint) {
+                unmatchedProofs.push(proof);
+                return;
+            }
+            // Tag the proof for future use
+            proof.mintUrl = mint;
+            if (!proofsByMint[mint]) proofsByMint[mint] = [];
+            proofsByMint[mint].push(proof);
         });
-        debouncedSave(get());
+
+        if (unmatchedProofs.length > 0) {
+            console.log(`⚠️ Reconcile: ${unmatchedProofs.length} proofs don't match any known mint — discarding as stale`);
+        }
+
+        // Step 3: Check ALL proofs at each mint — keep only unspent
+        let validProofs: Proof[] = [];
+        let totalSpent = 0;
+
+        // Protect pending send proofs from being discarded
+        const pendingSecrets = new Set(
+            get().pendingSends.flatMap(ps => ps.proofSecrets || [])
+        );
+
+        try {
+            const { CashuService } = await import('./cashu');
+
+            // Check matched proofs at their mint
+            for (const [mintUrl, mintProofs] of Object.entries(proofsByMint)) {
+                const proofsToCheck = mintProofs.filter(p => !pendingSecrets.has(p.secret));
+                const protectedProofs = mintProofs.filter(p => pendingSecrets.has(p.secret));
+
+                // Protected proofs always survive
+                validProofs.push(...protectedProofs);
+
+                if (proofsToCheck.length === 0) continue;
+
+                const { valid, spent } = await CashuService.checkProofStates(mintUrl, proofsToCheck);
+                validProofs.push(...valid);
+                totalSpent += spent.length;
+
+                console.log(`  ${mintUrl}: ${valid.length} valid, ${spent.length} spent`);
+            }
+
+            // Unmatched proofs (no mintUrl, no keyset match) — discard as stale
+            if (unmatchedProofs.length > 0) {
+                const unmatchedTotal = unmatchedProofs.reduce((s, p) => s + p.amount, 0);
+                console.log(`🗑️ Reconcile: Discarding ${unmatchedProofs.length} unmatched proofs (${unmatchedTotal} sats) — no mint URL or keyset match`);
+                totalSpent += unmatchedProofs.length;
+            }
+        } catch (e) {
+            console.warn('⚠️ Reconcile: Mint check failed, keeping all proofs to avoid loss:', e);
+            validProofs = allProofs;
+        }
+
+        // ── SAFETY CHECK ── Never nuke the entire wallet from a reconcile
+        if (validProofs.length === 0 && allProofs.length > 0) {
+            console.error(
+                `🛑 SAFETY: Reconcile would discard ALL ${allProofs.length} proofs ` +
+                `(${allProofs.reduce((s, p) => s + p.amount, 0)} sats). ` +
+                `This is almost certainly a mint API error. Keeping all proofs.`
+            );
+            validProofs = allProofs;
+        }
+
+        // Step 4: Merge history (union, deduplicated, newest first)
+        const allHistory = [...relayState.history, ...get().history];
+        const seenIds = new Set<string>();
+        const finalHistory = allHistory.filter(h => {
+            if (seenIds.has(h.id)) return false;
+            seenIds.add(h.id);
+            return true;
+        }).sort((a, b) => b.timestamp - a.timestamp).slice(0, 1000);
+
+        // Step 5: Update state
+        set({ proofs: validProofs, history: finalHistory });
+
+        // Immediate save
+        await get().saveSession().catch(e => console.error('Save after reconcile failed:', e));
+
+        // Step 6: Republish if our final state differs from the relay's event
+        const relaySecrets = new Set(relayState.proofs.map(p => p.secret));
+        const validSecrets = new Set(validProofs.map(p => p.secret));
+        const relayNeedsUpdate =
+            relayState.proofs.length !== validProofs.length ||
+            relayState.proofs.some(p => !validSecrets.has(p.secret)) ||
+            validProofs.some(p => !relaySecrets.has(p.secret));
+
+        if (relayNeedsUpdate) {
+            console.log('📤 Reconcile: Final state differs from relay, republishing...');
+            await get().publishProofsToNostr(true);
+        }
+
+        console.log(`✅ Reconcile complete: ${validProofs.length} valid, ${totalSpent} spent discarded`);
+        return { localOnlyKept: 0, spent: totalSpent };
     },
 
     // ── Persistence ──
@@ -379,6 +499,7 @@ export const useEcashStore = create<EcashState>((set, get) => ({
 
         return proofs
             .filter(proof => {
+                if (proof.mintUrl) return proof.mintUrl === mintUrl;
                 const mintKeys = mintState.keys as any;
                 return (mintKeys.keysets && Array.isArray(mintKeys.keysets) &&
                     mintKeys.keysets.some((k: any) => k.id === proof.id)) ||

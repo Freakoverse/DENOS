@@ -370,6 +370,7 @@ export const EcashSendModal: React.FC<EcashSendModalProps> = ({
                     type: 'send', amount: sats, mint: availableMintUrl!,
                     timestamp: Math.floor(Date.now() / 1000), isNutzap: false, recipient, token
                 });
+                await useEcashStore.getState().publishProofsToNostr(true);
                 onSendComplete?.();
             } else {
                 // NutZap send
@@ -405,13 +406,14 @@ export const EcashSendModal: React.FC<EcashSendModalProps> = ({
                 }
 
                 useEcashStore.getState().removePendingSend(pendingSendId);
-                await useEcashStore.getState().publishProofsToNostr(true);
 
                 useEcashStore.getState().addHistoryItem({
                     id: Math.random().toString(36).substring(7) + '-send',
                     type: 'send', amount: sats, mint: availableMintUrl!,
                     timestamp: Math.floor(Date.now() / 1000), isNutzap: true, recipient
                 });
+
+                await useEcashStore.getState().publishProofsToNostr(true);
                 onSendComplete?.();
                 onClose();
             }
@@ -456,14 +458,21 @@ export const EcashSendModal: React.FC<EcashSendModalProps> = ({
                     if (!publishResult.success) throw new Error(publishResult.error);
 
                     useEcashStore.getState().removePendingSend(pendingSendId);
-                    await useEcashStore.getState().publishProofsToNostr(true);
-                }
 
-                useEcashStore.getState().addHistoryItem({
-                    id: Math.random().toString(36).substring(7),
-                    type: 'send', amount: mintAmount, mint: mintUrl,
-                    timestamp: Math.floor(Date.now() / 1000), isNutzap: !isPrivate, recipient
-                });
+                    useEcashStore.getState().addHistoryItem({
+                        id: Math.random().toString(36).substring(7),
+                        type: 'send', amount: mintAmount, mint: mintUrl,
+                        timestamp: Math.floor(Date.now() / 1000), isNutzap: !isPrivate, recipient
+                    });
+
+                    await useEcashStore.getState().publishProofsToNostr(true);
+                } else {
+                    useEcashStore.getState().addHistoryItem({
+                        id: Math.random().toString(36).substring(7),
+                        type: 'send', amount: mintAmount, mint: mintUrl,
+                        timestamp: Math.floor(Date.now() / 1000), isNutzap: false, recipient
+                    });
+                }
 
                 setMultiMintPlan(prev => prev!.map((item, idx) =>
                     idx === i ? { ...item, status: 'success' } : item

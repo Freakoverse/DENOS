@@ -12,7 +12,7 @@ if (typeof window !== 'undefined' && !(window as any).Buffer) {
 // Lazy initialization
 let ECPair: ECPairAPI | null = null;
 
-function getECPair(): ECPairAPI {
+export function getECPair(): ECPairAPI {
     if (!ECPair) {
         bitcoin.initEccLib(ecc);
         ECPair = ECPairFactory(ecc);

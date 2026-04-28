@@ -7,12 +7,12 @@ import {
     CashuWallet,
     getDecodedToken,
     getEncodedTokenV4,
-    type Proof,
+    type Proof as CashuProof,
     type MintKeys as CashuMintKeys,
     type MintKeyset,
     CheckStateEnum,
 } from '@cashu/cashu-ts';
-import { useEcashStore } from './ecashStore';
+import { useEcashStore, type Proof } from './ecashStore';
 import { nip19 } from 'nostr-tools';
 
 // ── Mint cache ──
@@ -186,7 +186,7 @@ export class CashuService {
         }
 
         // Add proofs to store
-        useEcashStore.getState().addProofs(receivedProofs);
+        useEcashStore.getState().addProofs(receivedProofs, false, mintUrl);
 
         return {
             amount: totalAmount,
@@ -270,7 +270,7 @@ export class CashuService {
         for (let i = 0; i < 30; i++) {
             try {
                 const proofs = await destWallet.mintProofs(amount, mintQuote.quote);
-                useEcashStore.getState().addProofs(proofs);
+                useEcashStore.getState().addProofs(proofs, false, destMint);
                 claimed = true;
                 console.log(`✅ Claimed ${proofs.length} proofs at destination`);
                 break;
@@ -298,6 +298,14 @@ export class CashuService {
         const wallet = await this.getInitializedWallet(mintUrl);
         const states = await wallet.checkProofsStates(proofs);
 
+        // Guard: if mint returned fewer states than proofs, response is malformed
+        if (!states || states.length !== proofs.length) {
+            console.error(
+                `🛑 Mint returned ${states?.length ?? 0} states for ${proofs.length} proofs — response malformed, treating all as valid`
+            );
+            return { valid: [...proofs], spent: [] };
+        }
+
         const valid: Proof[] = [];
         const spent: Proof[] = [];
 
@@ -309,7 +317,7 @@ export class CashuService {
             }
         });
 
-        console.log(`🔍 Proof check: ${valid.length} valid, ${spent.length} spent`);
+        console.log(`🔍 Proof check at ${mintUrl.replace('https://', '')}: ${valid.length} valid, ${spent.length} spent`);
         return { valid, spent };
     }
 
@@ -328,8 +336,9 @@ export class CashuService {
         const mintState = store.mints[mintUrl];
         if (!mintState) throw new Error(`Mint not found: ${mintUrl}`);
 
-        // Get proofs for this mint
+        // Get proofs for this mint (use tagged mintUrl first, keyset fallback)
         const mintProofs = store.proofs.filter(proof => {
+            if (proof.mintUrl) return proof.mintUrl === mintUrl;
             const mintKeys = mintState.keys as any;
             return (mintKeys.keysets && Array.isArray(mintKeys.keysets) &&
                 mintKeys.keysets.some((k: any) => k.id === proof.id)) ||
@@ -366,11 +375,22 @@ export class CashuService {
 
         const { send, keep } = await wallet.send(amount, mintProofs, sendOpts);
 
-        // Update store: remove old proofs, add change proofs
+        // ALWAYS update local state — wallet.send() already spent the originals at the mint
+        if (keep.length > 0) {
+            useEcashStore.getState().addProofs(keep, true, mintUrl);
+        }
+        useEcashStore.getState().removeProofs(mintProofs, true);
+
+        // Immediate save — don't risk losing state on tab switch
+        await useEcashStore.getState().saveSession();
+
         if (!keepProofs) {
-            useEcashStore.getState().removeProofs(mintProofs, true);
-            if (keep.length > 0) {
-                useEcashStore.getState().addProofs(keep, true);
+            // Non-NutZap: publish to NIP-60 immediately
+            try {
+                await useEcashStore.getState().publishProofsToNostr(true);
+                console.log('📤 Send: Wallet state published to relays');
+            } catch (e) {
+                console.warn('⚠️ Send succeeded but relay publish failed:', e);
             }
         }
 
@@ -383,7 +403,7 @@ export class CashuService {
         });
 
         if (keepProofs) {
-            // For NutZap: return token + the proofs that were used (for pending send tracking)
+            // For NutZap: return token + the proofs that were consumed (for pending send tracking)
             return { token, usedProofs: mintProofs };
         }
 
@@ -417,7 +437,7 @@ export class CashuService {
     static async claimMintQuote(mintUrl: string, amount: number, quoteId: string) {
         const wallet = await this.getInitializedWallet(mintUrl);
         const proofs = await wallet.mintProofs(amount, quoteId);
-        useEcashStore.getState().addProofs(proofs);
+        useEcashStore.getState().addProofs(proofs, false, mintUrl);
         return proofs;
     }
 
@@ -442,8 +462,9 @@ export class CashuService {
 
         const wallet = await this.getInitializedWallet(mintUrl);
 
-        // Get proofs for this mint
+        // Get proofs for this mint (use tagged mintUrl first, keyset fallback)
         const mintProofs = store.proofs.filter(proof => {
+            if (proof.mintUrl) return proof.mintUrl === mintUrl;
             const mintKeys = mintState.keys as any;
             return (mintKeys.keysets && Array.isArray(mintKeys.keysets) &&
                 mintKeys.keysets.some((k: any) => k.id === proof.id)) ||
@@ -472,13 +493,19 @@ export class CashuService {
         // Add change proofs (overpayment returned)
         const change = meltResult.change || [];
         if (change.length > 0) {
-            useEcashStore.getState().addProofs(change, true);
+            useEcashStore.getState().addProofs(change, true, mintUrl);
         }
 
-        // Publish updated state
-        useEcashStore.getState().publishProofsToNostr(true).catch(e =>
-            console.error('Failed to publish after melt:', e)
-        );
+        // Immediate save — don't risk losing state on tab switch
+        await useEcashStore.getState().saveSession();
+
+        // Blocking publish — ensure relay has the updated state before confirming
+        try {
+            await useEcashStore.getState().publishProofsToNostr(true);
+            console.log('📤 Melt: Wallet state published to relays');
+        } catch (e) {
+            console.warn('⚠️ Melt succeeded but relay publish failed:', e);
+        }
 
         console.log(`⚡ Melted ${quote.amount} sats (fee: ${quote.fee_reserve}), ${change.length} change proofs`);
 

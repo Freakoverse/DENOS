@@ -60,6 +60,9 @@ pub struct Connection {
     /// Which signer keypair this connection belongs to (pubkey hex)
     #[serde(default)]
     pub signer_pubkey: String,
+    /// If true, reconnections from a client with the same name auto-replace this connection
+    #[serde(default)]
+    pub auto_replace: bool,
 }
 
 fn default_policy() -> String {
@@ -154,6 +157,9 @@ pub struct Upv2Session {
     /// Which signer keypair this session belongs to (pubkey hex)
     #[serde(default)]
     pub signer_pubkey: String,
+    /// If true, reconnections from a client with the same name auto-replace this session
+    #[serde(default)]
+    pub auto_replace: bool,
 }
 
 /// Pending challenge nonce (short-lived)
@@ -317,7 +323,7 @@ const KEY_LOCK_TIMEOUT: &str = "lock-timeout";
 const KEY_ACTIVE_KEYPAIR: &str = "active-keypair";
 const KEY_ACTIVE_SEED: &str = "active-seed";
 const KEY_NIP46_ENABLED: &str = "nip46-enabled";
-const KEY_SIGNING_HISTORY: &str = "signing-history";
+
 const KEY_USER_RELAYS: &str = "user-relays";
 
 /// Build a profile-scoped keyring key: `p-{profile_id}/{suffix}`
@@ -365,7 +371,6 @@ impl AppState {
                     ("denos-active-keypair", KEY_ACTIVE_KEYPAIR),
                     ("denos-active-seed", KEY_ACTIVE_SEED),
                     ("denos-nip46-enabled", KEY_NIP46_ENABLED),
-                    ("denos-signing-history", KEY_SIGNING_HISTORY),
                     ("denos-user-relays", KEY_USER_RELAYS),
                 ];
 
@@ -588,20 +593,18 @@ impl AppState {
         let nip46_enabled = load_from_keyring::<bool>(&k(KEY_NIP46_ENABLED))
             .unwrap_or(true);
 
-        // Load signing history using index + individual entries pattern
-        let signing_history = {
-            let entry_ids = load_from_keyring::<Vec<String>>(&k(KEY_SIGNING_HISTORY))
+        // Clean up any persisted signing history entries from keyring (no longer persisted)
+        {
+            let old_ids = load_from_keyring::<Vec<String>>(&k("signing-history"))
                 .unwrap_or_default();
-            if entry_ids.is_empty() {
-                // Backward compat: try loading old single-blob format
-                // If found, we'll migrate it on next save
-                Vec::new()
-            } else {
-                entry_ids.iter()
-                    .filter_map(|id| load_from_keyring::<SigningHistoryEntry>(&format!("p-{}/sh-{}", profile_id, id)))
-                    .collect::<Vec<_>>()
+            for id in &old_ids {
+                let _ = delete_raw_from_keyring(&format!("p-{}/sh-{}", profile_id, id));
             }
-        };
+            if !old_ids.is_empty() {
+                let _ = delete_raw_from_keyring(&k("signing-history"));
+                info!("Cleaned up {} persisted signing history entries from keyring", old_ids.len());
+            }
+        }
 
         let user_relay_urls = load_from_keyring::<HashMap<String, Vec<String>>>(&k(KEY_USER_RELAYS))
             .unwrap_or_default();
@@ -622,7 +625,7 @@ impl AppState {
         *self.pin_hash.lock().unwrap() = pin_hash;
         *self.lock_timeout_minutes.lock().unwrap() = lock_timeout_minutes;
         *self.nip46_enabled.lock().unwrap() = nip46_enabled;
-        *self.signing_history.lock().unwrap() = signing_history;
+        *self.signing_history.lock().unwrap() = Vec::new();
         *self.user_relay_urls.lock().unwrap() = user_relay_urls;
         *self.active_profile.lock().unwrap() = Some(profile_id.to_string());
 
@@ -844,32 +847,12 @@ impl AppState {
         save_to_keyring(&pk(&pid, KEY_NIP46_ENABLED), &enabled)
     }
 
-    pub fn save_signing_history(&self) -> Result<(), String> {
-        let pid = self.profile_id();
-        let history = self.signing_history.lock().unwrap();
-        // Store as index + individual entries (avoids Windows Credential Manager size limit)
-        let entry_ids: Vec<String> = history.iter().map(|e| e.id.clone()).collect();
-        save_to_keyring(&pk(&pid, KEY_SIGNING_HISTORY), &entry_ids)?;
-        for entry in history.iter() {
-            save_to_keyring(&format!("p-{}/sh-{}", pid, entry.id), entry)?;
-        }
-        Ok(())
-    }
-
-    /// Record a signing outcome, keeping the latest 100 entries
+    /// Record a signing outcome in memory, keeping the latest 100 entries.
+    /// Not persisted to keyring — signing history is ephemeral (resets on restart).
     pub fn record_signing_history(&self, entry: SigningHistoryEntry) {
-        let pid = self.profile_id();
         let mut history = self.signing_history.lock().unwrap();
-        // If truncating, delete the removed entries from keyring
-        if history.len() >= 100 {
-            for old in history.drain(99..) {
-                let _ = delete_raw_from_keyring(&format!("p-{}/sh-{}", pid, old.id));
-            }
-        }
         history.insert(0, entry);
-        drop(history);
-        // Save only the new entry + update the index
-        let _ = self.save_signing_history();
+        history.truncate(100);
     }
 
     /// Save the profiles index to keyring

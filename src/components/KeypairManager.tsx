@@ -4,7 +4,7 @@ import type { AppState, Keypair } from '../App';
 import {
     Plus, Download, Trash2, Copy, Eye, EyeOff, Check,
     ChevronRight, ArrowLeft, ShieldAlert, Key, Sprout,
-    Pencil, KeyRound, Lock, FileDown, FileUp,
+    Pencil, KeyRound, Lock, FileDown, FileUp, RotateCcw,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
@@ -256,6 +256,17 @@ export function KeypairManager({ appState, onBack }: Props) {
         setLoading(false);
     };
 
+    const deriveKeypairAtIndex = async (seedId: string, accountIndex: number) => {
+        setLoading(true);
+        setError('');
+        try {
+            await invoke('derive_keypair_at_index', { seedId, accountIndex });
+        } catch (e) {
+            setError(String(e));
+        }
+        setLoading(false);
+    };
+
     const deleteSeed = async (seedId: string) => {
         const seed = seeds.find(s => s.id === seedId);
         requirePin('Delete Seed', 'Enter your PIN to delete this seed', () => {
@@ -276,17 +287,21 @@ export function KeypairManager({ appState, onBack }: Props) {
         });
     };
 
-    const deleteKeypair = async (pubkey: string) => {
+    const deleteKeypair = async (pubkey: string, stayOnSeed?: string) => {
         requirePin('Delete Keypair', 'Enter your PIN to delete this keypair', () => {
             showConfirm({
                 title: 'Delete Keypair?',
-                description: 'This cannot be undone. The keypair will be permanently removed.',
+                description: 'This cannot be undone. The keypair will be permanently removed. You can re-derive it from the seed later.',
                 confirmLabel: 'Delete',
                 variant: 'destructive',
                 onConfirm: async () => {
                     try {
                         await invoke('delete_keypair', { pubkey });
-                        setView({ page: 'list' });
+                        if (stayOnSeed) {
+                            setView({ page: 'seed-detail', seedId: stayOnSeed });
+                        } else {
+                            setView({ page: 'list' });
+                        }
                     } catch (e) {
                         setError(String(e));
                     }
@@ -925,22 +940,24 @@ export function KeypairManager({ appState, onBack }: Props) {
                             </CardContent>
                         </Card>
 
-                        {/* Danger zone — only for imported (non-seed) keys */}
-                        {!fresh.seed_id && (
-                            <Card className="border-destructive/30">
-                                <CardContent className="pt-5">
-                                    <div className="flex items-center justify-between">
-                                        <div>
-                                            <p className="text-sm font-medium text-destructive">Delete Keypair</p>
-                                            <p className="text-xs text-muted-foreground">This action cannot be undone.</p>
-                                        </div>
-                                        <Button variant="destructive" size="sm" onClick={() => deleteKeypair(fresh.pubkey)} className="gap-1.5">
-                                            <Trash2 className="w-4 h-4" /> Delete
-                                        </Button>
+                        {/* Danger zone */}
+                        <Card className="border-destructive/30">
+                            <CardContent className="pt-5">
+                                <div className="flex items-center justify-between">
+                                    <div>
+                                        <p className="text-sm font-medium text-destructive">Delete Keypair</p>
+                                        <p className="text-xs text-muted-foreground">
+                                            {fresh.seed_id
+                                                ? 'You can re-derive this key from the seed later.'
+                                                : 'This action cannot be undone.'}
+                                        </p>
                                     </div>
-                                </CardContent>
-                            </Card>
-                        )}
+                                    <Button variant="destructive" size="sm" onClick={() => deleteKeypair(fresh.pubkey, fresh.seed_id ?? undefined)} className="gap-1.5">
+                                        <Trash2 className="w-4 h-4" /> Delete
+                                    </Button>
+                                </div>
+                            </CardContent>
+                        </Card>
                     </div>
                 </div>
                 {pinPromptElement}
@@ -1017,46 +1034,82 @@ export function KeypairManager({ appState, onBack }: Props) {
                                     </Alert>
                                 )}
 
-                                {seedKeypairs.map((kp) => {
-                                    const isActive = kp.pubkey === appState.active_keypair;
-                                    return (
-                                        <div
-                                            key={kp.pubkey}
-                                            className={cn(
-                                                "flex items-center justify-between p-4 rounded-xl cursor-pointer transition-all duration-200",
-                                                "hover:bg-secondary",
-                                                isActive
-                                                    ? "bg-emerald-500/5 border border-emerald-500/20"
-                                                    : "bg-secondary/50"
-                                            )}
-                                            onClick={() => setView({ page: 'key-detail', keypair: kp })}
-                                        >
-                                            <div className="flex flex-col gap-1 min-w-0 flex-1">
-                                                <div className="flex items-center gap-2">
-                                                    <span className="text-base font-medium truncate">{kp.name || 'Unnamed Key'}</span>
-                                                    {isActive && (
-                                                        <Badge variant="default" className="text-[10px] py-0 px-1.5">Active</Badge>
+                                {(() => {
+                                    const maxIndex = seedKeypairs.reduce((max, kp) => Math.max(max, kp.account_index ?? 0), 0);
+                                    const slots: React.ReactNode[] = [];
+                                    for (let i = 0; i <= maxIndex; i++) {
+                                        const kp = seedKeypairs.find(k => k.account_index === i);
+                                        if (kp) {
+                                            const isActive = kp.pubkey === appState.active_keypair;
+                                            slots.push(
+                                                <div
+                                                    key={kp.pubkey}
+                                                    className={cn(
+                                                        "flex items-center justify-between p-4 rounded-xl cursor-pointer transition-all duration-200",
+                                                        "hover:bg-secondary",
+                                                        isActive
+                                                            ? "bg-emerald-500/5 border border-emerald-500/20"
+                                                            : "bg-secondary/50"
                                                     )}
-                                                    <Badge variant="secondary" className="text-[10px] py-0 px-1.5 font-mono">
-                                                        #{kp.account_index ?? 0}
-                                                    </Badge>
-                                                </div>
-                                                <button
-                                                    className="text-sm text-muted-foreground font-mono text-left hover:text-foreground transition-colors flex items-center gap-1 cursor-pointer"
-                                                    onClick={(e) => { e.stopPropagation(); copyText(kp.npub, kp.pubkey); }}
-                                                    title="Click to copy"
+                                                    onClick={() => setView({ page: 'key-detail', keypair: kp })}
                                                 >
-                                                    {truncateMiddle(kp.npub)}
-                                                    {copiedId === kp.pubkey
-                                                        ? <Check className="w-3 h-3 text-success" />
-                                                        : <Copy className="w-3 h-3 opacity-40" />
-                                                    }
-                                                </button>
-                                            </div>
-                                            <ChevronRight className="w-5 h-5 text-muted-foreground shrink-0 ml-2" />
-                                        </div>
-                                    );
-                                })}
+                                                    <div className="flex flex-col gap-1 min-w-0 flex-1">
+                                                        <div className="flex items-center gap-2">
+                                                            <span className="text-base font-medium truncate">{kp.name || 'Unnamed Key'}</span>
+                                                            {isActive && (
+                                                                <Badge variant="default" className="text-[10px] py-0 px-1.5">Active</Badge>
+                                                            )}
+                                                            <Badge variant="secondary" className="text-[10px] py-0 px-1.5 font-mono">
+                                                                #{kp.account_index ?? 0}
+                                                            </Badge>
+                                                        </div>
+                                                        <button
+                                                            className="text-sm text-muted-foreground font-mono text-left hover:text-foreground transition-colors flex items-center gap-1 cursor-pointer"
+                                                            onClick={(e) => { e.stopPropagation(); copyText(kp.npub, kp.pubkey); }}
+                                                            title="Click to copy"
+                                                        >
+                                                            {truncateMiddle(kp.npub)}
+                                                            {copiedId === kp.pubkey
+                                                                ? <Check className="w-3 h-3 text-success" />
+                                                                : <Copy className="w-3 h-3 opacity-40" />
+                                                            }
+                                                        </button>
+                                                    </div>
+                                                    <ChevronRight className="w-5 h-5 text-muted-foreground shrink-0 ml-2" />
+                                                </div>
+                                            );
+                                        } else {
+                                            // Gap placeholder
+                                            const idx = i;
+                                            slots.push(
+                                                <div
+                                                    key={`gap-${i}`}
+                                                    className="flex items-center justify-between p-4 rounded-xl border-2 border-dashed border-border/60 bg-secondary/20"
+                                                >
+                                                    <div className="flex flex-col gap-1 min-w-0 flex-1">
+                                                        <div className="flex items-center gap-2">
+                                                            <span className="text-base font-medium text-muted-foreground">Account {i + 1}</span>
+                                                            <Badge variant="secondary" className="text-[10px] py-0 px-1.5 font-mono opacity-50">
+                                                                #{i}
+                                                            </Badge>
+                                                        </div>
+                                                        <span className="text-sm text-muted-foreground/60 italic">Deleted — can be re-derived</span>
+                                                    </div>
+                                                    <Button
+                                                        size="sm"
+                                                        variant="outline"
+                                                        className="gap-1.5 shrink-0 ml-2"
+                                                        onClick={() => deriveKeypairAtIndex(seed.id, idx)}
+                                                        disabled={loading}
+                                                    >
+                                                        <RotateCcw className="w-3.5 h-3.5" /> Re-derive
+                                                    </Button>
+                                                </div>
+                                            );
+                                        }
+                                    }
+                                    return slots;
+                                })()}
                             </CardContent>
                         </Card>
 

@@ -42,6 +42,7 @@ interface Connection {
     auto_approve_kinds: number[];
     policy: string;
     custom_rules: Record<string, string>;
+    auto_replace: boolean;
 }
 
 interface PendingRequest {
@@ -80,6 +81,7 @@ interface Upv2Session {
     last_active: number;
     policy: string;
     custom_rules: Record<string, string>;
+    auto_replace: boolean;
 }
 
 interface LoginAttempt {
@@ -290,6 +292,7 @@ export default function SignerDashboard({ activePubkey, activeNpub }: SignerDash
     const [upv2Loading, setUpv2Loading] = useState(false);
     const [reconnectPrompt, setReconnectPrompt] = useState<any>(null);
     const [reconnectKeepRules, setReconnectKeepRules] = useState(true);
+    const [reconnectAutoReplace, setReconnectAutoReplace] = useState(false);
     const [showLoginHistory, setShowLoginHistory] = useState(false);
     const [showBunkerQr, setShowBunkerQr] = useState(false);
     const [expandedRawEvent, setExpandedRawEvent] = useState<string | null>(null);
@@ -502,6 +505,7 @@ export default function SignerDashboard({ activePubkey, activeNpub }: SignerDash
         const unlisten = listen<any>('reconnect-prompt', (event) => {
             setReconnectPrompt(event.payload);
             setReconnectKeepRules(true);
+            setReconnectAutoReplace(false);
         });
         return () => { unlisten.then(fn => fn()); };
     }, []);
@@ -840,6 +844,13 @@ export default function SignerDashboard({ activePubkey, activeNpub }: SignerDash
                                                             <ChevronRight className="w-3.5 h-3.5" />
                                                         </button>
                                                     )}
+                                                    <label className="mt-3 w-full flex items-center justify-between gap-3 text-xs text-muted-foreground cursor-pointer p-2.5 bg-secondary/40 rounded-lg border border-border/50">
+                                                        <span className="flex items-center gap-1.5">
+                                                            <AlertTriangle className="w-3.5 h-3.5 text-warning" />
+                                                            Always replace (unsafe)
+                                                        </span>
+                                                        <Switch checked={conn.auto_replace} onCheckedChange={(v) => invoke('set_connection_auto_replace', { connectionId: conn.id, autoReplace: v })} />
+                                                    </label>
                                                 </div>
                                             </CardContent>
                                         </Card>
@@ -895,6 +906,13 @@ export default function SignerDashboard({ activePubkey, activeNpub }: SignerDash
                                                             <ChevronRight className="w-3.5 h-3.5" />
                                                         </button>
                                                     )}
+                                                    <label className="mt-3 w-full flex items-center justify-between gap-3 text-xs text-muted-foreground cursor-pointer p-2.5 bg-secondary/40 rounded-lg border border-border/50">
+                                                        <span className="flex items-center gap-1.5">
+                                                            <AlertTriangle className="w-3.5 h-3.5 text-warning" />
+                                                            Always replace (unsafe)
+                                                        </span>
+                                                        <Switch checked={session.auto_replace} onCheckedChange={(v) => invoke('set_upv2_session_auto_replace', { sessionId: session.session_id, autoReplace: v })} />
+                                                    </label>
                                                 </div>
                                             </CardContent>
                                         </Card>
@@ -933,10 +951,19 @@ export default function SignerDashboard({ activePubkey, activeNpub }: SignerDash
                             Keep existing policy & custom rules
                             <Switch checked={reconnectKeepRules} onCheckedChange={setReconnectKeepRules} />
                         </label>
+                        {reconnectPrompt?.existing_source !== 'nip46' && (
+                            <label className="flex items-center justify-between gap-3 text-sm text-foreground cursor-pointer p-3 bg-secondary/40 rounded-xl border border-border/50">
+                                <span className="flex items-center gap-1.5">
+                                    <AlertTriangle className="w-4 h-4 text-warning" />
+                                    Always replace (unsafe)
+                                </span>
+                                <Switch checked={reconnectAutoReplace} onCheckedChange={setReconnectAutoReplace} />
+                            </label>
+                        )}
                         <DialogFooter>
-                            <Button variant="destructive" onClick={() => { invoke('resolve_reconnect', { action: 'reject', keepRules: false }); setReconnectPrompt(null); }}>Reject</Button>
-                            <Button variant="outline" onClick={() => { invoke('resolve_reconnect', { action: 'keep', keepRules: false }); setReconnectPrompt(null); }}>Keep Both</Button>
-                            <Button onClick={() => { invoke('resolve_reconnect', { action: 'replace', keepRules: reconnectKeepRules }); setReconnectPrompt(null); }}>Replace</Button>
+                            <Button variant="destructive" onClick={() => { invoke('resolve_reconnect', { action: 'reject', keepRules: false, autoReplace: null }); setReconnectPrompt(null); }}>Reject</Button>
+                            <Button variant="outline" onClick={() => { invoke('resolve_reconnect', { action: 'keep', keepRules: false, autoReplace: null }); setReconnectPrompt(null); }}>Keep Both</Button>
+                            <Button onClick={() => { invoke('resolve_reconnect', { action: 'replace', keepRules: reconnectKeepRules, autoReplace: reconnectAutoReplace || null }); setReconnectPrompt(null); }}>Replace</Button>
                         </DialogFooter>
                     </DialogContent>
                 </Dialog>
@@ -2020,19 +2047,28 @@ export default function SignerDashboard({ activePubkey, activeNpub }: SignerDash
 
                     <p className="text-sm text-muted-foreground">What would you like to do with the existing connection?</p>
 
-                    <label className="flex items-center justify-between gap-3 text-sm text-foreground cursor-pointer p-3 bg-secondary rounded-xl">
+                    <label className="flex items-center justify-between gap-3 text-sm text-foreground cursor-pointer p-3 bg-secondary rounded-xl mt-2">
                         Keep existing policy & custom rules
                         <Switch checked={reconnectKeepRules} onCheckedChange={setReconnectKeepRules} />
                     </label>
 
+                    {reconnectPrompt?.existing_source !== 'nip46' && (
+                        <label className="flex items-center justify-between gap-3 text-sm text-foreground cursor-pointer p-3 bg-secondary rounded-xl mt-2">
+                            <span className="flex items-center gap-1.5">
+                                Always replace (unsafe)
+                            </span>
+                            <Switch checked={reconnectAutoReplace} onCheckedChange={setReconnectAutoReplace} />
+                        </label>
+                    )}
+
                     <DialogFooter>
-                        <Button variant="destructive" onClick={() => { invoke('resolve_reconnect', { action: 'reject', keepRules: false }); setReconnectPrompt(null); }}>
+                        <Button variant="destructive" onClick={() => { invoke('resolve_reconnect', { action: 'reject', keepRules: false, autoReplace: null }); setReconnectPrompt(null); }}>
                             Reject
                         </Button>
-                        <Button variant="outline" onClick={() => { invoke('resolve_reconnect', { action: 'keep', keepRules: false }); setReconnectPrompt(null); }}>
+                        <Button variant="outline" onClick={() => { invoke('resolve_reconnect', { action: 'keep', keepRules: false, autoReplace: null }); setReconnectPrompt(null); }}>
                             Keep Both
                         </Button>
-                        <Button onClick={() => { invoke('resolve_reconnect', { action: 'replace', keepRules: reconnectKeepRules }); setReconnectPrompt(null); }}>
+                        <Button onClick={() => { invoke('resolve_reconnect', { action: 'replace', keepRules: reconnectKeepRules, autoReplace: reconnectAutoReplace || null }); setReconnectPrompt(null); }}>
                             Replace
                         </Button>
                     </DialogFooter>

@@ -204,6 +204,14 @@ pub fn delete_keypair(
     state: State<'_, AppState>,
     pubkey: String,
 ) -> Result<(), String> {
+    // Check if this keypair belongs to a seed (before removing it)
+    let seed_id = {
+        let keypairs = state.keypairs.lock().unwrap();
+        keypairs.iter()
+            .find(|kp| kp.pubkey == pubkey)
+            .and_then(|kp| kp.seed_id.clone())
+    };
+
     let _ = delete_raw_from_keyring(&ppk(&state, &format!("sk-{}", pubkey)));
 
     {
@@ -211,6 +219,16 @@ pub fn delete_keypair(
         keypairs.retain(|kp| kp.pubkey != pubkey);
     }
     state.save_keypairs()?;
+
+    // Remove from parent seed's keypair_pubkeys list
+    if let Some(ref sid) = seed_id {
+        let mut seeds = state.seeds.lock().unwrap();
+        if let Some(seed) = seeds.iter_mut().find(|s| s.id == *sid) {
+            seed.keypair_pubkeys.retain(|pk| pk != &pubkey);
+        }
+        drop(seeds);
+        let _ = state.save_seeds();
+    }
 
     {
         let mut active = state.active_keypair.lock().unwrap();
@@ -632,6 +650,83 @@ pub fn derive_next_keypair(
 
     info!("Derived keypair #{} from seed '{}': {}", next_index, &seed.name, &npub[..24]);
     emit_log(&app, &format!("[INFO] Derived new keypair from seed '{}'", &seed.name));
+    emit_state(&app, &state);
+
+    Ok(pubkey_hex)
+}
+
+/// Derive a keypair at a specific account index from a seed (for filling gaps)
+#[tauri::command]
+pub fn derive_keypair_at_index(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    seed_id: String,
+    account_index: u32,
+) -> Result<String, String> {
+    // Find the seed
+    let seed = {
+        let seeds = state.seeds.lock().unwrap();
+        seeds.iter().find(|s| s.id == seed_id).cloned()
+            .ok_or("Seed not found")?
+    };
+
+    // Retrieve mnemonic from keyring
+    let mnemonic = get_raw_from_keyring(&ppk(&state, &format!("seed-{}", seed_id)))?;
+
+    // Verify no keypair already exists at this index
+    {
+        let keypairs = state.keypairs.lock().unwrap();
+        if keypairs.iter().any(|kp| kp.seed_id.as_deref() == Some(&seed_id) && kp.account_index == Some(account_index)) {
+            return Err(format!("A keypair already exists at index {}", account_index));
+        }
+    }
+
+    // Derive keypair at the specified account index
+    let keys = Keys::from_mnemonic_with_account(mnemonic.as_str(), None::<&str>, Some(account_index))
+        .map_err(|e| format!("Key derivation failed: {}", e))?;
+
+    let secret_key = keys.secret_key();
+    let public_key = keys.public_key();
+    let sk_hex = secret_key.to_secret_hex();
+    let pubkey_hex = public_key.to_hex();
+    let npub = public_key.to_bech32()
+        .map_err(|e| format!("Bech32 error: {}", e))?;
+
+    // Check duplicate pubkey
+    {
+        let keypairs = state.keypairs.lock().unwrap();
+        if keypairs.iter().any(|kp| kp.pubkey == pubkey_hex) {
+            return Err("This keypair already exists".to_string());
+        }
+    }
+
+    save_raw_to_keyring(&ppk(&state, &format!("sk-{}", pubkey_hex)), &sk_hex)?;
+
+    let kp = KeypairInfo {
+        pubkey: pubkey_hex.clone(),
+        npub: npub.clone(),
+        name: Some(format!("Account {}", account_index + 1)),
+        seed_id: Some(seed_id.clone()),
+        account_index: Some(account_index),
+    };
+
+    {
+        let mut keypairs = state.keypairs.lock().unwrap();
+        keypairs.push(kp);
+    }
+    state.save_keypairs()?;
+
+    // Update seed's keypair list
+    {
+        let mut seeds = state.seeds.lock().unwrap();
+        if let Some(s) = seeds.iter_mut().find(|s| s.id == seed_id) {
+            s.keypair_pubkeys.push(pubkey_hex.clone());
+        }
+    }
+    state.save_seeds()?;
+
+    info!("Derived keypair at index #{} from seed '{}': {}", account_index, &seed.name, &npub[..24]);
+    emit_log(&app, &format!("[INFO] Re-derived keypair #{} from seed '{}'", account_index, &seed.name));
     emit_state(&app, &state);
 
     Ok(pubkey_hex)

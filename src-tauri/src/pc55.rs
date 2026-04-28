@@ -1,5 +1,5 @@
 use crate::keys;
-use crate::nip46::{self, find_existing_by_name, Nip46Request, Nip46Response};
+use crate::nip46::{self, find_existing_by_name, auto_replace_connection, Nip46Request, Nip46Response};
 use crate::state::{AppState, Connection, Pc55Connection, PendingReconnect, PendingRequest, SigningHistoryEntry};
 use futures_util::{SinkExt, StreamExt};
 use nostr_sdk::prelude::*;
@@ -423,6 +423,7 @@ async fn handle_message(
                         policy: "manual".to_string(),
                         custom_rules: HashMap::new(),
                         signer_pubkey: signer_pk_hex.clone(),
+                        auto_replace: false,
                     };
                     let new_conn_id = conn.id.clone();
 
@@ -436,18 +437,23 @@ async fn handle_message(
                     }
                     let _ = state.save_connections();
 
-                    if let Some((existing_id, existing_source, _policy, _rules)) = existing {
-                        // Prompt user: do you want to replace the old connection?
-                        let pending = PendingReconnect {
-                            new_connection_id: Some(new_conn_id),
-                            new_session_id: None,
-                            existing_id,
-                            existing_source: existing_source.clone(),
-                            app_name: app_name.clone(),
-                        };
-                        *state.pending_reconnect.lock().unwrap() = Some(pending.clone());
-                        let _ = app.emit("reconnect-prompt", &pending);
-                        emit_log(app, &format!("[PC55] '{}' is reconnecting (existing {} found) — awaiting user decision", app_name, existing_source));
+                    if let Some((existing_id, existing_source, _policy, _rules, existing_auto_replace)) = existing {
+                        if existing_auto_replace {
+                            // Auto-replace: silently replace the old connection, keeping rules
+                            auto_replace_connection(app, &state, &new_conn_id, &existing_id, &existing_source, &app_name);
+                        } else {
+                            // Prompt user: do you want to replace the old connection?
+                            let pending = PendingReconnect {
+                                new_connection_id: Some(new_conn_id),
+                                new_session_id: None,
+                                existing_id,
+                                existing_source: existing_source.clone(),
+                                app_name: app_name.clone(),
+                            };
+                            *state.pending_reconnect.lock().unwrap() = Some(pending.clone());
+                            let _ = app.emit("reconnect-prompt", &pending);
+                            emit_log(app, &format!("[PC55] '{}' is reconnecting (existing {} found) — awaiting user decision", app_name, existing_source));
+                        }
                     }
                 }
             } else {
@@ -483,6 +489,7 @@ async fn handle_message(
                         policy: "manual".to_string(),
                         custom_rules: HashMap::new(),
                         signer_pubkey: signer_pk_hex.clone(),
+                        auto_replace: false,
                     };
                     {
                         let mut connections = state.connections.lock().unwrap();

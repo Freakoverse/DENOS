@@ -3,7 +3,7 @@
  * Port of PWANS services/nip61.ts adapted for DENOS (raw WebSocket, nostr-tools signing).
  */
 import { nip44, finalizeEvent } from 'nostr-tools';
-import { hexToBytes } from '@noble/hashes/utils';
+import { hexToBytes } from '@noble/hashes/utils.js';
 
 export const KIND_NIP60_WALLET = 30078;
 export const KIND_NIP61_NUTZAP = 9321;
@@ -188,15 +188,144 @@ export class Nip60Service {
     }
 
     /**
+     * Fetch the latest wallet state from relays (one-shot).
+     * Waits for EOSE from relays to ensure we have the newest event.
+     * Returns null if no event found or all relays are offline.
+     */
+    static async fetchLatestWalletState(
+        pubkeyHex: string,
+        privateKeyHex: string,
+        relayUrls: string[] = DEFAULT_RELAYS,
+        timeoutMs = 6000
+    ): Promise<{ proofs: any[]; history: any[]; created_at: number } | null> {
+        return new Promise((resolve) => {
+            let bestEvent: any = null;
+            let resolvedCount = 0;
+            const totalRelays = relayUrls.length;
+            let resolved = false;
+
+            const tryResolve = () => {
+                if (resolved) return;
+                resolvedCount++;
+                if (resolvedCount >= totalRelays) {
+                    resolved = true;
+                    if (!bestEvent) {
+                        resolve(null);
+                        return;
+                    }
+                    try {
+                        const walletState = Nip60Service.decryptWalletState(
+                            privateKeyHex, pubkeyHex, bestEvent.content
+                        );
+                        resolve({
+                            ...walletState,
+                            created_at: bestEvent.created_at
+                        });
+                    } catch (e) {
+                        console.error('Failed to decrypt fetched NIP-60 state:', e);
+                        resolve(null);
+                    }
+                }
+            };
+
+            // Global timeout — resolve with whatever we have
+            const timer = setTimeout(() => {
+                if (!resolved) {
+                    resolved = true;
+                    if (!bestEvent) {
+                        console.warn('⏱️ NIP-60 fetch timed out, no events received');
+                        resolve(null);
+                        return;
+                    }
+                    try {
+                        const walletState = Nip60Service.decryptWalletState(
+                            privateKeyHex, pubkeyHex, bestEvent.content
+                        );
+                        resolve({
+                            ...walletState,
+                            created_at: bestEvent.created_at
+                        });
+                    } catch {
+                        resolve(null);
+                    }
+                }
+            }, timeoutMs);
+
+            const subId = 'fetch_' + Math.random().toString(36).slice(2, 10);
+            const sockets: WebSocket[] = [];
+
+            for (const relayUrl of relayUrls) {
+                try {
+                    const ws = new WebSocket(relayUrl);
+
+                    const wsTimer = setTimeout(() => {
+                        try { ws.close(); } catch { /* ignore */ }
+                        tryResolve();
+                    }, timeoutMs - 500);
+
+                    ws.onopen = () => {
+                        ws.send(JSON.stringify(['REQ', subId, {
+                            kinds: [KIND_NIP60_WALLET],
+                            authors: [pubkeyHex],
+                            '#d': ['proofs'],
+                            limit: 1
+                        }]));
+                    };
+
+                    ws.onmessage = (msg) => {
+                        try {
+                            const data = JSON.parse(msg.data);
+                            if (data[0] === 'EVENT' && data[2]) {
+                                const event = data[2];
+                                if (!bestEvent || event.created_at > bestEvent.created_at) {
+                                    bestEvent = event;
+                                }
+                            } else if (data[0] === 'EOSE') {
+                                clearTimeout(wsTimer);
+                                try {
+                                    ws.send(JSON.stringify(['CLOSE', subId]));
+                                    ws.close();
+                                } catch { /* ignore */ }
+                                tryResolve();
+                            }
+                        } catch { /* ignore */ }
+                    };
+
+                    ws.onerror = () => {
+                        clearTimeout(wsTimer);
+                        tryResolve();
+                    };
+
+                    sockets.push(ws);
+                } catch {
+                    tryResolve();
+                }
+            }
+
+            // Cleanup on resolve
+            const origResolve = resolve;
+            resolve = ((val: any) => {
+                clearTimeout(timer);
+                for (const ws of sockets) {
+                    try { ws.close(); } catch { /* ignore */ }
+                }
+                origResolve(val);
+            }) as any;
+        });
+    }
+
+    /**
      * Subscribe to own wallet state events.
+     * Pass sinceTimestamp to skip events already processed (e.g., from initial fetch).
      */
     static subscribeToWalletState(
         _ndk: any, // unused — we use raw WebSocket
         pubkeyHex: string,
         privateKeyHex: string,
-        onUpdate: (walletState: { proofs: any[]; history: any[] }) => void
+        onUpdate: (walletState: { proofs: any[]; history: any[] }) => void,
+        sinceTimestamp = 0
     ): { stop: () => void } {
-        let latestTimestamp = 0;
+        let latestTimestamp = sinceTimestamp;
 
         return subscribeToRelays(
             {
@@ -206,17 +335,17 @@ export class Nip60Service {
                 limit: 1
             },
             (event: any) => {
-                // Only process newer events
+                // Only process events newer than what we've already seen
                 if (event.created_at <= latestTimestamp) return;
                 latestTimestamp = event.created_at;
 
                 try {
-                    const walletState = this.decryptWalletState(
+                    const walletState = Nip60Service.decryptWalletState(
                         privateKeyHex,
                         pubkeyHex,
                         event.content
                     );
-                    console.log(`📥 NIP-60: Received wallet state (${walletState.proofs.length} proofs, ${walletState.history.length} history)`);
+                    console.log(`📥 NIP-60 live: Received wallet state (${walletState.proofs.length} proofs, ${walletState.history.length} history)`);
                     onUpdate(walletState);
                 } catch (e) {
                     console.error('Failed to decrypt NIP-60 wallet state:', e);

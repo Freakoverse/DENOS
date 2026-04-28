@@ -261,6 +261,7 @@ pub async fn connect_nostrconnect(
         policy: "manual".to_string(),
         custom_rules: HashMap::new(),
         signer_pubkey: signer_keys.public_key().to_hex(),
+        auto_replace: false,
     };
 
     // Check for existing connection/session with same name (cross-protocol)
@@ -273,18 +274,23 @@ pub async fn connect_nostrconnect(
     }
     state.save_connections()?;
 
-    if let Some((existing_id, existing_source, _policy, _rules)) = existing {
-        // Prompt user: do you want to remove the OLD connection?
-        let pending = PendingReconnect {
-            new_connection_id: Some(conn_id.clone()),
-            new_session_id: None,
-            existing_id,
-            existing_source: existing_source.clone(),
-            app_name: app_name.clone(),
-        };
-        *state.pending_reconnect.lock().unwrap() = Some(pending.clone());
-        let _ = app.emit("reconnect-prompt", &pending);
-        emit_log(&app, &format!("[INFO] '{}' is reconnecting (existing {} connection found) — awaiting user decision", app_name, existing_source));
+    if let Some((existing_id, existing_source, _policy, _rules, existing_auto_replace)) = existing {
+        if existing_auto_replace {
+            // Auto-replace: silently replace the old connection, keeping rules
+            auto_replace_connection(&app, &state, &conn_id, &existing_id, &existing_source, &app_name);
+        } else {
+            // Prompt user: do you want to remove the OLD connection?
+            let pending = PendingReconnect {
+                new_connection_id: Some(conn_id.clone()),
+                new_session_id: None,
+                existing_id,
+                existing_source: existing_source.clone(),
+                app_name: app_name.clone(),
+            };
+            *state.pending_reconnect.lock().unwrap() = Some(pending.clone());
+            let _ = app.emit("reconnect-prompt", &pending);
+            emit_log(&app, &format!("[INFO] '{}' is reconnecting (existing {} connection found) — awaiting user decision", app_name, existing_source));
+        }
     }
 
     let client_pk = PublicKey::from_hex(&info.client_pubkey)
@@ -715,26 +721,26 @@ pub fn update_connection_rules(
 }
 
 /// Check both NIP-46 connections and UPV2 sessions for a matching name.
-/// Returns (id, source, policy, custom_rules) of the match, if any.
+/// Returns (id, source, policy, custom_rules, auto_replace) of the match, if any.
 /// Only matches entries belonging to the given signer keypair.
 pub fn find_existing_by_name(
     state: &AppState,
     name: &str,
     signer_pubkey: &str,
-) -> Option<(String, String, String, HashMap<String, String>)> {
+) -> Option<(String, String, String, HashMap<String, String>, bool)> {
     // Check NIP-46 and PC55 connections (both stored in the connections list)
     {
         let connections = state.connections.lock().unwrap();
         if let Some(conn) = connections.iter().find(|c| c.app_name.to_lowercase() == name.to_lowercase() && c.signer_pubkey == signer_pubkey) {
             let source = if conn.client_pubkey.starts_with("pc55:") { "pc55" } else { "nip46" };
-            return Some((conn.id.clone(), source.to_string(), conn.policy.clone(), conn.custom_rules.clone()));
+            return Some((conn.id.clone(), source.to_string(), conn.policy.clone(), conn.custom_rules.clone(), conn.auto_replace));
         }
     }
     // Check UPV2 sessions
     {
         let sessions = state.upv2_sessions.lock().unwrap();
         if let Some(session) = sessions.iter().find(|s| s.client_name.to_lowercase() == name.to_lowercase() && s.signer_pubkey == signer_pubkey) {
-            return Some((session.session_id.clone(), "upv2".to_string(), session.policy.clone(), session.custom_rules.clone()));
+            return Some((session.session_id.clone(), "upv2".to_string(), session.policy.clone(), session.custom_rules.clone(), session.auto_replace));
         }
     }
     None
@@ -747,6 +753,8 @@ pub fn resolve_reconnect(
     state: State<'_, AppState>,
     action: String,
     keep_rules: bool,
+    #[allow(unused_variables)]
+    auto_replace: Option<bool>,
 ) -> Result<(), String> {
     let pending = {
         let mut pr = state.pending_reconnect.lock().unwrap();
@@ -756,22 +764,26 @@ pub fn resolve_reconnect(
 
     match action.as_str() {
         "replace" => {
-            // Get existing policy/rules before removal
+            // Get existing policy/rules/auto_replace before removal
             // NIP-46 and PC55 connections both live in the `connections` store
             let is_connection = pending.existing_source == "nip46" || pending.existing_source == "pc55";
-            let (old_policy, old_rules) = if is_connection {
+            let (old_policy, old_rules, old_auto_replace) = if is_connection {
                 let connections = state.connections.lock().unwrap();
                 connections.iter()
                     .find(|c| c.id == pending.existing_id)
-                    .map(|c| (c.policy.clone(), c.custom_rules.clone()))
-                    .unwrap_or(("manual".to_string(), HashMap::new()))
+                    .map(|c| (c.policy.clone(), c.custom_rules.clone(), c.auto_replace))
+                    .unwrap_or(("manual".to_string(), HashMap::new(), false))
             } else {
                 let sessions = state.upv2_sessions.lock().unwrap();
                 sessions.iter()
                     .find(|s| s.session_id == pending.existing_id)
-                    .map(|s| (s.policy.clone(), s.custom_rules.clone()))
-                    .unwrap_or(("manual".to_string(), HashMap::new()))
+                    .map(|s| (s.policy.clone(), s.custom_rules.clone(), s.auto_replace))
+                    .unwrap_or(("manual".to_string(), HashMap::new(), false))
             };
+
+            // Determine auto_replace for new connection:
+            // If user explicitly set it via the toggle, use that; otherwise carry forward the old value
+            let new_auto_replace = auto_replace.unwrap_or(old_auto_replace);
 
             // Remove old connection
             if is_connection {
@@ -782,13 +794,14 @@ pub fn resolve_reconnect(
                 sessions.retain(|s| s.session_id != pending.existing_id);
             }
 
-            // Transfer rules to the new (already saved) connection/session
+            // Transfer rules + auto_replace to the new (already saved) connection/session
             if keep_rules {
                 if let Some(ref new_conn_id) = pending.new_connection_id {
                     let mut connections = state.connections.lock().unwrap();
                     if let Some(conn) = connections.iter_mut().find(|c| c.id == *new_conn_id) {
                         conn.policy = old_policy.clone();
                         conn.custom_rules = old_rules.clone();
+                        conn.auto_replace = new_auto_replace;
                     }
                 }
                 if let Some(ref new_sess_id) = pending.new_session_id {
@@ -796,6 +809,23 @@ pub fn resolve_reconnect(
                     if let Some(session) = sessions.iter_mut().find(|s| s.session_id == *new_sess_id) {
                         session.policy = old_policy;
                         session.custom_rules = old_rules;
+                        session.auto_replace = new_auto_replace;
+                    }
+                }
+            } else {
+                // Even without keeping rules, still set auto_replace if user toggled it on
+                if new_auto_replace {
+                    if let Some(ref new_conn_id) = pending.new_connection_id {
+                        let mut connections = state.connections.lock().unwrap();
+                        if let Some(conn) = connections.iter_mut().find(|c| c.id == *new_conn_id) {
+                            conn.auto_replace = new_auto_replace;
+                        }
+                    }
+                    if let Some(ref new_sess_id) = pending.new_session_id {
+                        let mut sessions = state.upv2_sessions.lock().unwrap();
+                        if let Some(session) = sessions.iter_mut().find(|s| s.session_id == *new_sess_id) {
+                            session.auto_replace = new_auto_replace;
+                        }
                     }
                 }
             }
@@ -804,7 +834,7 @@ pub fn resolve_reconnect(
             let _ = state.save_connections();
             let _ = state.save_upv2_sessions();
 
-            emit_log(&app, &format!("[INFO] Replaced connection for '{}' (keep_rules={})", pending.app_name, keep_rules));
+            emit_log(&app, &format!("[INFO] Replaced connection for '{}' (keep_rules={}, auto_replace={})", pending.app_name, keep_rules, new_auto_replace));
         }
         "reject" => {
             // Remove the NEW connection/session, keep the old one
@@ -829,6 +859,131 @@ pub fn resolve_reconnect(
         _ => return Err("Invalid action — use 'reject', 'keep', or 'replace'".to_string()),
     }
 
+    emit_signer_state(&app, &state);
+    Ok(())
+}
+
+/// Silently perform auto-replace: remove the existing connection and transfer its
+/// policy/rules/auto_replace to the new connection. Used when auto_replace is enabled.
+pub fn auto_replace_connection(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    new_conn_id: &str,
+    existing_id: &str,
+    existing_source: &str,
+    app_name: &str,
+) {
+    let is_connection = existing_source == "nip46" || existing_source == "pc55";
+
+    // Read old settings
+    let (old_policy, old_rules, old_auto_replace) = if is_connection {
+        let connections = state.connections.lock().unwrap();
+        connections.iter()
+            .find(|c| c.id == existing_id)
+            .map(|c| (c.policy.clone(), c.custom_rules.clone(), c.auto_replace))
+            .unwrap_or(("manual".to_string(), HashMap::new(), true))
+    } else {
+        let sessions = state.upv2_sessions.lock().unwrap();
+        sessions.iter()
+            .find(|s| s.session_id == existing_id)
+            .map(|s| (s.policy.clone(), s.custom_rules.clone(), s.auto_replace))
+            .unwrap_or(("manual".to_string(), HashMap::new(), true))
+    };
+
+    // Remove old
+    if is_connection {
+        let mut connections = state.connections.lock().unwrap();
+        connections.retain(|c| c.id != existing_id);
+    } else {
+        let mut sessions = state.upv2_sessions.lock().unwrap();
+        sessions.retain(|s| s.session_id != existing_id);
+    }
+
+    // Transfer settings to new connection
+    {
+        let mut connections = state.connections.lock().unwrap();
+        if let Some(conn) = connections.iter_mut().find(|c| c.id == new_conn_id) {
+            conn.policy = old_policy;
+            conn.custom_rules = old_rules;
+            conn.auto_replace = old_auto_replace;
+        }
+    }
+
+    let _ = state.save_connections();
+    let _ = state.save_upv2_sessions();
+
+    emit_log(app, &format!("[INFO] Auto-replaced connection for '{}' (auto_replace=true)", app_name));
+}
+
+/// Silently perform auto-replace for UPV2 sessions specifically (new entry is a session, not connection)
+pub fn auto_replace_session(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    new_session_id: &str,
+    existing_id: &str,
+    existing_source: &str,
+    app_name: &str,
+) {
+    let is_connection = existing_source == "nip46" || existing_source == "pc55";
+
+    // Read old settings
+    let (old_policy, old_rules, old_auto_replace) = if is_connection {
+        let connections = state.connections.lock().unwrap();
+        connections.iter()
+            .find(|c| c.id == existing_id)
+            .map(|c| (c.policy.clone(), c.custom_rules.clone(), c.auto_replace))
+            .unwrap_or(("manual".to_string(), HashMap::new(), true))
+    } else {
+        let sessions = state.upv2_sessions.lock().unwrap();
+        sessions.iter()
+            .find(|s| s.session_id == existing_id)
+            .map(|s| (s.policy.clone(), s.custom_rules.clone(), s.auto_replace))
+            .unwrap_or(("manual".to_string(), HashMap::new(), true))
+    };
+
+    // Remove old
+    if is_connection {
+        let mut connections = state.connections.lock().unwrap();
+        connections.retain(|c| c.id != existing_id);
+    } else {
+        let mut sessions = state.upv2_sessions.lock().unwrap();
+        sessions.retain(|s| s.session_id != existing_id);
+    }
+
+    // Transfer settings to new session
+    {
+        let mut sessions = state.upv2_sessions.lock().unwrap();
+        if let Some(session) = sessions.iter_mut().find(|s| s.session_id == new_session_id) {
+            session.policy = old_policy;
+            session.custom_rules = old_rules;
+            session.auto_replace = old_auto_replace;
+        }
+    }
+
+    let _ = state.save_connections();
+    let _ = state.save_upv2_sessions();
+
+    emit_log(app, &format!("[INFO] Auto-replaced session for '{}' (auto_replace=true)", app_name));
+}
+
+/// Toggle auto_replace on a NIP-46 or PC55 connection
+#[tauri::command]
+pub fn set_connection_auto_replace(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    connection_id: String,
+    auto_replace: bool,
+) -> Result<(), String> {
+    {
+        let mut connections = state.connections.lock().unwrap();
+        if let Some(conn) = connections.iter_mut().find(|c| c.id == connection_id) {
+            conn.auto_replace = auto_replace;
+        } else {
+            return Err("Connection not found".to_string());
+        }
+    }
+    state.save_connections()?;
+    emit_log(&app, &format!("[INFO] Set auto_replace={} for connection", auto_replace));
     emit_signer_state(&app, &state);
     Ok(())
 }
@@ -1354,6 +1509,7 @@ async fn handle_nip46_event(
             policy: "manual".to_string(),
             custom_rules: HashMap::new(),
             signer_pubkey: signer_keys.public_key().to_hex(),
+            auto_replace: false,
         };
         {
             let mut connections = state.connections.lock().unwrap();

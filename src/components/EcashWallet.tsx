@@ -51,41 +51,9 @@ export const EcashWallet: React.FC<EcashWalletProps> = ({
     // UI States
     const [showInSats, setShowInSats] = useState(true);
     const [isConsolidating, setIsConsolidating] = useState(false);
-    const [cleanResult, setCleanResult] = useState<{ spent: number; valid: number } | null>(null);
+    const [verifyStatus, setVerifyStatus] = useState<'syncing' | 'verifying' | 'verified' | 'offline' | 'failed' | null>(null);
+    const [showOfflineWarning, setShowOfflineWarning] = useState(false);
     const [consolidateResult, setConsolidateResult] = useState<{ success: boolean; count: number } | null>(null);
-
-    // Load eCash session when pubkey changes
-    useEffect(() => {
-        if (activePubkey) {
-            useEcashStore.getState().loadSession(activePubkey);
-        }
-    }, [activePubkey]);
-
-    // Auto-clean spent proofs when tab loads (wait for proofs to stabilize after NIP-60 sync)
-    const hasAutoCleanedRef = React.useRef(false);
-    const proofStabilityTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
-    useEffect(() => {
-        if (!activePubkey || hasAutoCleanedRef.current) return;
-
-        // Each time proofs change, reset the stability timer.
-        // Once proofs remain unchanged for 3 seconds, we assume NIP-60 sync is done.
-        if (proofStabilityTimer.current) clearTimeout(proofStabilityTimer.current);
-
-        // Only start waiting once we actually have proofs
-        if (proofs.length === 0) return;
-
-        proofStabilityTimer.current = setTimeout(() => {
-            if (!hasAutoCleanedRef.current) {
-                hasAutoCleanedRef.current = true;
-                console.log('🧹 Auto-clean: Proofs stabilized, running silent clean...');
-                handleCheckProofs(true); // silent = true
-            }
-        }, 3000);
-
-        return () => {
-            if (proofStabilityTimer.current) clearTimeout(proofStabilityTimer.current);
-        };
-    }, [activePubkey, proofs.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
     // Sync sendRecipient with initialRecipient when it changes
     useEffect(() => {
@@ -102,16 +70,64 @@ export const EcashWallet: React.FC<EcashWalletProps> = ({
         }
     }, [autoOpenSend, initialRecipient]);
 
-    // NIP-61, NIP-60, NIP-87 listeners
+    // Load session + fetch relay state + reconcile + subscribe
     useEffect(() => {
         if (!activePubkey) return;
 
         let nutZapSub: { stop: () => void } | null = null;
         let proofSub: { stop: () => void } | null = null;
         let mintSub: { stop: () => void } | null = null;
+        let isReconciling = false;
 
         const init = async () => {
-            // NIP-61: Subscribe to incoming NutZaps
+            // Step 1: Load local cache instantly (for fast UI)
+            setVerifyStatus('syncing');
+            await useEcashStore.getState().loadSession(activePubkey);
+
+            // Step 2: Fetch latest relay state + reconcile
+            let privateKeyHex: string;
+            try {
+                privateKeyHex = await invoke('export_private_key_hex', { pubkey: activePubkey });
+            } catch (e) {
+                console.error('Failed to export private key:', e);
+                setVerifyStatus('failed');
+                return;
+            }
+
+            setVerifyStatus('verifying');
+
+            // Track the timestamp of the last event we've already processed
+            // so the subscription doesn't re-process it
+            let reconciledTimestamp = 0;
+
+            try {
+                const relayState = await Nip60Service.fetchLatestWalletState(activePubkey, privateKeyHex);
+
+                if (relayState) {
+                    reconciledTimestamp = relayState.created_at || 0;
+                    await useEcashStore.getState().reconcileWithRelayState(relayState);
+                    setVerifyStatus('verified');
+                } else {
+                    // No relay state found — offline or first-time user
+                    const hasProofs = useEcashStore.getState().proofs.length > 0;
+                    if (hasProofs) {
+                        setVerifyStatus('offline');
+                    } else {
+                        setVerifyStatus('verified');
+                    }
+                }
+            } catch (e) {
+                console.error('Relay fetch/reconcile failed:', e);
+                setVerifyStatus('offline');
+            }
+
+            // Also account for any publish that happened during reconcile
+            // (reconcile publishes if local proofs survived — that event will have
+            // created_at = now, which is > reconciledTimestamp)
+            const publishTimestamp = Math.floor(Date.now() / 1000);
+            const subscriptionSince = Math.max(reconciledTimestamp, publishTimestamp);
+
+            // Step 3: NIP-61 — Subscribe to incoming NutZaps
             const DEFAULT_RELAYS = [
                 'wss://relay.damus.io', 'wss://nos.lol', 'wss://relay.nostr.band',
                 'wss://relay.primal.net', 'wss://relay.snort.social', 'wss://relay.azzamo.net',
@@ -156,7 +172,6 @@ export const EcashWallet: React.FC<EcashWalletProps> = ({
                                         recipient: activePubkey
                                     });
                                     console.log('NutZap Redeemed!');
-                                    autoCleanAfterTransaction();
                                 } catch (e: any) {
                                     if (e.message?.includes('already spent')) {
                                         console.log('⚠️ Token already spent, marking as processed');
@@ -192,25 +207,37 @@ export const EcashWallet: React.FC<EcashWalletProps> = ({
                 }
             };
 
-            // NIP-60: Subscribe to own wallet state for sync
+            // Step 4: NIP-60 — Subscribe for live wallet state updates (during session)
+            // Only process events NEWER than what we already fetched + reconciled
             try {
-                const privateKeyHex: string = await invoke('export_private_key_hex', {
-                    pubkey: activePubkey
-                });
                 proofSub = Nip60Service.subscribeToWalletState(
                     null,
                     activePubkey,
                     privateKeyHex,
-                    (walletState) => {
-                        useEcashStore.getState().mergeWalletState(walletState);
-                    }
+                    async (walletState) => {
+                        // Skip if a reconcile is already in progress
+                        if (isReconciling) return;
+                        isReconciling = true;
+
+                        // Live update from another device — reconcile
+                        setVerifyStatus('verifying');
+                        try {
+                            await useEcashStore.getState().reconcileWithRelayState(walletState);
+                            setVerifyStatus('verified');
+                        } catch {
+                            setVerifyStatus('failed');
+                        } finally {
+                            isReconciling = false;
+                        }
+                    },
+                    subscriptionSince
                 );
-                console.log('📡 Subscribed to NIP-60 Wallet State');
+                console.log(`📡 Subscribed to NIP-60 Wallet State (since: ${subscriptionSince})`);
             } catch (e) {
                 console.warn('Could not subscribe to NIP-60:', e);
             }
 
-            // NIP-87: Mint discovery
+            // Step 5: NIP-87 — Mint discovery
             mintSub = Nip87Service.subscribeToMints();
             console.log('📡 Subscribed to NIP-87 Mints');
         };
@@ -277,6 +304,15 @@ export const EcashWallet: React.FC<EcashWalletProps> = ({
             const proofsByMint: Record<string, typeof currentProofs> = {};
 
             currentProofs.forEach(proof => {
+                // Try tagged mintUrl first
+                if ((proof as any).mintUrl && mints[(proof as any).mintUrl]) {
+                    const url = (proof as any).mintUrl;
+                    if (!proofsByMint[url]) proofsByMint[url] = [];
+                    proofsByMint[url].push(proof);
+                    return;
+                }
+
+                // Fallback: keyset ID matching
                 let mint = Object.keys(mints).find(m => {
                     const mintKeys = (mints[m].keys as any);
                     return (mintKeys.keysets && Array.isArray(mintKeys.keysets) &&
@@ -296,7 +332,7 @@ export const EcashWallet: React.FC<EcashWalletProps> = ({
                 if (mintProofs.length === 0) continue;
                 const consolidated = await CashuService.consolidateProofs(mintUrl, mintProofs);
                 useEcashStore.getState().removeProofs(mintProofs, true);
-                useEcashStore.getState().addProofs(consolidated, true);
+                useEcashStore.getState().addProofs(consolidated, true, mintUrl);
                 totalConsolidated += mintProofs.length;
             }
 
@@ -311,130 +347,7 @@ export const EcashWallet: React.FC<EcashWalletProps> = ({
         }
     };
 
-    // ── Check and clean spent proofs ──
-    const handleCheckProofs = async (silent = false) => {
-        try {
-            setIsConsolidating(true);
-            const currentProofs = useEcashStore.getState().proofs;
-            const proofsByMint: Record<string, typeof currentProofs> = {};
-            const activeMints = Object.keys(mints).filter(m => mints[m].active);
 
-            currentProofs.forEach(proof => {
-                let mint = Object.keys(mints).find(m => {
-                    const mintKeys = (mints[m].keys as any);
-                    return (mintKeys.keysets && Array.isArray(mintKeys.keysets) &&
-                        mintKeys.keysets.some((k: any) => k.id === proof.id)) ||
-                        mintKeys[proof.id];
-                });
-                if (!mint && activeMints.length > 0) mint = activeMints[0];
-                if (!mint) return;
-                if (!proofsByMint[mint]) proofsByMint[mint] = [];
-                proofsByMint[mint].push(proof);
-            });
-
-            let totalValid = 0;
-            let totalSpent = 0;
-
-            const currentPendingSends = useEcashStore.getState().pendingSends;
-            const pendingSecrets = new Set(
-                currentPendingSends.flatMap(ps => ps.proofSecrets || [])
-            );
-
-            if (pendingSecrets.size > 0) {
-                console.log(`🛡️ Protecting ${pendingSecrets.size} proofs in ${currentPendingSends.length} pending send(s)`);
-            }
-
-            for (const [mintUrl, mintProofs] of Object.entries(proofsByMint)) {
-                if (mintProofs.length === 0) continue;
-                const proofsToCheck = mintProofs.filter(p => !pendingSecrets.has(p.secret));
-                if (proofsToCheck.length === 0) continue;
-
-                const { valid, spent } = await CashuService.checkProofStates(mintUrl, proofsToCheck);
-                totalValid += valid.length;
-                totalSpent += spent.length;
-                if (spent.length > 0) {
-                    useEcashStore.getState().removeProofs(spent, true);
-                    console.log(`🗑️ Removed ${spent.length} spent proofs from ${mintUrl}`);
-                }
-            }
-
-            if (totalSpent > 0) {
-                console.log('📤 Publishing cleaned state to NIP-60 (skip merge)...');
-                await useEcashStore.getState().publishProofsToNostr(true);
-            }
-
-            // Only show the popup modal for manual clicks, not auto/silent cleans
-            if (!silent) {
-                if (totalSpent > 0) {
-                    setCleanResult({ spent: totalSpent, valid: totalValid });
-                } else {
-                    setCleanResult({ spent: 0, valid: totalValid });
-                }
-            } else {
-                console.log(`🧹 Silent clean done: ${totalSpent} spent removed, ${totalValid} valid remaining`);
-            }
-        } catch (e) {
-            console.error('Check proofs failed:', e);
-            if (!silent) {
-                setCleanResult({ spent: -1, valid: 0 });
-            }
-        } finally {
-            setIsConsolidating(false);
-        }
-    };
-
-    // ── Auto-cleanup after transactions ──
-    const autoCleanAfterTransaction = async () => {
-        try {
-            console.log('🧹 Auto-cleanup: Waiting for NIP-60 sync...');
-            await new Promise(resolve => setTimeout(resolve, 2000));
-
-            const currentProofs = useEcashStore.getState().proofs;
-            const proofsByMint: Record<string, typeof currentProofs> = {};
-            const activeMints = Object.keys(mints).filter(m => mints[m].active);
-
-            currentProofs.forEach(proof => {
-                let mint = Object.keys(mints).find(m => {
-                    const mintKeys = (mints[m].keys as any);
-                    if (Array.isArray(mintKeys)) {
-                        return mintKeys.some((k: any) => k.id === proof.id);
-                    }
-                    return false;
-                });
-                if (!mint && activeMints.length > 0) mint = activeMints[0];
-                if (!mint) return;
-                if (!proofsByMint[mint]) proofsByMint[mint] = [];
-                proofsByMint[mint].push(proof);
-            });
-
-            let totalSpent = 0;
-            const currentPendingSends = useEcashStore.getState().pendingSends;
-            const pendingSecrets = new Set(
-                currentPendingSends.flatMap(ps => ps.proofSecrets || [])
-            );
-
-            for (const [mintUrl, mintProofs] of Object.entries(proofsByMint)) {
-                if (mintProofs.length === 0) continue;
-                const proofsToCheck = mintProofs.filter(p => !pendingSecrets.has(p.secret));
-                if (proofsToCheck.length === 0) continue;
-
-                const { spent } = await CashuService.checkProofStates(mintUrl, proofsToCheck);
-                totalSpent += spent.length;
-                if (spent.length > 0) {
-                    useEcashStore.getState().removeProofs(spent, true);
-                    console.log(`🧹 Auto-cleanup: Removed ${spent.length} spent proofs from ${mintUrl}`);
-                }
-            }
-
-            if (totalSpent > 0) {
-                console.log('📤 Auto-cleanup: Publishing cleaned state to NIP-60...');
-                await useEcashStore.getState().publishProofsToNostr(true);
-            }
-            console.log(`🧹 Auto-cleanup done: ${totalSpent} spent proofs removed`);
-        } catch (e) {
-            console.error('Auto-cleanup failed:', e);
-        }
-    };
 
     return (
         <div className="flex-1 min-h-0 flex flex-col gap-4">
@@ -487,18 +400,42 @@ export const EcashWallet: React.FC<EcashWalletProps> = ({
                         )}
                     </div>
 
-                    {/* Action buttons row */}
+                    {/* Status indicators row */}
                     <div className="flex justify-between gap-3 text-xs mb-5">
-                        <button
-                            onClick={() => handleCheckProofs()}
-                            disabled={isConsolidating}
-                            className="px-3 py-1.5 bg-secondary/50 hover:bg-secondary border border-border/30 hover:border-primary/50 rounded-lg text-muted-foreground hover:text-foreground transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 cursor-pointer"
-                        >
-                            {isConsolidating && (
-                                <Loader2 className="w-3 h-3 animate-spin" />
+                        <div
+                            className={cn(
+                                "px-3 py-1.5 bg-secondary/50 border border-border/30 rounded-lg text-muted-foreground flex items-center gap-2",
+                                verifyStatus === 'offline' && "cursor-pointer hover:bg-secondary"
                             )}
-                            {isConsolidating ? 'Checking...' : 'Clean Balance'}
-                        </button>
+                            onClick={verifyStatus === 'offline' ? () => setShowOfflineWarning(true) : undefined}
+                        >
+                            {verifyStatus === 'syncing' || verifyStatus === null ? (
+                                <>
+                                    <Loader2 className="w-3 h-3 animate-spin text-muted-foreground" />
+                                    <span>Syncing...</span>
+                                </>
+                            ) : verifyStatus === 'verifying' ? (
+                                <>
+                                    <Loader2 className="w-3 h-3 animate-spin text-primary" />
+                                    <span>Verifying...</span>
+                                </>
+                            ) : verifyStatus === 'verified' ? (
+                                <>
+                                    <CircleCheckBig className="w-3 h-3 text-green-500" />
+                                    <span className="text-green-500">Verified</span>
+                                </>
+                            ) : verifyStatus === 'offline' ? (
+                                <>
+                                    <AlertTriangle className="w-3 h-3 text-yellow-500" />
+                                    <span className="text-yellow-500">Unverified</span>
+                                </>
+                            ) : (
+                                <>
+                                    <AlertTriangle className="w-3 h-3 text-red-500" />
+                                    <span className="text-red-500">Failed</span>
+                                </>
+                            )}
+                        </div>
                         <div className="flex gap-3">
                             <button
                                 onClick={() => setShowMintsModal(true)}
@@ -570,7 +507,13 @@ export const EcashWallet: React.FC<EcashWalletProps> = ({
                         </button>
                         <button
                             onClick={() => setShowSend(true)}
-                            className="flex-1 bg-primary hover:bg-primary/80 text-primary-foreground py-2 px-4 rounded-xl font-bold transition-colors flex items-center justify-center gap-2 cursor-pointer"
+                            disabled={verifyStatus === 'syncing' || verifyStatus === 'verifying' || verifyStatus === null}
+                            className={cn(
+                                "flex-1 py-2 px-4 rounded-xl font-bold transition-colors flex items-center justify-center gap-2",
+                                verifyStatus === 'syncing' || verifyStatus === 'verifying' || verifyStatus === null
+                                    ? "bg-primary/50 text-primary-foreground/50 cursor-not-allowed"
+                                    : "bg-primary hover:bg-primary/80 text-primary-foreground cursor-pointer"
+                            )}
                         >
                             <ArrowUpRight className="w-4 h-4" />
                             Send
@@ -668,7 +611,6 @@ export const EcashWallet: React.FC<EcashWalletProps> = ({
                 isOpen={showReceive}
                 onClose={() => {
                     setShowReceive(false);
-                    autoCleanAfterTransaction();
                 }}
             />
             <EcashSendModal
@@ -676,12 +618,10 @@ export const EcashWallet: React.FC<EcashWalletProps> = ({
                 onClose={() => {
                     setShowSend(false);
                     setSendRecipient('');
-                    autoCleanAfterTransaction();
                     if (onSendComplete) onSendComplete();
                 }}
                 initialRecipient={sendRecipient}
                 activePubkey={activePubkey}
-                onSendComplete={() => autoCleanAfterTransaction()}
             />
             <MintsModal isOpen={showMintsModal} onClose={() => setShowMintsModal(false)} />
             <ProofsModal isOpen={showProofsModal} onClose={() => setShowProofsModal(false)} />
@@ -696,33 +636,25 @@ export const EcashWallet: React.FC<EcashWalletProps> = ({
                 transaction={selectedTransaction}
             />
 
-            {/* Clean Balance Result Modal */}
-            {cleanResult && (
+            {/* Offline Warning Modal */}
+            {showOfflineWarning && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
                     <div className="bg-card border border-border rounded-2xl w-full max-w-md p-6 shadow-2xl">
-                        <h3 className="text-xl font-bold text-foreground mb-4">
-                            {cleanResult.spent === -1 ? '❌ Check Failed' : '✅ Clean Complete'}
-                        </h3>
-                        {cleanResult.spent === -1 ? (
-                            <p className="text-muted-foreground mb-6">
-                                Failed to check proofs. Please try again.
-                            </p>
-                        ) : cleanResult.spent > 0 ? (
-                            <p className="text-muted-foreground mb-6">
-                                Cleaned <span className="text-destructive font-bold">{cleanResult.spent}</span> spent proofs!
-                                <br />
-                                <span className="text-green-500 font-bold">{cleanResult.valid}</span> valid proofs remaining.
-                            </p>
-                        ) : (
-                            <p className="text-muted-foreground mb-6">
-                                All <span className="text-green-500 font-bold">{cleanResult.valid}</span> proofs are valid!
-                            </p>
-                        )}
+                        <div className="flex items-center gap-3 mb-4">
+                            <AlertTriangle className="w-6 h-6 text-yellow-500" />
+                            <h3 className="text-xl font-bold text-foreground">Balance Unverified</h3>
+                        </div>
+                        <p className="text-muted-foreground mb-3">
+                            Could not fetch your latest wallet state from Nostr relays.
+                        </p>
+                        <p className="text-muted-foreground mb-6 text-sm">
+                            The displayed balance is from your local cache and may be incorrect. Sending may fail if proofs were already spent from another device.
+                        </p>
                         <button
-                            onClick={() => setCleanResult(null)}
+                            onClick={() => setShowOfflineWarning(false)}
                             className="w-full px-4 py-2 bg-primary hover:bg-primary/80 text-primary-foreground font-bold rounded-lg transition-colors cursor-pointer"
                         >
-                            Close
+                            I Understand
                         </button>
                     </div>
                 </div>

@@ -15,6 +15,8 @@ import {
 import { useFeedback } from '@/components/ui/feedback';
 import { KeypairManager } from '@/components/KeypairManager';
 import { bitcoinNodes } from '@/services/bitcoin';
+import { evmNodes, EVM_CHAINS } from '@/services/evm';
+import { zcashNodes } from '@/services/zcash';
 import { blossomServers } from '@/services/blossomServers';
 import type { AppState } from '@/App';
 import { fetchNostrProfile, type NostrProfile } from '@/services/nostrProfile';
@@ -23,6 +25,7 @@ import { nip19 } from 'nostr-tools';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { QRCodeSVG } from 'qrcode.react';
 import { npubToTaprootAddress } from '@/services/bitcoin';
+import { chainIcons } from '@/assets/icons/blockchain';
 
 interface RelayInfo {
     url: string;
@@ -504,7 +507,7 @@ export function Settings({ logs, appState, onNavigateToWallet, onNavigateToEcash
         { id: 'merchant', label: 'Merchant', desc: 'Manage commercial settings', icon: Store },
         { id: 'blossom', label: 'Blossom Servers', desc: 'Media server fallbacks', icon: Cloud },
         { id: 'tutorials', label: 'Tutorials', desc: 'Learn how to use DENOS', icon: GraduationCap },
-        { id: 'about', label: 'About DENOS', desc: 'Version 0.2.1', icon: Info },
+        { id: 'about', label: 'About DENOS', desc: 'Version 0.2.5', icon: Info },
     ];
 
 
@@ -1520,6 +1523,18 @@ function BlossomServersPage({ onBack, toast }: { onBack: () => void; toast: (msg
 // ── Version History Data ──
 const VERSION_HISTORY = [
     {
+        version: '0.2.5',
+        date: 'April 2026',
+        title: 'Multi-Chain Derivation',
+        changes: [
+            'Multi-chain wallet support with addresses derived from your Nostr keypair',
+            'ERC-20 token support for sending and receiving across all supported chains',
+            'Auto-replace toggle for repeat connection requests from the same client (convenience vs. security trade-off)',
+            'Fixed credential store bloat caused by stale signed events; transient data now cleared on app restart',
+            'Fixed multiple eCash wallet bugs including balance flickering, phantom balances, and lost transaction history; optimized proof reconciliation and mint verification performance',
+        ],
+    },
+    {
         version: '0.2.0',
         date: 'Feb 2026',
         title: 'Initial Release',
@@ -2499,42 +2514,100 @@ function AboutPage({ onBack, toast, onNavigateToWallet, onNavigateToEcashSend, a
 
 /* ── Currency Nodes Sub-Page ── */
 
+type ChainLevel = 'currencies' | 'bitcoin' | 'ethereum' | 'bnb' | 'polygon' | 'avalanche' | 'base' | 'zcash';
+
+interface ChainEntry {
+    id: ChainLevel;
+    name: string;
+    color: string;
+    getNodes: () => string[];
+    addNode: (url: string) => void;
+    removeNode: (url: string) => void;
+    checkHealth: (url: string) => Promise<boolean>;
+    setNodes: (nodes: string[]) => void;
+    getDefaults: () => string[];
+    logo: React.ReactNode;
+}
+
 function CurrencyNodesSubPage({ onBack }: { onBack: () => void }) {
-    const [level, setLevel] = useState<'currencies' | 'bitcoin'>('currencies');
+    const [level, setLevel] = useState<ChainLevel>('currencies');
     const [nodes, setNodes] = useState<string[]>([]);
     const [nodeHealth, setNodeHealth] = useState<Record<string, boolean | null>>({});
     const [newNodeUrl, setNewNodeUrl] = useState('');
     const [checkingHealth, setCheckingHealth] = useState(false);
     const { toast } = useFeedback();
 
-    // Load nodes on mount
-    useEffect(() => {
-        setNodes(bitcoinNodes.getNodes());
-    }, []);
+    const chainEntries: ChainEntry[] = [
+        {
+            id: 'bitcoin', name: 'Bitcoin', color: '#F7931A',
+            getNodes: () => bitcoinNodes.getNodes(),
+            addNode: (url) => bitcoinNodes.addNode(url),
+            removeNode: (url) => bitcoinNodes.removeNode(url),
+            checkHealth: (url) => bitcoinNodes.checkNodeHealth(url),
+            setNodes: (n) => bitcoinNodes.setNodes(n),
+            getDefaults: () => bitcoinNodes.getDefaultNodes(),
+            logo: <img src={chainIcons.bitcoin} alt="Bitcoin" className="rounded-full object-cover shrink-0" style={{ width: 18, height: 18 }} />,
+        },
+        ...Object.values(EVM_CHAINS).map(chain => ({
+            id: chain.id as ChainLevel,
+            name: chain.name,
+            color: chain.color,
+            getNodes: () => evmNodes.getNodes(chain.id),
+            addNode: (url: string) => evmNodes.addNode(chain.id, url),
+            removeNode: (url: string) => evmNodes.removeNode(chain.id, url),
+            checkHealth: (url: string) => evmNodes.checkNodeHealth(url),
+            setNodes: (n: string[]) => evmNodes.setNodes(chain.id, n),
+            getDefaults: () => evmNodes.getDefaultNodes(chain.id),
+            logo: <img src={chain.icon || ''} alt={chain.name} className="rounded-full object-cover shrink-0" style={{ width: 18, height: 18 }} />,
+        })),
+        {
+            id: 'zcash' as ChainLevel, name: 'Zcash', color: '#ECB244',
+            getNodes: () => zcashNodes.getNodes(),
+            addNode: (url) => zcashNodes.addNode(url),
+            removeNode: (url) => zcashNodes.removeNode(url),
+            checkHealth: (url) => zcashNodes.checkNodeHealth(url),
+            setNodes: (n) => zcashNodes.setNodes(n),
+            getDefaults: () => zcashNodes.getDefaultNodes(),
+            logo: <img src={chainIcons.zcash} alt="Zcash" className="rounded-full object-cover shrink-0" style={{ width: 18, height: 18 }} />,
+        },
+    ];
 
-    // Check health when viewing Bitcoin nodes
+    const activeChain = level !== 'currencies' ? chainEntries.find(c => c.id === level) : null;
+
+    // Load nodes when level changes
     useEffect(() => {
-        if (level === 'bitcoin') {
+        if (activeChain) {
+            setNodes(activeChain.getNodes());
+            setNewNodeUrl('');
+            setNodeHealth({});
+        }
+    }, [level]);
+
+    // Check health when viewing a chain's nodes
+    useEffect(() => {
+        if (activeChain && nodes.length > 0) {
             checkAllHealth();
         }
     }, [level, nodes.length]);
 
     const checkAllHealth = async () => {
+        if (!activeChain) return;
         setCheckingHealth(true);
         const health: Record<string, boolean | null> = {};
         for (const url of nodes) {
-            health[url] = null; // loading
+            health[url] = null;
         }
         setNodeHealth(health);
 
         await Promise.all(nodes.map(async (url) => {
-            const ok = await bitcoinNodes.checkNodeHealth(url);
+            const ok = await activeChain.checkHealth(url);
             setNodeHealth(prev => ({ ...prev, [url]: ok }));
         }));
         setCheckingHealth(false);
     };
 
     const handleAddNode = () => {
+        if (!activeChain) return;
         const url = newNodeUrl.trim().replace(/\/+$/, '');
         if (!url) return;
         if (!/^https?:\/\//.test(url)) {
@@ -2545,20 +2618,28 @@ function CurrencyNodesSubPage({ onBack }: { onBack: () => void }) {
             toast('Node already exists', 'error');
             return;
         }
-        bitcoinNodes.addNode(url);
-        setNodes(bitcoinNodes.getNodes());
+        activeChain.addNode(url);
+        setNodes(activeChain.getNodes());
         setNewNodeUrl('');
         toast('Node added', 'success');
     };
 
     const handleRemoveNode = (url: string) => {
+        if (!activeChain) return;
         if (nodes.length <= 1) {
             toast('Must keep at least one node', 'error');
             return;
         }
-        bitcoinNodes.removeNode(url);
-        setNodes(bitcoinNodes.getNodes());
+        activeChain.removeNode(url);
+        setNodes(activeChain.getNodes());
         toast('Node removed', 'success');
+    };
+
+    const handleResetDefaults = () => {
+        if (!activeChain) return;
+        activeChain.setNodes(activeChain.getDefaults());
+        setNodes(activeChain.getDefaults());
+        toast('Reset to defaults', 'success');
     };
 
     // Level 1: Currency list
@@ -2584,19 +2665,27 @@ function CurrencyNodesSubPage({ onBack }: { onBack: () => void }) {
                             </CardTitle>
                         </CardHeader>
                         <CardContent>
-                            <button
-                                onClick={() => setLevel('bitcoin')}
-                                className="flex items-center gap-3 w-full py-3 cursor-pointer group text-left hover:opacity-80 transition-opacity"
-                            >
-                                <div className="w-9 h-9 rounded-lg bg-secondary flex items-center justify-center shrink-0">
-                                    <Bitcoin className="w-4.5 h-4.5 text-muted-foreground" />
-                                </div>
-                                <div className="flex-1 min-w-0">
-                                    <p className="text-sm font-medium">Bitcoin</p>
-                                    <p className="text-xs text-muted-foreground">{nodes.length} node{nodes.length !== 1 ? 's' : ''} configured</p>
-                                </div>
-                                <ChevronRight className="w-4.5 h-4.5 text-muted-foreground shrink-0" />
-                            </button>
+                            <div className="divide-y divide-border">
+                                {chainEntries.map(chain => {
+                                    const count = chain.getNodes().length;
+                                    return (
+                                        <button
+                                            key={chain.id}
+                                            onClick={() => setLevel(chain.id)}
+                                            className="flex items-center gap-3 w-full py-3 cursor-pointer group text-left hover:opacity-80 transition-opacity"
+                                        >
+                                            <div className="w-9 h-9 rounded-lg bg-secondary flex items-center justify-center shrink-0">
+                                                {chain.logo}
+                                            </div>
+                                            <div className="flex-1 min-w-0">
+                                                <p className="text-sm font-medium">{chain.name}</p>
+                                                <p className="text-xs text-muted-foreground">{count} node{count !== 1 ? 's' : ''} configured</p>
+                                            </div>
+                                            <ChevronRight className="w-4.5 h-4.5 text-muted-foreground shrink-0" />
+                                        </button>
+                                    );
+                                })}
+                            </div>
                         </CardContent>
                     </Card>
                 </div>
@@ -2604,7 +2693,9 @@ function CurrencyNodesSubPage({ onBack }: { onBack: () => void }) {
         );
     }
 
-    // Level 2: Bitcoin nodes
+    // Level 2: Chain-specific nodes
+    if (!activeChain) return null;
+
     return (
         <div className="flex flex-col h-[calc(100vh-115px)] animate-fade-in">
             <div className="flex items-center gap-3 shrink-0 pb-3">
@@ -2614,7 +2705,7 @@ function CurrencyNodesSubPage({ onBack }: { onBack: () => void }) {
                 >
                     <ArrowLeft className="w-4.5 h-4.5 text-muted-foreground" />
                 </button>
-                <h2 className="text-base font-semibold">Bitcoin Nodes</h2>
+                <h2 className="text-base font-semibold">{activeChain.name} Nodes</h2>
             </div>
             <div className="flex-1 overflow-y-auto space-y-4 pb-[100px]">
 
@@ -2622,17 +2713,26 @@ function CurrencyNodesSubPage({ onBack }: { onBack: () => void }) {
                     <CardHeader>
                         <CardTitle className="flex items-center justify-between">
                             <span className="flex items-center gap-2">
-                                <Bitcoin className="w-4.5 h-4.5" />
-                                Bitcoin Nodes
+                                {activeChain.logo}
+                                {activeChain.name} Nodes
                             </span>
-                            <button
-                                onClick={checkAllHealth}
-                                disabled={checkingHealth}
-                                className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-secondary rounded-lg transition-colors cursor-pointer disabled:opacity-50"
-                                title="Check connectivity"
-                            >
-                                <RefreshCw className={cn("w-4 h-4", checkingHealth && "animate-spin")} />
-                            </button>
+                            <div className="flex items-center gap-1">
+                                <button
+                                    onClick={handleResetDefaults}
+                                    className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-secondary rounded-lg transition-colors cursor-pointer"
+                                    title="Reset to defaults"
+                                >
+                                    <ArrowLeft className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                    onClick={checkAllHealth}
+                                    disabled={checkingHealth}
+                                    className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-secondary rounded-lg transition-colors cursor-pointer disabled:opacity-50"
+                                    title="Check connectivity"
+                                >
+                                    <RefreshCw className={cn("w-4 h-4", checkingHealth && "animate-spin")} />
+                                </button>
+                            </div>
                         </CardTitle>
                     </CardHeader>
                     <CardContent>
@@ -2689,3 +2789,4 @@ function CurrencyNodesSubPage({ onBack }: { onBack: () => void }) {
         </div>
     );
 }
+

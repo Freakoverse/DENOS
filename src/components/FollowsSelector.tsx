@@ -16,21 +16,23 @@ import { cn } from '@/lib/utils';
 import { fetchFollows } from '@/services/nostrFollows';
 import { fetchNostrProfile, type NostrProfile } from '@/services/nostrProfile';
 import { npubToTaprootAddress } from '@/services/bitcoin';
+import { npubToEvmAddress } from '@/services/evm';
+import { npubToZcashAddress } from '@/services/zcash';
 
 interface FollowsSelectorProps {
     isOpen: boolean;
     onClose: () => void;
     onSelect: (npub: string) => void;
     activePubkey: string;
-    /** If true, derives and shows taproot address for each contact (Bitcoin mode) */
-    showTaprootAddress?: boolean;
+    /** Which chain to derive addresses for: 'bitcoin' | 'evm' | 'zcash' | 'none' */
+    chainType?: 'bitcoin' | 'evm' | 'zcash' | 'none';
 }
 
 interface ContactInfo {
     pubkeyHex: string;
     npub: string;
     profile: NostrProfile | null;
-    taprootAddress?: string;
+    derivedAddress?: string;
     loading: boolean;
 }
 
@@ -39,7 +41,7 @@ export const FollowsSelector: React.FC<FollowsSelectorProps> = ({
     onClose,
     onSelect,
     activePubkey,
-    showTaprootAddress = false,
+    chainType = 'none',
 }) => {
     const [contacts, setContacts] = useState<ContactInfo[]>([]);
     const [loadingFollows, setLoadingFollows] = useState(false);
@@ -84,8 +86,12 @@ export const FollowsSelector: React.FC<FollowsSelectorProps> = ({
                         loading: true
                     };
 
-                    if (showTaprootAddress && npub.startsWith('npub')) {
-                        try { info.taprootAddress = npubToTaprootAddress(npub); } catch { /* skip */ }
+                    if (chainType !== 'none' && npub.startsWith('npub')) {
+                        try {
+                            if (chainType === 'bitcoin') info.derivedAddress = npubToTaprootAddress(npub);
+                            else if (chainType === 'evm') info.derivedAddress = npubToEvmAddress(npub);
+                            else if (chainType === 'zcash') info.derivedAddress = npubToZcashAddress(npub);
+                        } catch { /* skip */ }
                     }
 
                     return info;
@@ -130,7 +136,7 @@ export const FollowsSelector: React.FC<FollowsSelectorProps> = ({
         };
 
         loadFollows();
-    }, [isOpen, activePubkey, showTaprootAddress]);
+    }, [isOpen, activePubkey, chainType]);
 
     // Filtered contacts based on search
     const filteredContacts = useMemo(() => {
@@ -256,9 +262,9 @@ export const FollowsSelector: React.FC<FollowsSelectorProps> = ({
                                                     ) : (
                                                         <div className="text-sm text-foreground font-mono truncate">{npubShort}</div>
                                                     )}
-                                                    {showTaprootAddress && contact.taprootAddress && (
+                                                    {chainType !== 'none' && contact.derivedAddress && (
                                                         <div className="text-[10px] text-muted-foreground/70 font-mono truncate mt-0.5">
-                                                            {contact.taprootAddress.slice(0, 14)}...{contact.taprootAddress.slice(-8)}
+                                                            {contact.derivedAddress.slice(0, 14)}...{contact.derivedAddress.slice(-8)}
                                                         </div>
                                                     )}
                                                 </div>

@@ -98,6 +98,7 @@ pub fn run() {
             keys::generate_seed,
             keys::import_seed_phrase,
             keys::derive_next_keypair,
+            keys::derive_keypair_at_index,
             keys::delete_seed,
             keys::set_active_seed,
             keys::rename_seed,
@@ -133,6 +134,7 @@ pub fn run() {
             nip46::remove_custom_rule,
             nip46::update_connection_rules,
             nip46::resolve_reconnect,
+            nip46::set_connection_auto_replace,
             nip46::add_relay,
             nip46::remove_relay,
             nip46::reset_relays,
@@ -158,6 +160,7 @@ pub fn run() {
             upv2::set_upv2_session_policy,
             upv2::set_upv2_custom_rule,
             upv2::remove_upv2_custom_rule,
+            upv2::set_upv2_session_auto_replace,
             // NIP-PC55 local signer
             pc55::start_pc55_server,
             pc55::stop_pc55_server,

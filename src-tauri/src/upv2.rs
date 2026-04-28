@@ -1,5 +1,5 @@
 use crate::state::{AppState, PendingReconnect, Upv2LoginKey, Upv2Session, Upv2Challenge, LoginAttempt, PendingRequest, SigningHistoryEntry};
-use crate::nip46::find_existing_by_name;
+use crate::nip46::{find_existing_by_name, auto_replace_session};
 use nostr_sdk::prelude::*;
 use nostr_sdk::nips::{nip04, nip44};
 use ::hkdf::Hkdf;
@@ -288,6 +288,28 @@ pub fn remove_upv2_custom_rule(
     Ok(())
 }
 
+/// Toggle auto_replace on a UPV2 session
+#[tauri::command]
+pub fn set_upv2_session_auto_replace(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    auto_replace: bool,
+) -> Result<(), String> {
+    {
+        let mut sessions = state.upv2_sessions.lock().unwrap();
+        if let Some(session) = sessions.iter_mut().find(|s| s.session_id == session_id) {
+            session.auto_replace = auto_replace;
+        } else {
+            return Err("Session not found".to_string());
+        }
+    }
+    state.save_upv2_sessions()?;
+    emit_log(&app, &format!("[UPV2] Set auto_replace={} for session", auto_replace));
+    emit_signer_state(&app, &state);
+    Ok(())
+}
+
 // --- Event Handler ---
 
 /// Handle an incoming kind 24134 (NIP-UPV2) event
@@ -565,6 +587,7 @@ async fn handle_login(
                 policy: "manual".to_string(),
                 custom_rules: std::collections::HashMap::new(),
                 signer_pubkey: signer_keys.public_key().to_hex(),
+                auto_replace: false,
             };
 
             // Check for existing connection/session with same name (cross-protocol)
@@ -577,18 +600,23 @@ async fn handle_login(
             }
             info!("[UPV2] New session for '{}' ({})", client_name, fp);
 
-            if let Some((existing_id, existing_source, _policy, _rules)) = existing {
-                // Prompt user: do you want to remove the OLD connection?
-                let pending = PendingReconnect {
-                    new_connection_id: None,
-                    new_session_id: Some(session_id.to_string()),
-                    existing_id,
-                    existing_source: existing_source.clone(),
-                    app_name: client_name.clone(),
-                };
-                *state.pending_reconnect.lock().unwrap() = Some(pending.clone());
-                let _ = app.emit("reconnect-prompt", &pending);
-                emit_log(app, &format!("[UPV2] '{}' is reconnecting (existing {} connection found) — awaiting user decision", client_name, existing_source));
+            if let Some((existing_id, existing_source, _policy, _rules, existing_auto_replace)) = existing {
+                if existing_auto_replace {
+                    // Auto-replace: silently replace the old connection/session, keeping rules
+                    auto_replace_session(app, &state, session_id, &existing_id, &existing_source, &client_name);
+                } else {
+                    // Prompt user: do you want to remove the OLD connection?
+                    let pending = PendingReconnect {
+                        new_connection_id: None,
+                        new_session_id: Some(session_id.to_string()),
+                        existing_id,
+                        existing_source: existing_source.clone(),
+                        app_name: client_name.clone(),
+                    };
+                    *state.pending_reconnect.lock().unwrap() = Some(pending.clone());
+                    let _ = app.emit("reconnect-prompt", &pending);
+                    emit_log(app, &format!("[UPV2] '{}' is reconnecting (existing {} connection found) — awaiting user decision", client_name, existing_source));
+                }
             }
         }
     }

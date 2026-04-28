@@ -22,6 +22,15 @@ export const ProofsModal: React.FC<ProofsModalProps> = ({ isOpen, onClose }) => 
     const proofsByMint = useMemo(() => {
         const grouped: Record<string, typeof proofs> = {};
         proofs.forEach(proof => {
+            // Try tagged mintUrl first
+            if ((proof as any).mintUrl && mints[(proof as any).mintUrl]) {
+                const key = (proof as any).mintUrl;
+                if (!grouped[key]) grouped[key] = [];
+                grouped[key].push(proof);
+                return;
+            }
+
+            // Fallback: keyset ID matching
             const mintUrl = Object.keys(mints).find(m => {
                 const mintKeys = (mints[m].keys as any);
                 return (mintKeys.keysets && Array.isArray(mintKeys.keysets) &&
@@ -43,7 +52,7 @@ export const ProofsModal: React.FC<ProofsModalProps> = ({ isOpen, onClose }) => 
         try {
             const consolidated = await CashuService.consolidateProofs(mintUrl, mintProofs);
             useEcashStore.getState().removeProofs(mintProofs, true);
-            useEcashStore.getState().addProofs(consolidated, true);
+            useEcashStore.getState().addProofs(consolidated, true, mintUrl);
             await useEcashStore.getState().publishProofsToNostr(true);
         } catch (e) {
             console.error('Consolidation failed:', e);
