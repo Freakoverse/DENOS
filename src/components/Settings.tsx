@@ -507,7 +507,7 @@ export function Settings({ logs, appState, onNavigateToWallet, onNavigateToEcash
         { id: 'merchant', label: 'Merchant', desc: 'Manage commercial settings', icon: Store },
         { id: 'blossom', label: 'Blossom Servers', desc: 'Media server fallbacks', icon: Cloud },
         { id: 'tutorials', label: 'Tutorials', desc: 'Learn how to use DENOS', icon: GraduationCap },
-        { id: 'about', label: 'About DENOS', desc: 'Version 0.2.5', icon: Info },
+        { id: 'about', label: 'About DENOS', desc: 'Version 0.2.6', icon: Info },
     ];
 
 
@@ -1523,7 +1523,7 @@ function BlossomServersPage({ onBack, toast }: { onBack: () => void; toast: (msg
 // ── Version History Data ──
 const VERSION_HISTORY = [
     {
-        version: '0.2.5',
+        version: '0.2.6',
         date: 'April 2026',
         title: 'Multi-Chain Derivation',
         changes: [

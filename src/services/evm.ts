@@ -737,8 +737,20 @@ function signEip155(msgHash: Buffer, signingKey: string, chainIdNum: bigint): { 
     const keyBuf = Buffer.from(signingKey, 'hex');
     const sig = ecc.sign(msgHash, keyBuf);
     const r = Buffer.from(sig.slice(0, 32));
-    const s = Buffer.from(sig.slice(32, 64));
+    let s = Buffer.from(sig.slice(32, 64));
+
+    // EIP-2 (Homestead) low-S normalization — Ethereum nodes reject
+    // transactions with s > secp256k1 half-order. Without this,
+    // ~50% of signatures are silently dropped by the network.
+    const sBI = BigInt('0x' + s.toString('hex'));
+    const halfOrder = BigInt('0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0');
+    if (sBI > halfOrder) {
+        const sLow = SECP256K1_N - sBI;
+        s = Buffer.from(sLow.toString(16).padStart(64, '0'), 'hex');
+    }
+
     const expectedPubkey = ecc.pointFromScalar(keyBuf);
+    // findRecoveryId uses the (potentially normalized) s, so recId is correct
     const recId = expectedPubkey ? findRecoveryId(msgHash, r, s, expectedPubkey) : 0;
     const v = chainIdNum * 2n + 35n + BigInt(recId);
     return { r, s, v };
