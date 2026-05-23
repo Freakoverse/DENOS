@@ -12,7 +12,7 @@ import { nip19 } from 'nostr-tools';
 import { invoke } from '@tauri-apps/api/core';
 import {
     ArrowDownLeft, ArrowUpRight, ArrowUpDown, User, CircleCheckBig,
-    Loader2, AlertTriangle
+    Loader2, AlertTriangle, X
 } from 'lucide-react';
 import { SatoshiIcon } from '@/components/SatoshiIcon';
 import { cn } from '@/lib/utils';
@@ -54,6 +54,17 @@ export const EcashWallet: React.FC<EcashWalletProps> = ({
     const [verifyStatus, setVerifyStatus] = useState<'syncing' | 'verifying' | 'verified' | 'offline' | 'failed' | null>(null);
     const [showOfflineWarning, setShowOfflineWarning] = useState(false);
     const [consolidateResult, setConsolidateResult] = useState<{ success: boolean; count: number } | null>(null);
+    const [showExperimentalWarning, setShowExperimentalWarning] = useState(() => {
+        const dismissed = localStorage.getItem('ecash_warning_dismissed');
+        if (!dismissed) return true;
+        return Date.now() > parseInt(dismissed, 10);
+    });
+
+    const dismissWarning = () => {
+        const threeDays = 3 * 24 * 60 * 60 * 1000;
+        localStorage.setItem('ecash_warning_dismissed', String(Date.now() + threeDays));
+        setShowExperimentalWarning(false);
+    };
 
     // Sync sendRecipient with initialRecipient when it changes
     useEffect(() => {
@@ -351,6 +362,18 @@ export const EcashWallet: React.FC<EcashWalletProps> = ({
 
     return (
         <div className="flex-1 min-h-0 flex flex-col gap-4">
+            {/* Experimental Warning */}
+            {showExperimentalWarning && (
+                <div className="flex items-center gap-2.5 px-3 py-2.5 rounded-xl shrink-0" style={{ backgroundColor: '#F04444' }}>
+                    <p className="text-xs leading-relaxed text-white flex-1">
+                        <span className="font-bold">Experimental.</span> eCash and NutZap are not reliable — funds may be lost or stolen. Mints hold custody of your tokens, not you.
+                    </p>
+                    <button onClick={dismissWarning} className="text-white/80 hover:text-white shrink-0 cursor-pointer p-0.5 pl-2.5 h-full border-l border-white/25">
+                        <X className="w-3.5 h-3.5" />
+                    </button>
+                </div>
+            )}
+
             {/* Balance Card */}
             <div className="wallet-balance-card bg-gradient-to-br from-primary/15 to-primary/5 border border-primary/20 rounded-2xl p-5 relative overflow-hidden shrink-0">
                 <div className="relative z-10">

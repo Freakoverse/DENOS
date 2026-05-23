@@ -85,7 +85,14 @@ async function fetchWithFallback(path: string, options?: RequestInit): Promise<R
         try {
             const res = await fetch(`${baseUrl}${path}`, options);
             if (res.ok) return res;
-            lastError = new Error(`${baseUrl}: HTTP ${res.status}`);
+            // Read the error body for better diagnostics (e.g. broadcast rejections)
+            let errorDetail = '';
+            try { errorDetail = await res.text(); } catch { }
+            lastError = new Error(
+                errorDetail
+                    ? `${baseUrl}: HTTP ${res.status} — ${errorDetail.slice(0, 200)}`
+                    : `${baseUrl}: HTTP ${res.status}`
+            );
         } catch (e: any) {
             lastError = e;
         }
@@ -331,6 +338,104 @@ export async function createTaprootTransaction(
 
     for (let i = 0; i < utxos.length; i++) {
         psbt.signInput(i, tweakedSigner);
+    }
+
+    psbt.finalizeAllInputs();
+    const tx = psbt.extractTransaction();
+    return { txHex: tx.toHex(), fee: estimatedFee };
+}
+
+/**
+ * Build a Taproot transaction using UTXOs from multiple addresses,
+ * each signed with its own private key. HD-wallet-style coin selection.
+ * Change is sent back to the first input address.
+ */
+export async function createMultiKeyTaprootTransaction(
+    taggedUtxos: { utxo: UTXO; privateKeyHex: string; rawTaproot?: boolean }[],
+    toAddress: string,
+    amountSats: number,
+    feeRate: number
+): Promise<{ txHex: string; fee: number }> {
+    if (taggedUtxos.length === 0) throw new Error('No UTXOs provided');
+
+    const psbt = new bitcoin.Psbt({ network: bitcoin.networks.bitcoin });
+
+    // Derive change address from the first key
+    const firstKeyPair = getECPair().fromPrivateKey(Buffer.from(taggedUtxos[0].privateKeyHex, 'hex'));
+    const firstInternalPub = firstKeyPair.publicKey.slice(1, 33);
+    let changeAddress: string;
+    if (taggedUtxos[0].rawTaproot) {
+        // BIP-352: change goes back to the raw candidate address (no TapTweak)
+        changeAddress = bitcoin.address.toBech32(firstInternalPub, 1, bitcoin.networks.bitcoin.bech32);
+    } else {
+        const { address } = bitcoin.payments.p2tr({
+            internalPubkey: firstInternalPub,
+            network: bitcoin.networks.bitcoin,
+        });
+        if (!address) throw new Error('Failed to derive change address');
+        changeAddress = address;
+    }
+
+    // Add all inputs
+    let totalInput = 0;
+    const signers: ReturnType<ReturnType<typeof getECPair>['fromPrivateKey']>[] = [];
+    const rawFlags: boolean[] = [];
+    for (const { utxo, privateKeyHex, rawTaproot } of taggedUtxos) {
+        const kp = getECPair().fromPrivateKey(Buffer.from(privateKeyHex, 'hex'));
+        const internalPub = kp.publicKey.slice(1, 33); // x-only
+
+        let output: Buffer;
+        if (rawTaproot) {
+            // BIP-352: the x-only pubkey IS the output key directly (no TapTweak).
+            // Build scriptPubKey manually: OP_1 <32-byte x-only key>
+            output = Buffer.concat([Buffer.from([0x51, 0x20]), internalPub]);
+        } else {
+            const p2tr = bitcoin.payments.p2tr({
+                internalPubkey: internalPub,
+                network: bitcoin.networks.bitcoin,
+            });
+            if (!p2tr.output) throw new Error('Failed to derive output script');
+            output = Buffer.from(p2tr.output);
+        }
+
+        psbt.addInput({
+            hash: utxo.txid,
+            index: utxo.vout,
+            witnessUtxo: { script: output, value: BigInt(utxo.value) },
+            tapInternalKey: internalPub,
+        });
+        totalInput += utxo.value;
+        signers.push(kp);
+        rawFlags.push(!!rawTaproot);
+    }
+
+    const estimatedSize = taggedUtxos.length * 57.5 + 2 * 43 + 10.5;
+    const estimatedFee = Math.ceil(estimatedSize * feeRate);
+    const change = totalInput - amountSats - estimatedFee;
+
+    if (change < 0) {
+        throw new Error(`Insufficient funds. Need ${amountSats + estimatedFee} sats, have ${totalInput} sats`);
+    }
+
+    psbt.addOutput({ address: toAddress, value: BigInt(amountSats) });
+    if (change > 546) {
+        psbt.addOutput({ address: changeAddress, value: BigInt(change) });
+    }
+
+    // Sign each input with its corresponding signer
+    for (let i = 0; i < signers.length; i++) {
+        if (rawFlags[i]) {
+            // BIP-352 raw output: sign directly with the key (no TapTweak)
+            // The output key IS privkey·G, so sign with the raw private key
+            psbt.signInput(i, signers[i]);
+        } else {
+            // Standard Taproot: apply TapTweak before signing
+            const internalPub = signers[i].publicKey.slice(1, 33);
+            const tweakedSigner = signers[i].tweak(
+                bitcoin.crypto.taggedHash('TapTweak', internalPub)
+            );
+            psbt.signInput(i, tweakedSigner);
+        }
     }
 
     psbt.finalizeAllInputs();

@@ -22,7 +22,7 @@ import { npubToZcashAddress } from '@/services/zcash';
 interface FollowsSelectorProps {
     isOpen: boolean;
     onClose: () => void;
-    onSelect: (npub: string) => void;
+    onSelect: (npub: string, displayName?: string) => void;
     activePubkey: string;
     /** Which chain to derive addresses for: 'bitcoin' | 'evm' | 'zcash' | 'none' */
     chainType?: 'bitcoin' | 'evm' | 'zcash' | 'none';
@@ -157,7 +157,8 @@ export const FollowsSelector: React.FC<FollowsSelectorProps> = ({
 
     const handleConfirm = useCallback(() => {
         if (selectedContact) {
-            onSelect(selectedContact.npub);
+            const name = selectedContact.profile?.display_name || selectedContact.profile?.name || '';
+            onSelect(selectedContact.npub, name);
             onClose();
         }
     }, [selectedContact, onSelect, onClose]);

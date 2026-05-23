@@ -52,8 +52,8 @@ import {
 } from '@/services/zcash';
 import {
     ArrowUpRight, ArrowDownLeft, RefreshCw, Copy, Check, ExternalLink,
-    X, ArrowUpDown, Send, QrCode, Loader2, AlertTriangle, WalletMinimal, EyeOff, Shield,
-    Search, KeyRound, ArrowLeft,
+    X, ArrowUpDown, Send, QrCode, Loader2, AlertTriangle, WalletMinimal, Shield,
+    Search, KeyRound, ArrowLeft, ChevronDown,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
@@ -63,6 +63,7 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { useFeedback } from '@/components/ui/feedback';
 import { SatoshiIcon } from '@/components/SatoshiIcon';
+import { SilentWallet } from '@/components/SilentWallet';
 import { EcashWallet } from '@/components/EcashWallet';
 import { FollowsSelector } from '@/components/FollowsSelector';
 import { chainIcons } from '@/assets/icons/blockchain';
@@ -116,6 +117,16 @@ export function Wallet({ activePubkey, sendPrefill, onPrefillConsumed, ecashReci
     const [apiKeyInput, setApiKeyInput] = useState('');
     const [goldrushKeyInput, setGoldrushKeyInput] = useState('');
     const [chainSearch, setChainSearch] = useState('');
+    const [showNativeWarning, setShowNativeWarning] = useState(() => {
+        const dismissed = localStorage.getItem('native_warning_dismissed');
+        if (!dismissed) return true;
+        return Date.now() > parseInt(dismissed, 10);
+    });
+    const dismissNativeWarning = () => {
+        const threeDays = 3 * 24 * 60 * 60 * 1000;
+        localStorage.setItem('native_warning_dismissed', String(Date.now() + threeDays));
+        setShowNativeWarning(false);
+    };
 
     // Send form
     const [sendTo, setSendTo] = useState('');
@@ -515,19 +526,12 @@ export function Wallet({ activePubkey, sendPrefill, onPrefillConsumed, ecashReci
         );
     }
 
-    // ── SILENT TAB (placeholder) ──
+    // ── SILENT TAB ──
     if (walletTab === 'silent') {
         return (
-            <div className="space-y-4">
+            <div className="flex flex-col gap-4 h-full overflow-hidden">
                 {renderTabs()}
-                <div className="flex flex-col items-center justify-center h-48 gap-3 text-muted-foreground">
-                    <div className="w-16 h-16 rounded-2xl bg-primary/10 flex items-center justify-center">
-                        <EyeOff className="w-8 h-8 text-primary" />
-                    </div>
-                    <h3 className="text-lg font-bold text-foreground">Silent</h3>
-                    <p className="text-sm text-center max-w-xs">Nostr Silent Payments Wallet coming soon.</p>
-                    <Badge variant="secondary" className="text-xs">Coming Soon</Badge>
-                </div>
+                <SilentWallet activePubkey={activePubkey} />
             </div>
         );
     }
@@ -577,59 +581,69 @@ export function Wallet({ activePubkey, sendPrefill, onPrefillConsumed, ecashReci
             {/* Tab toggle */}
             {renderTabs()}
 
+            {/* Public Wallet Warning */}
+            {showNativeWarning && (
+                <div className="flex items-center gap-2.5 px-3 py-2.5 rounded-xl shrink-0" style={{ backgroundColor: '#F04444' }}>
+                    <p className="text-xs leading-relaxed text-white flex-1">
+                        These reusable addresses are linked to your Nostr identity. Anyone can see its balance, transaction history, and send funds to it without your consent.
+                    </p>
+                    <button onClick={dismissNativeWarning} className="text-white/80 hover:text-white shrink-0 cursor-pointer p-0.5 pl-2.5 h-full border-l border-white/25">
+                        <X className="w-3.5 h-3.5" />
+                    </button>
+                </div>
+            )}
+
             {/* Balance card */}
             <div className="wallet-balance-card bg-gradient-to-br from-primary/15 to-primary/5 border border-primary/20 rounded-2xl p-5 relative overflow-hidden shrink-0">
-                <div className="relative z-10">
-                    <div className="flex items-center justify-between mb-1 gap-2 flex-wrap">
-                        <div className="flex items-center gap-2">
-                            <span className="text-muted-foreground text-sm font-medium">Total Balance</span>
+                <div className="relative z-10 space-y-2">
+                    {/* Chain/Asset switchers */}
+                    <div className="flex items-center gap-2 flex-wrap mb-2">
+                        <button onClick={() => { setChainSearch(''); setShowChainSelector(true); }}
+                            className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-secondary border border-border text-xs font-medium cursor-pointer hover:bg-accent transition-colors">
+                            <img
+                                src={isBitcoin ? chainIcons.bitcoin : isZcash ? chainIcons.zcash : evmChain?.icon || ''}
+                                alt=""
+                                className="w-4 h-4 rounded-full object-cover shrink-0"
+                            />
+                            {isBitcoin ? 'Bitcoin' : isZcash ? 'Zcash' : evmChain?.name || 'Chain'}
+                            <ChevronDown className="w-3 h-3 text-muted-foreground" />
+                        </button>
+                        <button onClick={() => setShowAssetSelector(true)}
+                            className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-secondary border border-border text-xs font-medium cursor-pointer hover:bg-accent transition-colors">
+                            {isEvm && currentToken && (
+                                <img
+                                    src={currentToken.icon || ''}
+                                    alt=""
+                                    className="w-3.5 h-3.5 rounded-full object-cover shrink-0"
+                                />
+                            )}
+                            {isBitcoin ? (selectedAsset === 'taproot' ? 'Taproot (P2TR)' : 'Native Segwit (P2WPKH)')
+                                : isZcash ? 'Transparent'
+                                    : currentToken?.symbol || 'Asset'}
+                            <ChevronDown className="w-3 h-3 text-muted-foreground" />
+                        </button>
+                        <div className="ml-auto flex items-center gap-1">
                             {!isBitcoin && nostrAddress !== standardAddress && (
                                 <button
                                     onClick={() => setShowStandardAddress(!showStandardAddress)}
-                                    className="px-1.5 py-0.5 text-[9px] font-medium rounded border bg-muted/50 border-border text-muted-foreground hover:text-foreground hover:bg-accent transition-colors cursor-pointer"
+                                    className="px-2 py-1 text-[10px] font-medium rounded-full border bg-secondary border-border text-muted-foreground hover:text-foreground hover:bg-accent transition-colors cursor-pointer"
                                 >
                                     {showStandardAddress ? 'Standard' : 'Nostr'}
                                 </button>
                             )}
-                        </div>
-                        <div className="flex items-center gap-1.5">
-                            <button
-                                onClick={() => { setChainSearch(''); setShowChainSelector(true); }}
-                                className="wallet-badge-btn flex items-center gap-1 px-2 py-0.5 text-[10px] font-semibold rounded-md border bg-muted border-border transition-colors cursor-pointer hover:bg-accent"
-                            >
-                                <img
-                                    src={isBitcoin ? chainIcons.bitcoin : isZcash ? chainIcons.zcash : evmChain?.icon || ''}
-                                    alt=""
-                                    className="rounded-full object-cover shrink-0"
-                                    style={{ width: 12, height: 12 }}
-                                />
-                                {isBitcoin ? 'Bitcoin' : isZcash ? 'Zcash' : evmChain?.name || 'Chain'}
-                            </button>
-                            <button
-                                onClick={() => setShowAssetSelector(true)}
-                                className="wallet-badge-btn flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium rounded-md border bg-muted border-border transition-colors cursor-pointer hover:bg-accent"
-                            >
-                                {isEvm && currentToken && (
-                                    <img
-                                        src={currentToken.icon || ''}
-                                        alt=""
-                                        className="rounded-full object-cover shrink-0"
-                                        style={{ width: 12, height: 12 }}
-                                    />
-                                )}
-                                {isBitcoin ? (selectedAsset === 'taproot' ? 'Taproot' : 'Native Segwit')
-                                    : isZcash ? 'Transparent'
-                                        : currentToken?.symbol || 'Asset'}
-                            </button>
                             {isBitcoin && (
-                                <button onClick={() => setShowBTCFirst(!showBTCFirst)} className="p-1 hover:bg-white/10 rounded-md transition-colors cursor-pointer">
-                                    <ArrowUpDown className="w-3.5 h-3.5 text-muted-foreground" />
+                                <button onClick={() => setShowBTCFirst(!showBTCFirst)} className="p-1.5 rounded-lg hover:bg-accent transition-colors cursor-pointer text-muted-foreground hover:text-foreground">
+                                    <ArrowUpDown className="w-4 h-4" />
                                 </button>
                             )}
-                            <button onClick={fetchData} disabled={loading} className="p-1 hover:bg-white/10 rounded-md transition-colors cursor-pointer">
-                                <RefreshCw className={cn("w-3.5 h-3.5 text-muted-foreground", loading && "animate-spin")} />
+                            <button onClick={fetchData} disabled={loading} className="p-1.5 rounded-lg hover:bg-accent transition-colors cursor-pointer text-muted-foreground hover:text-foreground">
+                                <RefreshCw className={cn("w-4 h-4", loading && "animate-spin")} />
                             </button>
                         </div>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                        <span className="text-muted-foreground text-sm font-medium">Total Balance - Public Social Wallet</span>
                     </div>
 
                     {/* Balance display */}
@@ -1751,13 +1765,13 @@ export function Wallet({ activePubkey, sendPrefill, onPrefillConsumed, ecashReci
                                                     return <img src={token?.icon || ''} alt={a.name} className="rounded-full object-cover shrink-0" style={{ width: 24, height: 24 }} />;
                                                 })()}
                                                 <div>
-                                                <span className="text-sm font-semibold text-foreground">{a.name}</span>
-                                                {a.detail && <span className="text-xs text-muted-foreground ml-2">{a.detail}</span>}
-                                                {a.contractAddress && (
-                                                    <div className="text-[10px] font-mono text-muted-foreground/60 mt-0.5">
-                                                        {a.contractAddress.slice(0, 7)}...{a.contractAddress.slice(-5)}
-                                                    </div>
-                                                )}
+                                                    <span className="text-sm font-semibold text-foreground">{a.name}</span>
+                                                    {a.detail && <span className="text-xs text-muted-foreground ml-2">{a.detail}</span>}
+                                                    {a.contractAddress && (
+                                                        <div className="text-[10px] font-mono text-muted-foreground/60 mt-0.5">
+                                                            {a.contractAddress.slice(0, 7)}...{a.contractAddress.slice(-5)}
+                                                        </div>
+                                                    )}
                                                 </div>
                                             </div>
                                             {selectedAsset === a.id && <Check className="w-4 h-4 text-green-400 shrink-0" />}

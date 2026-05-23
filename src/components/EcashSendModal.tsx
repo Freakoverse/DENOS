@@ -109,7 +109,14 @@ export const EcashSendModal: React.FC<EcashSendModalProps> = ({
     const mintBalances = useMemo(() => {
         const balances = new Map<string, number>();
         proofs.forEach(proof => {
-            const mintUrl = Object.keys(mints).find(m => {
+            // Use tagged mintUrl first (set at receive time)
+            let mintUrl = proof.mintUrl;
+            if (mintUrl && mints[mintUrl]) {
+                balances.set(mintUrl, (balances.get(mintUrl) || 0) + proof.amount);
+                return;
+            }
+            // Fallback: keyset ID matching for legacy proofs
+            mintUrl = Object.keys(mints).find(m => {
                 const mintKeys = (mints[m].keys as any);
                 return (mintKeys.keysets && Array.isArray(mintKeys.keysets) &&
                     mintKeys.keysets.some((k: any) => k.id === proof.id)) ||
