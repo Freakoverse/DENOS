@@ -1376,7 +1376,7 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
                     {listTab === 'addresses' && (
                         filteredConfirmed.length > 0 ? (
                             <div className="space-y-1.5">
-                                {filteredConfirmed.map(payment => {
+                                {[...filteredConfirmed].sort((a, b) => (nspBalances.get(b.tweak) ?? 0) - (nspBalances.get(a.tweak) ?? 0)).map(payment => {
                                     const bal = nspBalances.get(payment.tweak) ?? 0;
                                     const balStr = isBitcoin ? `${bal.toLocaleString()} sats`
                                         : isZcash ? `${(bal / 1e8).toFixed(8)} ZEC`
@@ -2313,7 +2313,10 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
                                                     <>
                                                         <p className="font-semibold text-primary mb-0.5">Multi-address send</p>
                                                         <p className="text-muted-foreground">
-                                                            Aggregating UTXOs from {filteredConfirmed.filter(p => (nspBalances.get(p.tweak) ?? 0) > 0).length} NSP address(es)
+                                                            Aggregating UTXOs from {filteredConfirmed.filter(p => (nspBalances.get(p.tweak) ?? 0) > 0).length} NSP address(es).
+                                                        </p>
+                                                        <p className="text-amber-400/90 text-[10px] mt-1.5 leading-relaxed">
+                                                            Combining multiple addresses in one transaction links them on-chain, reducing privacy. Send from individual addresses for better privacy.
                                                         </p>
                                                     </>
                                                 )}

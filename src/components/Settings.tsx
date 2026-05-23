@@ -507,7 +507,7 @@ export function Settings({ logs, appState, onNavigateToWallet, onNavigateToEcash
         { id: 'merchant', label: 'Merchant', desc: 'Manage commercial settings', icon: Store },
         { id: 'blossom', label: 'Blossom Servers', desc: 'Media server fallbacks', icon: Cloud },
         { id: 'tutorials', label: 'Tutorials', desc: 'Learn how to use DENOS', icon: GraduationCap },
-        { id: 'about', label: 'About DENOS', desc: 'Version 0.2.6', icon: Info },
+        { id: 'about', label: 'About DENOS', desc: 'Version 0.2.7', icon: Info },
     ];
 
 
@@ -1522,6 +1522,17 @@ function BlossomServersPage({ onBack, toast }: { onBack: () => void; toast: (msg
 
 // ── Version History Data ──
 const VERSION_HISTORY = [
+    {
+        version: '0.2.7',
+        date: 'May 2026',
+        title: 'Silent Payments & NSP',
+        changes: [
+            'Nostr Silent Payments (NSP): send to any npub across Bitcoin, Ethereum, BNB, Polygon, Avalanche, Base, and Zcash with encrypted Nostr notifications for payment discovery and management',
+            'BIP-352 Silent Payment (sp1) support for Bitcoin: send and receive using static sp1 addresses derived from your Nostr keypair, with Nostr notification as the primary discovery mechanism',
+            'Transaction history aggregation: multi-address UTXOs from the same transaction are merged into a single entry with individual address details',
+            'Privacy warning when spending from multiple silent payment addresses in a single transaction',
+        ],
+    },
     {
         version: '0.2.6',
         date: 'April 2026',
