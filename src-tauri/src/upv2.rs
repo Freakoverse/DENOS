@@ -1007,6 +1007,12 @@ fn sign_event_from_json(signer_keys: &Keys, event_json: &str) -> Result<String, 
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
+    // Preserve the client's created_at so the event hash (and any pre-computed
+    // PoW) stays valid.  Falls back to Timestamp::now() if not provided.
+    let created_at = unsigned.get("created_at")
+        .and_then(|v| v.as_u64())
+        .map(Timestamp::from);
+
     let tags: Vec<Tag> = if let Some(tags_arr) = unsigned.get("tags").and_then(|v| v.as_array()) {
         tags_arr.iter().filter_map(|t| {
             let items: Vec<String> = t.as_array()?
@@ -1023,8 +1029,12 @@ fn sign_event_from_json(signer_keys: &Keys, event_json: &str) -> Result<String, 
         vec![]
     };
 
-    let builder = EventBuilder::new(Kind::Custom(kind as u16), content)
+    let mut builder = EventBuilder::new(Kind::Custom(kind as u16), content)
         .tags(tags);
+
+    if let Some(ts) = created_at {
+        builder = builder.custom_created_at(ts);
+    }
 
     let event = builder.sign_with_keys(signer_keys)
         .map_err(|e| format!("Signing failed: {}", e))?;
