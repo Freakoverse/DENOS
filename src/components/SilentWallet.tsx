@@ -278,8 +278,23 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
         setQrUri(uri);
     };
 
+    // ── Helper: resolve token decimals from EVM_CHAINS registry ──
+    const getTokenDecimals = (chainId: string, token: string | null): number => {
+        const evmChain = EVM_CHAINS[chainId];
+        if (!evmChain) return 18;
+        if (!token) {
+            // Native token — find the entry with null contractAddress
+            const native = evmChain.tokens.find(t => t.contractAddress === null);
+            return native?.decimals ?? 18;
+        }
+        const match = evmChain.tokens.find(
+            t => t.contractAddress?.toLowerCase() === token.toLowerCase()
+        );
+        return match?.decimals ?? 18;
+    };
+
     // ── Aggregated balance fetching ──
-    const filteredConfirmed = confirmed.filter(p => p.chain === chain && p.asset === asset);
+    const filteredConfirmed = confirmed.filter(p => p.chain === chain && p.asset.toLowerCase() === asset.toLowerCase());
 
     const fetchAllNspBalances = useCallback(async () => {
         if (filteredConfirmed.length === 0) { setNspBalances(new Map()); return; }
@@ -290,7 +305,7 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
                     const utxos = await fetchUTXOs(p.address);
                     return { tweak: p.tweak, balance: utxos.reduce((s, u) => s + u.value, 0) };
                 } else if (['ethereum', 'bnb', 'polygon', 'avalanche', 'base'].includes(p.chain)) {
-                    const decimals = p.token ? 6 : 18;
+                    const decimals = getTokenDecimals(p.chain, p.token);
                     const bal = p.token
                         ? await fetchTokenBalance(p.chain, p.token, p.address)
                         : await fetchEvmBalance(p.chain, p.address);
@@ -390,7 +405,7 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
                         });
                     } else if (isEvm) {
                         const txs = await fetchEvmTxHistory(p.chain, p.address);
-                        const decimals = p.token ? 6 : 18;
+                        const decimals = getTokenDecimals(p.chain, p.token);
                         return txs.map(tx => {
                             const val = parseFloat(formatUnits(BigInt(tx.value || '0'), tx.tokenDecimal ? parseInt(tx.tokenDecimal) : decimals));
                             const symbol = tx.tokenSymbol || currentChain.name;
@@ -533,6 +548,8 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
             // Verify ownership (tweaked key derives the expected address)
             const owned = verifyPaymentOwnership(privateKeyHex, item.payload.tweak, item.payload.address, item.payload.chain, item.payload.asset);
             if (!owned) {
+                console.warn(`[NSP] ✗ Ownership verification FAILED — removing notification:`,
+                    `chain=${item.payload.chain} asset=${item.payload.asset} address=${item.payload.address} tweak=${item.payload.tweak.slice(0, 16)}...`);
                 removedTweaks.push(item.payload.tweak);
                 continue;
             }
@@ -1767,7 +1784,7 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
                                                                     </span>
                                                                     {info.tokenBalance > 0n && (
                                                                         <span className="text-foreground font-medium">
-                                                                            Tokens: {formatUnits(info.tokenBalance, info.payment.token ? 6 : 18)}
+                                                                            Tokens: {formatUnits(info.tokenBalance, getTokenDecimals(info.payment.chain, info.payment.token))}
                                                                         </span>
                                                                     )}
                                                                 </div>

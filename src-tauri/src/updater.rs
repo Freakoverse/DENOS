@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use crate::AppState;
 
 /// DENOS creator's public key (hex)
-const DENOS_CREATOR_PUBKEY: &str = "3cea4806b1e1a9829d30d5cb8a78011d4271c6474eb31531ec91f28110fe3f40";
+const DENOS_CREATOR_PUBKEY: &str = "3fc9e080c2dd77b21c6dafb0d5fabdbe2aaa90b43357f2afcccd8fef7bf43021";
 
 /// The d-tag for the "latest" pointer event (replaceable, auto-updater target)
 const UPDATE_D_TAG_LATEST: &str = "denos-latest";

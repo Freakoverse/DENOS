@@ -536,18 +536,20 @@ export function parseNspNotification(
 ): NspPayload | null {
     try {
         const senderPubkey = event.pubkey;
+        console.log(`[NSP] Parsing notification id=${event.id?.slice(0, 12)}... from ephemeral=${senderPubkey?.slice(0, 12)}... created_at=${event.created_at}`);
         const plaintext = nip44Decrypt(recipientPrivkeyHex, senderPubkey, event.content);
         const parsed = JSON.parse(plaintext);
 
         // Validate required fields
         if (!parsed.address || !parsed.chain || !parsed.tweak) {
-            console.warn('[NSP] Invalid notification payload — missing required fields');
+            console.warn('[NSP] Invalid notification payload — missing required fields:', { address: !!parsed.address, chain: !!parsed.chain, tweak: !!parsed.tweak });
             return null;
         }
 
+        console.log(`[NSP] ✓ Parsed notification: chain=${parsed.chain} asset=${parsed.asset} address=${parsed.address?.slice(0, 10)}...`);
         return parsed as NspPayload;
     } catch (e) {
-        console.error('[NSP] Failed to parse notification:', e);
+        console.error(`[NSP] ✗ Failed to parse notification id=${event.id?.slice(0, 12)}...:`, e);
         return null;
     }
 }
@@ -840,10 +842,13 @@ export async function fetchNotificationBatch(
         if (since > 0) filter.since = since;
         if (until !== undefined) filter.until = until;
 
+        console.log(`[NSP] fetchNotificationBatch: pubkey=${pubkeyHex.slice(0, 12)}... since=${since} until=${until ?? 'none'} limit=${limit}`);
+
         const finish = () => {
             if (resolved) return;
             resolved = true;
             sockets.forEach(s => { try { s.close(); } catch {} });
+            console.log(`[NSP] fetchNotificationBatch: found ${events.size} unique events`);
             resolve(Array.from(events.values()));
         };
         const tryFinish = () => { resolvedCount++; if (resolvedCount >= totalRelays) finish(); };
@@ -853,15 +858,24 @@ export async function fetchNotificationBatch(
             try {
                 const ws = new WebSocket(relayUrl);
                 sockets.push(ws);
-                ws.onopen = () => ws.send(JSON.stringify(['REQ', subId, filter]));
+                ws.onopen = () => {
+                    console.log(`[NSP]   → querying ${relayUrl}`);
+                    ws.send(JSON.stringify(['REQ', subId, filter]));
+                };
                 ws.onmessage = (msg) => {
                     try {
                         const data = JSON.parse(msg.data);
-                        if (data[0] === 'EVENT' && data[2]) events.set(data[2].id, data[2]);
+                        if (data[0] === 'EVENT' && data[2]) {
+                            events.set(data[2].id, data[2]);
+                            console.log(`[NSP]   ← event from ${relayUrl}: id=${data[2].id?.slice(0, 12)}...`);
+                        }
                         if (data[0] === 'EOSE') { try { ws.close(); } catch {} tryFinish(); }
                     } catch {}
                 };
-                ws.onerror = () => tryFinish();
+                ws.onerror = (err) => {
+                    console.warn(`[NSP]   ✗ relay error: ${relayUrl}`);
+                    tryFinish();
+                };
             } catch { tryFinish(); }
         }
     });
@@ -875,11 +889,14 @@ export async function catchUpScan(
     lastScanned: number,
     onBatch: (events: any[]) => void,
 ): Promise<number> {
+    console.log(`[NSP] catchUpScan: pubkey=${pubkeyHex.slice(0, 12)}... lastScanned=${lastScanned} (${lastScanned > 0 ? new Date(lastScanned * 1000).toISOString() : 'beginning'})`);
     let highestCreatedAt = lastScanned;
     let until: number | undefined;
+    let totalEvents = 0;
     while (true) {
         const batch = await fetchNotificationBatch(pubkeyHex, lastScanned, until, 500);
         if (batch.length === 0) break;
+        totalEvents += batch.length;
         onBatch(batch);
         for (const evt of batch) {
             if (evt.created_at > highestCreatedAt) highestCreatedAt = evt.created_at;
@@ -887,6 +904,7 @@ export async function catchUpScan(
         if (batch.length < 500) break;
         until = Math.min(...batch.map((e: any) => e.created_at));
     }
+    console.log(`[NSP] catchUpScan complete: ${totalEvents} total events found`);
     return highestCreatedAt;
 }
 
@@ -1276,19 +1294,33 @@ export function subscribeToNspNotifications(
     };
     if (sinceTimestamp > 0) filter.since = sinceTimestamp;
 
+    console.log(`[NSP] Subscribing to kind ${KIND_NSP_NOTIFICATION} for ${pubkeyHex.slice(0, 12)}... since=${sinceTimestamp} on ${HARDCODED_RELAYS.length} relays`);
+
     for (const relayUrl of HARDCODED_RELAYS) {
         try {
             const ws = new WebSocket(relayUrl);
-            ws.onopen = () => ws.send(JSON.stringify(['REQ', subId, filter]));
+            ws.onopen = () => {
+                console.log(`[NSP] ✓ Subscription connected: ${relayUrl}`);
+                ws.send(JSON.stringify(['REQ', subId, filter]));
+            };
             ws.onmessage = (msg) => {
                 try {
                     const data = JSON.parse(msg.data);
                     if (data[0] === 'EVENT' && data[2]) {
+                        console.log(`[NSP] ← Live event from ${relayUrl}: id=${data[2].id?.slice(0, 12)}... created_at=${data[2].created_at}`);
                         callback(data[2]);
+                    }
+                    if (data[0] === 'EOSE') {
+                        console.log(`[NSP]   EOSE from ${relayUrl} — now listening for live events`);
                     }
                 } catch { }
             };
-            ws.onerror = () => { };
+            ws.onerror = (err) => {
+                console.warn(`[NSP] ✗ Subscription error: ${relayUrl}`);
+            };
+            ws.onclose = () => {
+                console.log(`[NSP]   Subscription closed: ${relayUrl}`);
+            };
             sockets.push(ws);
         } catch { }
     }
