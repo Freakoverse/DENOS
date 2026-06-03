@@ -872,7 +872,7 @@ export async function fetchNotificationBatch(
                         if (data[0] === 'EOSE') { try { ws.close(); } catch {} tryFinish(); }
                     } catch {}
                 };
-                ws.onerror = (err) => {
+                ws.onerror = () => {
                     console.warn(`[NSP]   ✗ relay error: ${relayUrl}`);
                     tryFinish();
                 };
@@ -1315,7 +1315,7 @@ export function subscribeToNspNotifications(
                     }
                 } catch { }
             };
-            ws.onerror = (err) => {
+            ws.onerror = () => {
                 console.warn(`[NSP] ✗ Subscription error: ${relayUrl}`);
             };
             ws.onclose = () => {
