@@ -512,7 +512,7 @@ export function Settings({ logs, appState, onNavigateToWallet, onNavigateToEcash
         { id: 'merchant', label: 'Merchant', desc: 'Manage commercial settings', icon: Store },
         { id: 'blossom', label: 'Blossom Servers', desc: 'Media server fallbacks', icon: Cloud },
         { id: 'tutorials', label: 'Tutorials', desc: 'Learn how to use DENOS', icon: GraduationCap },
-        { id: 'about', label: 'About DENOS', desc: 'Version 0.2.7', icon: Info },
+        { id: 'about', label: 'About DENOS', desc: 'Version 0.2.9', icon: Info },
     ];
 
     return (
@@ -1526,7 +1526,20 @@ function BlossomServersPage({ onBack, toast }: { onBack: () => void; toast: (msg
 // ── Version History Data ──
 const VERSION_HISTORY = [
     {
-        version: '0.2.7',
+        version: '0.2.9',
+        date: 'June 2026',
+        title: 'Settings & Stability',
+        changes: [
+            'NSP bug fixes: fixed asset/token dropdown resetting when clicking notifications in the Silent wallet tab',
+            'All NSP payment notifications now grouped and accessible for easier discovery and management',
+            'eCash, Silent Payments, and Multisig wallet tabs are now disabled by default and can be individually enabled in Settings > Wallets',
+            'Warning dialogs when enabling experimental wallet features (Silent Payments, eCash) explaining risks including custodial nature and potential fund loss',
+            'Wallet tab bar is now hidden when only the Native tab is active for a cleaner interface',
+            'New Wallets section in Settings for managing wallet feature toggles',
+        ],
+    },
+    {
+        version: '0.2.8',
         date: 'May 2026',
         title: 'Silent Payments & NSP',
         changes: [
