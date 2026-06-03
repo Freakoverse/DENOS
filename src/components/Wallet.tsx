@@ -84,6 +84,33 @@ interface WalletProps {
 
 export function Wallet({ activePubkey, sendPrefill, onPrefillConsumed, ecashRecipient, ecashAutoSend, onEcashPrefillConsumed }: WalletProps) {
     const [walletTab, setWalletTab] = useState<WalletTab>('native');
+
+    // Wallet tab toggles (controlled from Settings > Wallets)
+    const [silentEnabled, setSilentEnabled] = useState(
+        () => localStorage.getItem('denos-silent-payments-enabled') === 'true'
+    );
+    const [ecashEnabled, setEcashEnabled] = useState(
+        () => localStorage.getItem('denos-ecash-enabled') === 'true'
+    );
+    const [multisigEnabled, setMultisigEnabled] = useState(
+        () => localStorage.getItem('denos-multisig-enabled') === 'true'
+    );
+    useEffect(() => {
+        const handler = () => {
+            const silent = localStorage.getItem('denos-silent-payments-enabled') === 'true';
+            const ecash = localStorage.getItem('denos-ecash-enabled') === 'true';
+            const multi = localStorage.getItem('denos-multisig-enabled') === 'true';
+            setSilentEnabled(silent);
+            setEcashEnabled(ecash);
+            setMultisigEnabled(multi);
+            // If user disabled a tab while on it, go back to native
+            if ((!silent && walletTab === 'silent') || (!ecash && walletTab === 'ecash') || (!multi && walletTab === 'multi')) {
+                setWalletTab('native');
+            }
+        };
+        window.addEventListener('wallet-tabs-toggle', handler);
+        return () => window.removeEventListener('wallet-tabs-toggle', handler);
+    }, [walletTab]);
     const [selectedChain, setSelectedChain] = useState<ChainId>('bitcoin');
     const [selectedAsset, setSelectedAsset] = useState<string>('native'); // 'native' | 'taproot' | 'usdt' | 'usdc' | etc.
     const [showStandardAddress, setShowStandardAddress] = useState(false);
@@ -488,9 +515,18 @@ export function Wallet({ activePubkey, sendPrefill, onPrefillConsumed, ecashReci
     }
 
     // Helper to render the tab bar
-    const renderTabs = () => (
+    const renderTabs = () => {
+        const allTabs: WalletTab[] = ['native', 'ecash', 'silent', 'multi'];
+        const visibleTabs = allTabs.filter(t =>
+            (t === 'native') ||
+            (t === 'ecash' && ecashEnabled) ||
+            (t === 'silent' && silentEnabled) ||
+            (t === 'multi' && multisigEnabled)
+        );
+        if (visibleTabs.length <= 1) return null;
+        return (
         <div className="flex bg-secondary border border-border rounded-xl p-1 gap-1 flex-wrap">
-            {(['native', 'ecash', 'silent', 'multi'] as WalletTab[]).map(id => {
+            {visibleTabs.map(id => {
                 const label = id === 'native' ? 'Native' : id === 'ecash' ? 'eCash' : id === 'silent' ? 'Silent' : 'Multisig';
                 const isActive = walletTab === id;
                 return (
@@ -509,7 +545,8 @@ export function Wallet({ activePubkey, sendPrefill, onPrefillConsumed, ecashReci
                 );
             })}
         </div>
-    );
+        );
+    };
 
     // ── ECASH TAB ──
     if (walletTab === 'ecash') {

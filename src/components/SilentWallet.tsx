@@ -1,14 +1,14 @@
 /**
  * SilentWallet — Nostr Silent Payments tab (HD-wallet-like).
  */
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { QRCodeSVG } from 'qrcode.react';
 import {
     EyeOff, Copy, Check, ChevronDown, Search, X, QrCode,
     Bell, ArrowDownLeft, ArrowUpRight, RefreshCw, Loader2, AlertTriangle,
-    Send as SendIcon, ExternalLink, Wallet, Fuel, Users, Trash2,
+    Send as SendIcon, ExternalLink, Wallet, Fuel, Users, Trash2, Inbox,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
@@ -16,7 +16,7 @@ import { Input } from '@/components/ui/input';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 
 import { useFeedback } from '@/components/ui/feedback';
-import { chainIcons } from '@/assets/icons/blockchain';
+import { chainIcons, tokenIcons } from '@/assets/icons/blockchain';
 import { EVM_CHAINS } from '@/services/evm';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { SatoshiIcon } from '@/components/SatoshiIcon';
@@ -142,6 +142,7 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
     // ── Chain/Asset state (mirrors native tab) ──
     const [chain, setChain] = useState<NspChain>('bitcoin');
     const [asset, setAsset] = useState('taproot');
+    const skipAssetResetRef = useRef(false);
     const [privateKeyHex, setPrivateKeyHex] = useState('');
     const [copiedId, setCopiedId] = useState<string | null>(null);
 
@@ -151,6 +152,7 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
     const [chainSearch, setChainSearch] = useState('');
     const [showReceiveModal, setShowReceiveModal] = useState(false);
     const [showNotifications, setShowNotifications] = useState(false);
+    const [showAllNotifications, setShowAllNotifications] = useState(false);
     const [showConfirm, setShowConfirm] = useState(false);
     const [showRegenConfirm, setShowRegenConfirm] = useState(false);
 
@@ -246,10 +248,14 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
             .catch(e => console.error('Failed to get private key:', e));
     }, [activePubkey]);
 
-    // Reset asset when chain changes
+    // Reset asset when chain changes (skip if explicitly set via All Notifications nav)
     useEffect(() => {
-        const assets = getAssetsForChain(chain);
-        if (assets.length > 0) setAsset(assets[0].id);
+        if (skipAssetResetRef.current) {
+            skipAssetResetRef.current = false;
+        } else {
+            const assets = getAssetsForChain(chain);
+            if (assets.length > 0) setAsset(assets[0].id);
+        }
         setGeneratedAddress('');
         setCurrentTweak('');
         setQrUri('');
@@ -1225,6 +1231,20 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
                 </div>
             )}
 
+            {/* ═══ ALL NOTIFICATIONS BUTTON ═══ */}
+            {confirmed.length > 0 && (
+                <button
+                    onClick={() => setShowAllNotifications(true)}
+                    className="flex items-center justify-center gap-2 w-full py-2 px-3 rounded-xl bg-secondary/60 border border-border text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors cursor-pointer shrink-0"
+                >
+                    <Inbox className="w-3.5 h-3.5" />
+                    All Notifications
+                    <span className="ml-auto px-1.5 py-0.5 rounded-md bg-primary/15 text-primary text-[10px] font-bold">
+                        {confirmed.length}
+                    </span>
+                </button>
+            )}
+
             {/* ═══ BALANCE CARD ═══ */}
             <Card className="relative overflow-hidden bg-gradient-to-br from-card via-card to-secondary/20 shrink-0">
                 <CardContent className="pt-5 pb-4 px-5 space-y-4">
@@ -2164,6 +2184,134 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
                     </div>
                 </div>
             )}
+
+            {/* ═══ ALL NOTIFICATIONS MODAL ═══ */}
+            {showAllNotifications && (() => {
+                // Group confirmed payments by chain+asset
+                type GroupKey = string;
+                const groups = new Map<GroupKey, { chain: NspChain; asset: string; chainName: string; icon: string; payments: (NspConfirmedPayment & { liveBalance?: string })[] }>();
+                for (const p of confirmed) {
+                    const key = `${p.chain}::${p.asset.toLowerCase()}`;
+                    if (!groups.has(key)) {
+                        const ch = CHAINS.find(c => c.id === p.chain);
+                        // Resolve icon: try asset-specific icon, fall back to chain icon
+                        const assetOpts = getAssetsForChain(p.chain);
+                        const matchedAsset = assetOpts.find(a => a.id === p.asset.toLowerCase());
+                        const icon = matchedAsset?.icon || tokenIcons[p.asset.toUpperCase()] || ch?.icon || '';
+                        groups.set(key, {
+                            chain: p.chain,
+                            asset: p.asset.toLowerCase(),
+                            chainName: ch?.name || p.chain,
+                            icon,
+                            payments: [],
+                        });
+                    }
+                    groups.get(key)!.payments.push(p);
+                }
+                // Sort groups: most payments first
+                const sortedGroups = Array.from(groups.values()).sort((a, b) => b.payments.length - a.payments.length);
+
+                return (
+                    <div className="fixed inset-0 z-50 overflow-y-auto bg-black/60 backdrop-blur-sm animate-fade-in">
+                        <div className="flex min-h-full items-center justify-center px-4 py-20">
+                            <Card className="w-[400px] shadow-2xl max-h-[75vh] flex flex-col">
+                                <CardHeader className="flex-row items-center justify-between shrink-0">
+                                    <CardTitle className="text-base flex items-center gap-2">
+                                        <Inbox className="w-4 h-4" /> All Notifications
+                                        <span className="text-xs font-normal text-muted-foreground ml-1">({confirmed.length})</span>
+                                    </CardTitle>
+                                    <button onClick={() => setShowAllNotifications(false)} className="text-muted-foreground hover:text-foreground cursor-pointer">
+                                        <X className="w-4 h-4" />
+                                    </button>
+                                </CardHeader>
+                                <CardContent className="overflow-y-auto space-y-4 pb-6">
+                                    {loadingNotifs ? (
+                                        <div className="flex items-center justify-center py-8 text-muted-foreground">
+                                            <Loader2 className="w-5 h-5 animate-spin mr-2" /> Loading...
+                                        </div>
+                                    ) : sortedGroups.length === 0 ? (
+                                        <div className="text-center py-8 text-muted-foreground text-sm">No confirmed notifications</div>
+                                    ) : (
+                                        sortedGroups.map(group => (
+                                            <div key={`${group.chain}::${group.asset}`}>
+                                                {/* Group header — clickable to navigate */}
+                                                <button
+                                                    onClick={() => {
+                                                        skipAssetResetRef.current = true;
+                                                        setChain(group.chain);
+                                                        setAsset(group.asset);
+                                                        setShowAllNotifications(false);
+                                                    }}
+                                                    className="flex items-center gap-2 w-full mb-2 px-1 group cursor-pointer"
+                                                >
+                                                    <img src={group.icon} alt="" className="w-5 h-5 rounded-full shrink-0" />
+                                                    <span className="text-sm font-semibold text-foreground group-hover:text-primary transition-colors">
+                                                        {group.chainName}
+                                                        <span className="text-muted-foreground font-normal"> · {(() => {
+                                                            const assetOpts = getAssetsForChain(group.chain);
+                                                            const matched = assetOpts.find(a => a.id === group.asset);
+                                                            return matched?.label || group.asset.toUpperCase();
+                                                        })()}</span>
+                                                    </span>
+                                                    <span className="ml-auto text-[10px] font-bold text-muted-foreground bg-secondary px-1.5 py-0.5 rounded-md">
+                                                        {group.payments.length}
+                                                    </span>
+                                                    <ChevronDown className="w-3 h-3 text-muted-foreground -rotate-90 group-hover:text-primary transition-colors" />
+                                                </button>
+                                                {/* Payment rows */}
+                                                <div className="space-y-1">
+                                                    {group.payments.slice(0, 5).map(payment => (
+                                                        <button
+                                                            key={payment.tweak}
+                                                            onClick={() => {
+                                                                skipAssetResetRef.current = true;
+                                                                setChain(payment.chain);
+                                                                setAsset(group.asset);
+                                                                setShowAllNotifications(false);
+                                                                // Open the address detail
+                                                                setDetailPayment(payment);
+                                                            }}
+                                                            className="flex items-center gap-2.5 w-full p-2.5 rounded-lg bg-secondary/40 border border-border/50 hover:bg-secondary/80 hover:border-border transition-colors cursor-pointer text-left"
+                                                        >
+                                                            <div className="w-7 h-7 rounded-full bg-primary/10 flex items-center justify-center shrink-0">
+                                                                <ArrowDownLeft className="w-3.5 h-3.5 text-primary" />
+                                                            </div>
+                                                            <div className="flex-1 min-w-0">
+                                                                <div className="text-xs font-medium truncate">
+                                                                    {payment.amount || 'Received'}
+                                                                </div>
+                                                                <div className="text-[10px] text-muted-foreground font-mono truncate">
+                                                                    {censor(payment.address)}
+                                                                </div>
+                                                            </div>
+                                                            <div className="text-[10px] text-muted-foreground shrink-0">
+                                                                {payment.confirmedAt ? new Date(payment.confirmedAt * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : ''}
+                                                            </div>
+                                                        </button>
+                                                    ))}
+                                                    {group.payments.length > 5 && (
+                                                        <button
+                                                            onClick={() => {
+                                                                skipAssetResetRef.current = true;
+                                                                setChain(group.chain);
+                                                                setAsset(group.asset);
+                                                                setShowAllNotifications(false);
+                                                            }}
+                                                            className="w-full text-center py-1.5 text-[11px] text-primary hover:text-primary/80 font-medium cursor-pointer transition-colors"
+                                                        >
+                                                            +{group.payments.length - 5} more — view all →
+                                                        </button>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        ))
+                                    )}
+                                </CardContent>
+                            </Card>
+                        </div>
+                    </div>
+                );
+            })()}
 
             {/* ═══ CHAIN SELECTOR MODAL ═══ */}
             {showChainModal && (
