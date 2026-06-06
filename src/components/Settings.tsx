@@ -10,7 +10,7 @@ import { Switch } from '@/components/ui/switch';
 import {
     Radio, X, Plus, Info, Terminal, ChevronRight, ArrowLeft, Shield, Eye, EyeOff, Users,
     Copy, Check, RefreshCw, Heart, Bitcoin, Banknote, ChevronDown, Sun, Moon, Palette, Store, Network, Lock,
-    Play, GraduationCap, Cloud, Download, ExternalLink, Loader2, WalletMinimal, AlertTriangle,
+    Play, GraduationCap, Cloud, Download, ExternalLink, Loader2, WalletMinimal, AlertTriangle, Pencil,
 } from 'lucide-react';
 import { useFeedback } from '@/components/ui/feedback';
 import { KeypairManager } from '@/components/KeypairManager';
@@ -512,7 +512,7 @@ export function Settings({ logs, appState, onNavigateToWallet, onNavigateToEcash
         { id: 'merchant', label: 'Merchant', desc: 'Manage commercial settings', icon: Store },
         { id: 'blossom', label: 'Blossom Servers', desc: 'Media server fallbacks', icon: Cloud },
         { id: 'tutorials', label: 'Tutorials', desc: 'Learn how to use DENOS', icon: GraduationCap },
-        { id: 'about', label: 'About DENOS', desc: 'Version 0.2.9', icon: Info },
+        { id: 'about', label: 'About DENOS', desc: `Version ${__APP_VERSION__}`, icon: Info },
     ];
 
     return (
@@ -1524,63 +1524,6 @@ function BlossomServersPage({ onBack, toast }: { onBack: () => void; toast: (msg
 }
 
 // ── Version History Data ──
-const VERSION_HISTORY = [
-    {
-        version: '0.2.9',
-        date: 'June 2026',
-        title: 'Settings & Stability',
-        changes: [
-            'NSP bug fixes: fixed asset/token dropdown resetting when clicking notifications in the Silent wallet tab',
-            'All NSP payment notifications now grouped and accessible for easier discovery and management',
-            'eCash, Silent Payments, and Multisig wallet tabs are now disabled by default and can be individually enabled in Settings > Wallets',
-            'Warning dialogs when enabling experimental wallet features (Silent Payments, eCash) explaining risks including custodial nature and potential fund loss',
-            'Wallet tab bar is now hidden when only the Native tab is active for a cleaner interface',
-            'New Wallets section in Settings for managing wallet feature toggles',
-        ],
-    },
-    {
-        version: '0.2.8',
-        date: 'May 2026',
-        title: 'Silent Payments & NSP',
-        changes: [
-            'Nostr Silent Payments (NSP): send to any npub across Bitcoin, Ethereum, BNB, Polygon, Avalanche, Base, and Zcash with encrypted Nostr notifications for payment discovery and management',
-            'BIP-352 Silent Payment (sp1) support for Bitcoin: send and receive using static sp1 addresses derived from your Nostr keypair, with Nostr notification as the primary discovery mechanism',
-            'Transaction history aggregation: multi-address UTXOs from the same transaction are merged into a single entry with individual address details',
-            'Privacy warning when spending from multiple silent payment addresses in a single transaction',
-        ],
-    },
-    {
-        version: '0.2.6',
-        date: 'April 2026',
-        title: 'Multi-Chain Derivation',
-        changes: [
-            'Multi-chain wallet support with addresses derived from your Nostr keypair',
-            'ERC-20 token support for sending and receiving across all supported chains',
-            'Auto-replace toggle for repeat connection requests from the same client (convenience vs. security trade-off)',
-            'Fixed credential store bloat caused by stale signed events; transient data now cleared on app restart',
-            'Fixed multiple eCash wallet bugs including balance flickering, phantom balances, and lost transaction history; optimized proof reconciliation and mint verification performance',
-        ],
-    },
-    {
-        version: '0.2.0',
-        date: 'Feb 2026',
-        title: 'Initial Release',
-        changes: [
-            'NIP-46 remote signer with multi-relay support',
-            'NIP-UPV2 password-based authentication',
-            'NIP-PC55 desktop counterpart to NIP-55',
-            'Built-in Bitcoin wallet (on-chain)',
-            'Cashu eCash wallet with NUT-11 P2PK locking',
-            'DNN identity system integration',
-            'Per-app policy controls (Manual, Custom, Auto Approve, Auto Reject)',
-            'Custom signing rules per event kind',
-            'PIN-based lock screen with auto-lock timeout',
-            'Offline login attempt detection',
-            'Multi-keypair management with account switching',
-            'Cross-platform support',
-        ],
-    },
-];
 
 const DEV_NPUB = 'npub18ly7pqxzm4mmy8rd47cdt74ahc424y95xdtl9t7vek8777l5xqss3pttwf';
 
@@ -1613,6 +1556,7 @@ function AboutPage({ onBack, toast, onNavigateToWallet, onNavigateToEcashSend, a
 
     // Developer publish state
     const [showPublishModal, setShowPublishModal] = useState(false);
+    const [editingVersion, setEditingVersion] = useState<any>(null); // null = new, object = editing
     const [pubVersion, setPubVersion] = useState('');
     const [pubNotes, setPubNotes] = useState('');
     const [pubFiles, setPubFiles] = useState<Record<string, File | null>>({
@@ -1633,17 +1577,101 @@ function AboutPage({ onBack, toast, onNavigateToWallet, onNavigateToEcashSend, a
     const [uploadResults, setUploadResults] = useState<Record<string, UploadResult[]>>({});
     const [platformHashes, setPlatformHashes] = useState<Record<string, { hash: string; ext: string }>>({});
     const [uploadProgress, setUploadProgress] = useState<{ bytes_sent: number; total_bytes: number; startTime: number } | null>(null);
+    const skipUploadRef = useRef(false);
     const [pubServerToggles, setPubServerToggles] = useState<Record<string, boolean>>(() => {
         const servers = blossomServers.getServers();
         return Object.fromEntries(servers.map(s => [s, true]));
     });
     const [showServerPicker, setShowServerPicker] = useState(false);
+    const [fileHashes, setFileHashes] = useState<Record<string, string>>({});
+    const [pubDownloadUrls, setPubDownloadUrls] = useState<Record<string, string>>({});
+    const [availabilityResults, setAvailabilityResults] = useState<Record<string, Record<string, boolean | null>>>({});
+    const [checkingAvailability, setCheckingAvailability] = useState(false);
 
-    // Remote version history modal state
-    const [showRemoteVersions, setShowRemoteVersions] = useState(false);
-    const [remoteVersions, setRemoteVersions] = useState<any[]>([]);
-    const [fetchingVersions, setFetchingVersions] = useState(false);
-    const [expandedRemoteVersion, setExpandedRemoteVersion] = useState<string | null>(null);
+    // Compute SHA-256 hash for a file (no URL until uploaded)
+    const computeFileHash = async (platform: string, file: File) => {
+        const buf = await file.arrayBuffer();
+        const hashBuf = await crypto.subtle.digest('SHA-256', buf);
+        const hash = Array.from(new Uint8Array(hashBuf)).map(b => b.toString(16).padStart(2, '0')).join('');
+        setFileHashes(prev => ({ ...prev, [platform]: hash }));
+    };
+
+    // Check which toggled blossom servers already have each file
+    const handleCheckAvailability = async () => {
+        const allHashes = { ...fileHashes };
+        // Include source code hash if available
+        const servers = blossomServers.getServers().filter(s => pubServerToggles[s] !== false);
+        if (servers.length === 0) { toast('Enable at least one Blossom server', 'error'); return; }
+        if (Object.keys(allHashes).length === 0) { toast('No files with computed hashes', 'error'); return; }
+
+        setCheckingAvailability(true);
+        const results: Record<string, Record<string, boolean | null>> = {};
+
+        for (const [platform, hash] of Object.entries(allHashes)) {
+            results[platform] = {};
+            for (const server of servers) {
+                const base = server.replace(/\/$/, '');
+                const hostname = new URL(server).hostname;
+                try {
+                    const resp = await fetch(`${base}/${hash}`, { method: 'HEAD' });
+                    results[platform][hostname] = resp.ok;
+                } catch {
+                    results[platform][hostname] = false;
+                }
+            }
+        }
+
+        setAvailabilityResults(results);
+        setCheckingAvailability(false);
+    };
+
+    // Open the publish modal in edit mode for an existing version
+    const openEditVersion = (v: any) => {
+        setEditingVersion(v);
+        setPubVersion(v.version || '');
+        setPubNotes(v.notes || '');
+        // Pre-populate platform hashes from existing version data
+        const hashes: Record<string, string> = {};
+        const urls: Record<string, string> = {};
+        const preloadedHashes: Record<string, { hash: string; ext: string }> = {};
+        const emptyFiles: Record<string, File | null> = {
+            'windows-x86_64': null, 'windows-aarch64': null,
+            'linux-x86_64': null, 'linux-x86_64-bin': null,
+            'linux-aarch64': null, 'linux-aarch64-bin': null,
+            'darwin-x86_64': null, 'darwin-aarch64': null,
+        };
+        if (v.platforms) {
+            const servers = blossomServers.getServers();
+            for (const [platform, info] of Object.entries(v.platforms) as [string, any][]) {
+                hashes[platform] = info.hash;
+                preloadedHashes[platform] = { hash: info.hash, ext: info.ext };
+                if (servers.length > 0) {
+                    urls[platform] = `${servers[0].replace(/\/$/, '')}/${info.hash}`;
+                }
+            }
+        }
+        if (v.source) {
+            const src = typeof v.source === 'string' ? { hash: v.source, ext: 'zip' } : v.source;
+            hashes['source-code'] = src.hash;
+            preloadedHashes['source-code'] = src;
+            const servers = blossomServers.getServers();
+            if (servers.length > 0) {
+                urls['source-code'] = `${servers[0].replace(/\/$/, '')}/${src.hash}`;
+            }
+        }
+        setPubFiles(emptyFiles);
+        setPubSourceFile(null);
+        setFileHashes(hashes);
+        setPubDownloadUrls(urls);
+        setPlatformHashes(preloadedHashes);
+        setUploadResults({});
+        setPublishPhase('files');
+        setShowPublishModal(true);
+    };
+
+    // Version history fetched from Nostr
+    const [versionHistory, setVersionHistory] = useState<any[]>([]);
+    const [fetchingVersions, setFetchingVersions] = useState(true);
 
     // Detect if current user is the DENOS developer
     const devPubkeyHex = (() => {
@@ -1713,7 +1741,8 @@ function AboutPage({ onBack, toast, onNavigateToWallet, onNavigateToEcashSend, a
         const servers = blossomServers.getServers().filter(s => pubServerToggles[s] !== false);
         if (servers.length === 0) { toast('Enable at least one Blossom server', 'error'); setPublishing(false); setPublishPhase('files'); return; }
         const results: Record<string, UploadResult[]> = {};
-        const hashes: Record<string, { hash: string; ext: string }> = {};
+        // Start with preloaded hashes from edit mode (if any)
+        const hashes: Record<string, { hash: string; ext: string }> = { ...platformHashes };
 
         for (const [platform, file] of filesToUpload) {
             results[platform] = [];
@@ -1747,6 +1776,7 @@ function AboutPage({ onBack, toast, onNavigateToWallet, onNavigateToEcashSend, a
             // Upload directly to each server
             for (const server of servers) {
                 const hostname = new URL(server).hostname;
+                skipUploadRef.current = false;
                 try {
                     setPublishStatus(`Uploading ${platform} to ${hostname}…`);
                     setUploadProgress({ bytes_sent: 0, total_bytes: bytes.length, startTime: Date.now() });
@@ -1754,14 +1784,27 @@ function AboutPage({ onBack, toast, onNavigateToWallet, onNavigateToEcashSend, a
                         setUploadProgress(prev => prev ? { ...prev, bytes_sent: ev.payload.bytes_sent } : null);
                     });
                     try {
-                        await invoke<string>('upload_to_blossom', { filePath: tempPath, serverUrl: server, platform });
-                        results[platform].push({ server: hostname, method: 'upload', success: true });
+                        const blobUrl = await invoke<string>('upload_to_blossom', { filePath: tempPath, serverUrl: server, platform });
+                        if (skipUploadRef.current) {
+                            results[platform].push({ server: hostname, method: 'upload', success: false, error: 'Skipped' });
+                        } else {
+                            results[platform].push({ server: hostname, method: 'upload', success: true });
+                            // Set download URL from first successful upload
+                            setPubDownloadUrls(prev => {
+                                if (!prev[platform]) return { ...prev, [platform]: blobUrl };
+                                return prev;
+                            });
+                        }
                     } finally {
                         unlisten();
                         setUploadProgress(null);
                     }
                 } catch (e: any) {
-                    results[platform].push({ server: hostname, method: 'upload', success: false, error: String(e) });
+                    if (skipUploadRef.current) {
+                        results[platform].push({ server: hostname, method: 'upload', success: false, error: 'Skipped' });
+                    } else {
+                        results[platform].push({ server: hostname, method: 'upload', success: false, error: String(e) });
+                    }
                 }
             }
 
@@ -1769,7 +1812,7 @@ function AboutPage({ onBack, toast, onNavigateToWallet, onNavigateToEcashSend, a
         }
 
         setUploadResults(results);
-        setPlatformHashes(hashes);
+        setPlatformHashes(prev => ({ ...prev, ...hashes }));
         setPublishing(false);
         setPublishStatus('');
         setPublishPhase('review');
@@ -1796,11 +1839,16 @@ function AboutPage({ onBack, toast, onNavigateToWallet, onNavigateToEcashSend, a
             });
             toast(`Update v${pubVersion} published! Event: ${eventId.slice(0, 12)}…`, 'success');
             setShowPublishModal(false);
+            setEditingVersion(null);
             setPubVersion(''); setPubNotes('');
             setPubFiles({ 'windows-x86_64': null, 'windows-aarch64': null, 'linux-x86_64': null, 'linux-x86_64-bin': null, 'linux-aarch64': null, 'linux-aarch64-bin': null, 'darwin-x86_64': null, 'darwin-aarch64': null });
             setPubSourceFile(null);
             setPublishPhase('files');
-            setUploadResults({}); setPlatformHashes({});
+            setUploadResults({}); setPlatformHashes({}); setFileHashes({}); setPubDownloadUrls({});
+            // Refresh version history
+            invoke<any[]>('fetch_version_history')
+                .then(versions => setVersionHistory(versions))
+                .catch(() => {});
         } catch (e: any) {
             toast('Publish failed: ' + e, 'error');
             setPublishPhase('review');
@@ -1813,6 +1861,12 @@ function AboutPage({ onBack, toast, onNavigateToWallet, onNavigateToEcashSend, a
     try { devTaprootAddress = npubToTaprootAddress(DEV_NPUB); } catch { }
 
     useEffect(() => {
+        // Fetch version history from Nostr
+        invoke<any[]>('fetch_version_history')
+            .then(versions => setVersionHistory(versions))
+            .catch(() => {})
+            .finally(() => setFetchingVersions(false));
+
         // Decode npub to hex for profile fetch
         try {
             const decoded = nip19.decode(DEV_NPUB);
@@ -1868,7 +1922,7 @@ function AboutPage({ onBack, toast, onNavigateToWallet, onNavigateToEcashSend, a
                 <div className="flex flex-col items-center text-center pt-2 pb-1">
                     <img src="/denos-logo.png" alt="DENOS" className="w-20 h-20 rounded-2xl mb-4" />
                     <h1 className="text-2xl font-bold tracking-tight">DENOS</h1>
-                    <p className="text-sm text-muted-foreground mt-1">Version {VERSION_HISTORY[0].version}</p>
+                    <p className="text-sm text-muted-foreground mt-1">Version {__APP_VERSION__}</p>
                     <p className="text-sm text-muted-foreground mt-4 px-2 leading-relaxed max-w-sm">
                         DENOS is a Nostr signer, ID manager, and payment system.
                     </p>
@@ -1921,54 +1975,111 @@ function AboutPage({ onBack, toast, onNavigateToWallet, onNavigateToEcashSend, a
                             </CardTitle>
                             <button
                                 onClick={async () => {
-                                    setShowRemoteVersions(true);
                                     setFetchingVersions(true);
                                     try {
                                         const versions = await invoke<any[]>('fetch_version_history');
-                                        setRemoteVersions(versions);
+                                        setVersionHistory(versions);
                                     } catch (e: any) {
                                         toast('Failed to fetch: ' + e, 'error');
                                     }
                                     setFetchingVersions(false);
                                 }}
                                 className="text-muted-foreground hover:text-foreground transition-colors cursor-pointer p-1"
-                                title="View published versions from Nostr"
+                                title="Refresh version history"
                             >
-                                <Cloud className="w-4 h-4" />
+                                <RefreshCw className={cn("w-4 h-4", fetchingVersions && "animate-spin")} />
                             </button>
                         </div>
                     </CardHeader>
                     <CardContent className="space-y-1">
-                        {VERSION_HISTORY.map(v => (
-                            <div key={v.version} className="space-y-2">
-                                <button
-                                    onClick={() => setExpandedVersion(expandedVersion === v.version ? null : v.version)}
-                                    className="w-full flex items-center justify-between py-2.5 px-2.5 text-left cursor-pointer hover:bg-secondary/40 rounded-lg transition-colors"
-                                >
-                                    <div>
-                                        <span className="text-sm font-semibold">v{v.version}</span>
-                                        <span className="text-xs text-muted-foreground ml-2">{v.date}</span>
-                                        <p className="text-xs text-muted-foreground mt-0.5">{v.title}</p>
-                                    </div>
-                                    <ChevronDown className={cn(
-                                        "w-4 h-4 text-muted-foreground transition-transform duration-200",
-                                        expandedVersion === v.version && "rotate-180"
-                                    )} />
-                                </button>
-                                {expandedVersion === v.version && (
-                                    <div className="pl-3 pr-1 pb-3 animate-fade-in">
-                                        <ul className="space-y-1.5">
-                                            {v.changes.map((change, i) => (
-                                                <li key={i} className="flex items-start gap-2 text-xs text-muted-foreground">
-                                                    <span className="w-1 h-1 rounded-full bg-primary mt-1.5 shrink-0" />
-                                                    {change}
-                                                </li>
-                                            ))}
-                                        </ul>
-                                    </div>
-                                )}
+                        {fetchingVersions ? (
+                            <div className="flex items-center justify-center py-8">
+                                <RefreshCw className="w-5 h-5 animate-spin text-muted-foreground" />
                             </div>
-                        ))}
+                        ) : versionHistory.length === 0 ? (
+                            <div className="py-8 text-center text-sm text-muted-foreground">
+                                No published versions found.
+                            </div>
+                        ) : (
+                            versionHistory.map(v => (
+                                <div key={v.version} className="space-y-2">
+                                    <button
+                                        onClick={() => setExpandedVersion(expandedVersion === v.version ? null : v.version)}
+                                        className="w-full flex items-center justify-between py-2.5 px-2.5 text-left cursor-pointer hover:bg-secondary/40 rounded-lg transition-colors"
+                                    >
+                                        <div>
+                                            <span className="text-sm font-semibold">v{v.version}</span>
+                                            <span className="text-xs text-muted-foreground ml-2">
+                                                {v.pub_date ? new Date(v.pub_date).toLocaleDateString('en-US', { month: 'short', year: 'numeric' }) : ''}
+                                            </span>
+                                        </div>
+                                        <div className="flex items-center gap-1">
+                                            {isDeveloper && (
+                                                <button
+                                                    onClick={(e) => { e.stopPropagation(); openEditVersion(v); }}
+                                                    className="p-1 text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
+                                                    title="Edit this version"
+                                                >
+                                                    <Pencil className="w-3.5 h-3.5" />
+                                                </button>
+                                            )}
+                                            <ChevronDown className={cn(
+                                                "w-4 h-4 text-muted-foreground transition-transform duration-200",
+                                                expandedVersion === v.version && "rotate-180"
+                                            )} />
+                                        </div>
+                                    </button>
+                                    {expandedVersion === v.version && (
+                                        <div className="pl-3 pr-1 pb-3 animate-fade-in space-y-3">
+                                            {v.notes && (
+                                                <p className="text-xs text-muted-foreground leading-relaxed whitespace-pre-wrap">{v.notes}</p>
+                                            )}
+                                            {v.platforms && Object.keys(v.platforms).length > 0 && (
+                                                <div className="space-y-1.5">
+                                                    <div className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">Downloads</div>
+                                                    <div className="grid gap-1.5">
+                                                        {Object.entries(v.platforms).map(([platform, info]: [string, any]) => {
+                                                            const labels: Record<string, string> = {
+                                                                'windows-x86_64': '🪟 Windows x64',
+                                                                'windows-aarch64': '🪟 Windows ARM',
+                                                                'linux-x86_64': '🐧 Linux x64',
+                                                                'linux-x86_64-bin': '🐧 Linux x64 (bin)',
+                                                                'linux-aarch64': '🐧 Linux ARM',
+                                                                'linux-aarch64-bin': '🐧 Linux ARM (bin)',
+                                                                'darwin-x86_64': '🍎 macOS Intel',
+                                                                'darwin-aarch64': '🍎 macOS ARM',
+                                                            };
+                                                            const label = labels[platform] || platform;
+                                                            const servers = blossomServers.getServers();
+                                                            const downloadUrl = servers.length > 0
+                                                                ? `${servers[0]}/${info.hash}`
+                                                                : null;
+                                                            return (
+                                                                <button
+                                                                    key={platform}
+                                                                    onClick={() => {
+                                                                        if (downloadUrl) {
+                                                                            window.open(downloadUrl, '_blank');
+                                                                        } else {
+                                                                            toast('No Blossom server configured', 'error');
+                                                                        }
+                                                                    }}
+                                                                    className="flex items-center gap-2 px-3 py-2 rounded-lg bg-secondary/30 hover:bg-secondary/60 transition-colors text-sm cursor-pointer"
+                                                                >
+                                                                    <Download className="w-3.5 h-3.5 text-muted-foreground" />
+                                                                    <span>{label}</span>
+                                                                    <span className="text-[10px] text-muted-foreground ml-auto">.{info.ext}</span>
+                                                                </button>
+                                                            );
+                                                        })}
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+                            ))
+                        )}
                     </CardContent>
                 </Card>
 
@@ -2027,7 +2138,15 @@ function AboutPage({ onBack, toast, onNavigateToWallet, onNavigateToEcashSend, a
                     <Button
                         className="w-full cursor-pointer"
                         variant="secondary"
-                        onClick={() => setShowPublishModal(true)}
+                        onClick={() => {
+                            setEditingVersion(null);
+                            setPubVersion(''); setPubNotes('');
+                            setPubFiles({ 'windows-x86_64': null, 'windows-aarch64': null, 'linux-x86_64': null, 'linux-x86_64-bin': null, 'linux-aarch64': null, 'linux-aarch64-bin': null, 'darwin-x86_64': null, 'darwin-aarch64': null });
+                            setPubSourceFile(null);
+                            setFileHashes({}); setPubDownloadUrls({}); setPlatformHashes({}); setUploadResults({});
+                            setPublishPhase('files');
+                            setShowPublishModal(true);
+                        }}
                     >
                         <Cloud className="w-4 h-4 mr-2" /> Publish New Update
                     </Button>
@@ -2038,7 +2157,7 @@ function AboutPage({ onBack, toast, onNavigateToWallet, onNavigateToEcashSend, a
                     <DialogContent className="max-w-md max-h-[80vh] overflow-y-auto">
                         <DialogHeader>
                             <DialogTitle className="flex items-center gap-2">
-                                <Cloud className="w-5 h-5" /> Publish New Update
+                                <Cloud className="w-5 h-5" /> {editingVersion ? `Edit v${editingVersion.version}` : 'Publish New Update'}
                             </DialogTitle>
                         </DialogHeader>
 
@@ -2050,6 +2169,7 @@ function AboutPage({ onBack, toast, onNavigateToWallet, onNavigateToEcashSend, a
                                     onChange={e => setPubVersion(e.target.value)}
                                     placeholder="0.2.0"
                                     className="h-9"
+                                    disabled={!!editingVersion}
                                 />
                             </div>
 
@@ -2098,46 +2218,101 @@ function AboutPage({ onBack, toast, onNavigateToWallet, onNavigateToEcashSend, a
                                         'darwin-aarch64': 'macOS ARM (.dmg)',
                                     };
                                     return (
-                                        <div
-                                            key={platform}
-                                            className={`relative flex items-center gap-3 p-3 rounded-lg border-2 border-dashed transition-colors ${file ? 'border-green-500/40 bg-green-500/5' : 'border-border hover:border-primary/40'
-                                                }`}
-                                            onDragOver={e => { e.preventDefault(); e.currentTarget.classList.add('border-primary'); }}
-                                            onDragLeave={e => { e.currentTarget.classList.remove('border-primary'); }}
-                                            onDrop={e => {
-                                                e.preventDefault();
-                                                e.currentTarget.classList.remove('border-primary');
-                                                const f = e.dataTransfer.files[0];
-                                                if (f) setPubFiles(prev => ({ ...prev, [platform]: f }));
-                                            }}
-                                        >
-                                            <div className="flex-1 min-w-0">
-                                                <p className="text-xs font-medium">{labels[platform] || platform}</p>
-                                                {file ? (
-                                                    <p className="text-[11px] text-green-500 truncate">{file.name} ({(file.size / 1024 / 1024).toFixed(1)} MB)</p>
+                                        <div key={platform}>
+                                            <div
+                                                className={`relative flex items-center gap-3 p-3 rounded-lg border-2 border-dashed transition-colors ${file ? 'border-green-500/40 bg-green-500/5' : fileHashes[platform] ? 'border-blue-500/40 bg-blue-500/5' : 'border-border hover:border-primary/40'
+                                                    }`}
+                                                onDragOver={e => { e.preventDefault(); e.currentTarget.classList.add('border-primary'); }}
+                                                onDragLeave={e => { e.currentTarget.classList.remove('border-primary'); }}
+                                                onDrop={e => {
+                                                    e.preventDefault();
+                                                    e.currentTarget.classList.remove('border-primary');
+                                                    const f = e.dataTransfer.files[0];
+                                                    if (f) {
+                                                        setPubFiles(prev => ({ ...prev, [platform]: f }));
+                                                        computeFileHash(platform, f);
+                                                    }
+                                                }}
+                                            >
+                                                <div className="flex-1 min-w-0">
+                                                    <p className="text-xs font-medium">{labels[platform] || platform}</p>
+                                                    {file ? (
+                                                        <>
+                                                            <p className="text-[11px] text-green-500 truncate">{file.name} ({(file.size / 1024 / 1024).toFixed(1)} MB)</p>
+                                                            {fileHashes[platform] && (
+                                                                <button
+                                                                    onClick={() => { navigator.clipboard.writeText(fileHashes[platform]); toast('Hash copied', 'success'); }}
+                                                                    className="text-[10px] text-muted-foreground font-mono truncate max-w-full text-left hover:text-foreground transition-colors cursor-pointer"
+                                                                    title={fileHashes[platform]}
+                                                                >
+                                                                    {fileHashes[platform].slice(0, 16)}…{fileHashes[platform].slice(-8)}
+                                                                </button>
+                                                            )}
+                                                        </>
+                                                    ) : fileHashes[platform] ? (
+                                                        <>
+                                                            <p className="text-[11px] text-blue-400">Existing binary</p>
+                                                            <button
+                                                                onClick={() => { navigator.clipboard.writeText(fileHashes[platform]); toast('Hash copied', 'success'); }}
+                                                                className="text-[10px] text-muted-foreground font-mono truncate max-w-full text-left hover:text-foreground transition-colors cursor-pointer"
+                                                                title={fileHashes[platform]}
+                                                            >
+                                                                {fileHashes[platform].slice(0, 16)}…{fileHashes[platform].slice(-8)}
+                                                            </button>
+                                                        </>
+                                                    ) : (
+                                                        <p className="text-[11px] text-muted-foreground">Drop file here or click to browse</p>
+                                                    )}
+                                                </div>
+                                                {file || fileHashes[platform] ? (
+                                                    <button
+                                                        onClick={() => {
+                                                            setPubFiles(prev => ({ ...prev, [platform]: null }));
+                                                            setFileHashes(prev => { const n = { ...prev }; delete n[platform]; return n; });
+                                                            setPubDownloadUrls(prev => { const n = { ...prev }; delete n[platform]; return n; });
+                                                            setPlatformHashes(prev => { const n = { ...prev }; delete n[platform]; return n; });
+                                                        }}
+                                                        className="p-1 text-muted-foreground hover:text-foreground"
+                                                    >
+                                                        <X className="w-4 h-4" />
+                                                    </button>
                                                 ) : (
-                                                    <p className="text-[11px] text-muted-foreground">Drop file here or click to browse</p>
+                                                    <label className="p-1.5 rounded-md bg-secondary hover:bg-secondary/80 cursor-pointer">
+                                                        <Plus className="w-4 h-4" />
+                                                        <input
+                                                            type="file"
+                                                            className="hidden"
+                                                            onChange={e => {
+                                                                const f = e.target.files?.[0];
+                                                                if (f) {
+                                                                    setPubFiles(prev => ({ ...prev, [platform]: f }));
+                                                                    computeFileHash(platform, f);
+                                                                }
+                                                            }}
+                                                        />
+                                                    </label>
                                                 )}
                                             </div>
-                                            {file ? (
-                                                <button
-                                                    onClick={() => setPubFiles(prev => ({ ...prev, [platform]: null }))}
-                                                    className="p-1 text-muted-foreground hover:text-foreground"
-                                                >
-                                                    <X className="w-4 h-4" />
-                                                </button>
-                                            ) : (
-                                                <label className="p-1.5 rounded-md bg-secondary hover:bg-secondary/80 cursor-pointer">
-                                                    <Plus className="w-4 h-4" />
-                                                    <input
-                                                        type="file"
-                                                        className="hidden"
-                                                        onChange={e => {
-                                                            const f = e.target.files?.[0];
-                                                            if (f) setPubFiles(prev => ({ ...prev, [platform]: f }));
-                                                        }}
+                                            {/* Download URL field — shown when hash exists (new file or preloaded) */}
+                                            {(file || pubDownloadUrls[platform]) && fileHashes[platform] && (
+                                                <div className="flex items-center gap-1.5 mt-1.5">
+                                                    <Input
+                                                        value={pubDownloadUrls[platform] || ''}
+                                                        onChange={e => setPubDownloadUrls(prev => ({ ...prev, [platform]: e.target.value }))}
+                                                        placeholder="Download URL"
+                                                        className="h-7 text-[11px] font-mono flex-1"
                                                     />
-                                                </label>
+                                                    <button
+                                                        onClick={() => {
+                                                            const url = pubDownloadUrls[platform];
+                                                            if (url) { navigator.clipboard.writeText(url); toast('Copied', 'success'); }
+                                                        }}
+                                                        className="p-1 text-muted-foreground hover:text-foreground transition-colors shrink-0 cursor-pointer"
+                                                        title="Copy URL"
+                                                    >
+                                                        <Copy className="w-3.5 h-3.5" />
+                                                    </button>
+                                                </div>
                                             )}
                                         </div>
                                     );
@@ -2155,20 +2330,38 @@ function AboutPage({ onBack, toast, onNavigateToWallet, onNavigateToEcashSend, a
                                         e.preventDefault();
                                         e.currentTarget.classList.remove('border-primary');
                                         const f = e.dataTransfer.files[0];
-                                        if (f) setPubSourceFile(f);
+                                        if (f) {
+                                            setPubSourceFile(f);
+                                            computeFileHash('source-code', f);
+                                        }
                                     }}
                                 >
                                     <div className="flex-1 min-w-0">
                                         <p className="text-xs font-medium">Source Code (.zip / .tar.gz)</p>
                                         {pubSourceFile ? (
-                                            <p className="text-[11px] text-green-500 truncate">{pubSourceFile.name} ({(pubSourceFile.size / 1024 / 1024).toFixed(1)} MB)</p>
+                                            <>
+                                                <p className="text-[11px] text-green-500 truncate">{pubSourceFile.name} ({(pubSourceFile.size / 1024 / 1024).toFixed(1)} MB)</p>
+                                                {fileHashes['source-code'] && (
+                                                    <button
+                                                        onClick={() => { navigator.clipboard.writeText(fileHashes['source-code']); toast('Hash copied', 'success'); }}
+                                                        className="text-[10px] text-muted-foreground font-mono truncate max-w-full text-left hover:text-foreground transition-colors cursor-pointer"
+                                                        title={fileHashes['source-code']}
+                                                    >
+                                                        {fileHashes['source-code'].slice(0, 16)}…{fileHashes['source-code'].slice(-8)}
+                                                    </button>
+                                                )}
+                                            </>
                                         ) : (
                                             <p className="text-[11px] text-muted-foreground">Drop file here or click to browse</p>
                                         )}
                                     </div>
                                     {pubSourceFile ? (
                                         <button
-                                            onClick={() => setPubSourceFile(null)}
+                                            onClick={() => {
+                                                setPubSourceFile(null);
+                                                setFileHashes(prev => { const n = { ...prev }; delete n['source-code']; return n; });
+                                                setPubDownloadUrls(prev => { const n = { ...prev }; delete n['source-code']; return n; });
+                                            }}
                                             className="p-1 text-muted-foreground hover:text-foreground"
                                         >
                                             <X className="w-4 h-4" />
@@ -2182,31 +2375,101 @@ function AboutPage({ onBack, toast, onNavigateToWallet, onNavigateToEcashSend, a
                                                 accept=".zip,.tar.gz,.tgz"
                                                 onChange={e => {
                                                     const f = e.target.files?.[0];
-                                                    if (f) setPubSourceFile(f);
+                                                    if (f) {
+                                                        setPubSourceFile(f);
+                                                        computeFileHash('source-code', f);
+                                                    }
                                                 }}
                                             />
                                         </label>
                                     )}
                                 </div>
+                                {/* Source code download URL */}
+                                {pubSourceFile && pubDownloadUrls['source-code'] && (
+                                    <div className="flex items-center gap-1.5">
+                                        <Input
+                                            value={pubDownloadUrls['source-code'] || ''}
+                                            onChange={e => setPubDownloadUrls(prev => ({ ...prev, 'source-code': e.target.value }))}
+                                            placeholder="Download URL"
+                                            className="h-7 text-[11px] font-mono flex-1"
+                                        />
+                                        <button
+                                            onClick={() => {
+                                                const url = pubDownloadUrls['source-code'];
+                                                if (url) { navigator.clipboard.writeText(url); toast('Copied', 'success'); }
+                                            }}
+                                            className="p-1 text-muted-foreground hover:text-foreground transition-colors shrink-0 cursor-pointer"
+                                            title="Copy URL"
+                                        >
+                                            <Copy className="w-3.5 h-3.5" />
+                                        </button>
+                                    </div>
+                                )}
                             </div>
+
+
+                            {/* Check Availability button */}
+                            {Object.keys(fileHashes).length > 0 && publishPhase === 'files' && (
+                                <div className="space-y-2">
+                                    <Button
+                                        variant="outline"
+                                        className="w-full cursor-pointer"
+                                        onClick={handleCheckAvailability}
+                                        disabled={checkingAvailability}
+                                    >
+                                        {checkingAvailability ? (
+                                            <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Checking…</>
+                                        ) : (
+                                            <><RefreshCw className="w-4 h-4 mr-2" /> Check Availability</>
+                                        )}
+                                    </Button>
+                                    {Object.keys(availabilityResults).length > 0 && (
+                                        <div className="space-y-2">
+                                            {Object.entries(availabilityResults).map(([platform, servers]) => (
+                                                <div key={platform} className="rounded-lg border border-border/50 p-2.5 space-y-1">
+                                                    <div className="flex items-center gap-2">
+                                                        <span className={`w-2 h-2 rounded-full ${Object.values(servers).some(v => v) ? 'bg-green-500' : 'bg-red-500'}`} />
+                                                        <span className="text-xs font-medium">{platform}</span>
+                                                        {fileHashes[platform] && (
+                                                            <span className="text-[10px] text-muted-foreground font-mono ml-auto">{fileHashes[platform].slice(0, 12)}…</span>
+                                                        )}
+                                                    </div>
+                                                    {Object.entries(servers).map(([hostname, available]) => (
+                                                        <div key={hostname} className="flex items-center gap-1.5 pl-4 text-[11px]">
+                                                            {available ? (
+                                                                <Check className="w-3 h-3 text-green-500 shrink-0" />
+                                                            ) : (
+                                                                <X className="w-3 h-3 text-red-500 shrink-0" />
+                                                            )}
+                                                            <span className={available ? 'text-green-500' : 'text-muted-foreground'}>{hostname}</span>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+                            )}
 
                             {publishStatus && (
                                 <p className="text-xs text-muted-foreground animate-pulse">{publishStatus}</p>
                             )}
 
-                            {/* Upload progress bar */}
-                            {uploadProgress && (() => {
-                                const pct = Math.round((uploadProgress.bytes_sent / uploadProgress.total_bytes) * 100);
-                                const elapsed = (Date.now() - uploadProgress.startTime) / 1000;
-                                const rate = elapsed > 0.5 ? uploadProgress.bytes_sent / elapsed : 0;
+                            {/* Upload progress bar — always visible */}
+                            {(publishPhase === 'files' || publishPhase === 'uploading') && (() => {
+                                const pct = uploadProgress && uploadProgress.total_bytes > 0
+                                    ? Math.round((uploadProgress.bytes_sent / uploadProgress.total_bytes) * 100)
+                                    : 0;
+                                const elapsed = uploadProgress ? (Date.now() - uploadProgress.startTime) / 1000 : 0;
+                                const rate = elapsed > 0.5 && uploadProgress ? uploadProgress.bytes_sent / elapsed : 0;
                                 const rateMB = (rate / (1024 * 1024)).toFixed(2);
-                                const sentMB = (uploadProgress.bytes_sent / (1024 * 1024)).toFixed(1);
-                                const totalMB = (uploadProgress.total_bytes / (1024 * 1024)).toFixed(1);
+                                const sentMB = uploadProgress ? (uploadProgress.bytes_sent / (1024 * 1024)).toFixed(1) : '0.0';
+                                const totalMB = uploadProgress ? (uploadProgress.total_bytes / (1024 * 1024)).toFixed(1) : '0.0';
                                 return (
-                                    <div className="space-y-1">
-                                        <div className="w-full h-2 rounded-full bg-secondary overflow-hidden">
+                                    <div className="space-y-1.5">
+                                        <div className="w-full h-2.5 rounded-full bg-secondary overflow-hidden">
                                             <div
-                                                className="h-full rounded-full bg-green-500 transition-all duration-150"
+                                                className="h-full rounded-full bg-primary transition-all duration-150"
                                                 style={{ width: `${pct}%` }}
                                             />
                                         </div>
@@ -2218,21 +2481,53 @@ function AboutPage({ onBack, toast, onNavigateToWallet, onNavigateToEcashSend, a
                                 );
                             })()}
 
-                            {/* Phase: files → Upload button */}
-                            {publishPhase === 'files' && (
-                                <Button
-                                    className="w-full cursor-pointer"
-                                    onClick={handleUploadFiles}
-                                    disabled={!pubVersion.trim() || Object.values(pubFiles).every(f => f === null)}
-                                >
-                                    <Cloud className="w-4 h-4 mr-2" /> Upload to Blossom Servers
-                                </Button>
-                            )}
+                            {/* Phase: files → Upload / Publish buttons */}
+                            {publishPhase === 'files' && (() => {
+                                const hasNewFiles = Object.values(pubFiles).some(f => f !== null) || pubSourceFile !== null;
+                                const hasPreloadedHashes = Object.keys(platformHashes).length > 0;
+                                return (
+                                    <div className="space-y-2">
+                                        {hasNewFiles && (
+                                            <Button
+                                                className="w-full cursor-pointer"
+                                                onClick={handleUploadFiles}
+                                                disabled={!pubVersion.trim()}
+                                            >
+                                                <Cloud className="w-4 h-4 mr-2" /> Upload to Blossom Servers
+                                            </Button>
+                                        )}
+                                        {editingVersion && hasPreloadedHashes && (
+                                            <Button
+                                                className="w-full cursor-pointer"
+                                                variant={hasNewFiles ? 'outline' : 'default'}
+                                                onClick={() => setPublishPhase('review')}
+                                                disabled={!pubVersion.trim()}
+                                            >
+                                                <Shield className="w-4 h-4 mr-2" /> {hasNewFiles ? 'Skip Upload & Publish with Existing' : 'Update & Republish'}
+                                            </Button>
+                                        )}
+                                        {!hasNewFiles && !hasPreloadedHashes && (
+                                            <Button className="w-full" disabled>
+                                                <Cloud className="w-4 h-4 mr-2" /> Upload to Blossom Servers
+                                            </Button>
+                                        )}
+                                    </div>
+                                );
+                            })()}
 
-                            {/* Phase: uploading → spinner */}
+                            {/* Phase: uploading → Skip button */}
                             {publishPhase === 'uploading' && (
-                                <Button className="w-full" disabled>
-                                    <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> Uploading…
+                                <Button
+                                    variant="outline"
+                                    className="w-full cursor-pointer"
+                                    onClick={async () => {
+                                        skipUploadRef.current = true;
+                                        try {
+                                            await invoke('cancel_blossom_upload');
+                                        } catch { }
+                                    }}
+                                >
+                                    <X className="w-4 h-4 mr-2" /> Skip Server
                                 </Button>
                             )}
 
@@ -2275,17 +2570,22 @@ function AboutPage({ onBack, toast, onNavigateToWallet, onNavigateToEcashSend, a
                                             onClick={handleConfirmPublish}
                                             disabled={publishing}
                                         >
-                                            {publishing ? (
+                                            <>{publishing ? (
                                                 <><RefreshCw className="w-4 h-4 mr-2 animate-spin" /> Signing & Publishing…</>
                                             ) : (
-                                                <><Shield className="w-4 h-4 mr-2" /> Confirm & Publish kind 30078</>
-                                            )}
+                                                <><Shield className="w-4 h-4 mr-2" /> {editingVersion ? 'Update & Republish' : 'Confirm & Publish kind 30078'}</>
+                                            )}</>
                                         </Button>
                                     )}
 
                                     <button
-                                        onClick={() => { setPublishPhase('files'); setUploadResults({}); setPlatformHashes({}); }}
-                                        className="text-xs text-muted-foreground hover:text-foreground mx-auto block"
+                                        onClick={() => {
+                                            setPublishPhase('files');
+                                            setUploadResults({});
+                                            // Don't clear platformHashes in edit mode to preserve preloaded data
+                                            if (!editingVersion) setPlatformHashes({});
+                                        }}
+                                        className="text-xs text-muted-foreground hover:text-foreground mx-auto block cursor-pointer"
                                     >
                                         ← Back to files
                                     </button>
@@ -2321,92 +2621,6 @@ function AboutPage({ onBack, toast, onNavigateToWallet, onNavigateToEcashSend, a
                     </DialogContent>
                 </Dialog>
 
-                {/* ── Remote Version History Modal ── */}
-                <Dialog open={showRemoteVersions} onOpenChange={setShowRemoteVersions}>
-                    <DialogContent className="max-w-md">
-                        <DialogHeader>
-                            <DialogTitle className="flex items-center gap-2">
-                                <Cloud className="w-5 h-5" /> Published Versions
-                            </DialogTitle>
-                        </DialogHeader>
-                        <div className="max-h-[60vh] overflow-y-auto space-y-1 pr-1">
-                            {fetchingVersions ? (
-                                <div className="flex items-center justify-center py-8">
-                                    <RefreshCw className="w-5 h-5 animate-spin text-muted-foreground" />
-                                </div>
-                            ) : remoteVersions.length === 0 ? (
-                                <div className="py-8 text-center text-sm text-muted-foreground">
-                                    No published versions found on Nostr.
-                                </div>
-                            ) : (
-                                remoteVersions.map(v => (
-                                    <div key={v.version} className="rounded-lg border border-border/50 overflow-hidden">
-                                        <button
-                                            onClick={() => setExpandedRemoteVersion(expandedRemoteVersion === v.version ? null : v.version)}
-                                            className="w-full flex items-center justify-between p-3 text-left cursor-pointer hover:bg-secondary/40 transition-colors"
-                                        >
-                                            <div>
-                                                <span className="text-sm font-semibold">v{v.version}</span>
-                                                <span className="text-xs text-muted-foreground ml-2">
-                                                    {v.pub_date ? new Date(v.pub_date).toLocaleDateString('en-US', { month: 'short', year: 'numeric' }) : ''}
-                                                </span>
-                                            </div>
-                                            <ChevronDown className={cn(
-                                                "w-4 h-4 text-muted-foreground transition-transform duration-200",
-                                                expandedRemoteVersion === v.version && "rotate-180"
-                                            )} />
-                                        </button>
-                                        {expandedRemoteVersion === v.version && (
-                                            <div className="px-3 pb-3 space-y-3 animate-fade-in border-t border-border/30 pt-3">
-                                                {v.notes && (
-                                                    <p className="text-xs text-muted-foreground leading-relaxed whitespace-pre-wrap">{v.notes}</p>
-                                                )}
-                                                {v.platforms && Object.keys(v.platforms).length > 0 && (
-                                                    <div className="space-y-1.5">
-                                                        <div className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">Downloads</div>
-                                                        <div className="grid gap-1.5">
-                                                            {Object.entries(v.platforms).map(([platform, info]: [string, any]) => {
-                                                                const labels: Record<string, string> = {
-                                                                    'windows-x86_64': '🪟 Windows',
-                                                                    'linux-x86_64': '🐧 Linux',
-                                                                    'darwin-x86_64': '🍎 macOS (Intel)',
-                                                                    'darwin-aarch64': '🍎 macOS (ARM)',
-                                                                };
-                                                                const label = labels[platform] || platform;
-                                                                // Construct download URL from first available Blossom server
-                                                                const servers = blossomServers.getServers();
-                                                                const downloadUrl = servers.length > 0
-                                                                    ? `${servers[0]}/${info.hash}`
-                                                                    : null;
-                                                                return (
-                                                                    <button
-                                                                        key={platform}
-                                                                        onClick={() => {
-                                                                            if (downloadUrl) {
-                                                                                window.open(downloadUrl, '_blank');
-                                                                            } else {
-                                                                                toast('No Blossom server configured', 'error');
-                                                                            }
-                                                                        }}
-                                                                        className="flex items-center gap-2 px-3 py-2 rounded-lg bg-secondary/30 hover:bg-secondary/60 transition-colors text-sm cursor-pointer"
-                                                                    >
-                                                                        <Download className="w-3.5 h-3.5 text-muted-foreground" />
-                                                                        <span>{label}</span>
-                                                                        <span className="text-[10px] text-muted-foreground ml-auto">.{info.ext}</span>
-                                                                    </button>
-                                                                );
-                                                            })}
-                                                        </div>
-                                                    </div>
-                                                )}
-                                            </div>
-                                        )}
-                                    </div>
-                                ))
-                            )}
-                        </div>
-                    </DialogContent>
-                </Dialog>
 
                 {/* ── Tip Modal ── */}
                 <Dialog open={showTipModal} onOpenChange={(open) => { setShowTipModal(open); if (!open) setTipView('menu'); }}>

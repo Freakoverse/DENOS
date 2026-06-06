@@ -169,6 +169,7 @@ pub fn run() {
             updater::check_for_update,
             updater::download_and_install_update,
             updater::upload_to_blossom,
+            updater::cancel_blossom_upload,
             updater::publish_update_event,
             updater::fetch_version_history,
             updater::write_temp_file,

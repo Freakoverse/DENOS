@@ -10,9 +10,11 @@ import { Wallet } from './components/Wallet';
 import { IdsView } from './components/IdsView';
 import { LockScreen } from './components/LockScreen';
 import { Onboarding } from './components/Onboarding';
-import { Fingerprint, Users, Settings as SettingsIcon, User, Minus, Square, X, WalletMinimal, AtSign, Store } from 'lucide-react';
+import { Fingerprint, Users, Settings as SettingsIcon, User, Minus, Square, X, WalletMinimal, AtSign, Store, KeyRound, Check, Sprout, Key, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useDragScroll } from '@/hooks/useDragScroll';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
+import { Badge } from '@/components/ui/badge';
 
 type Tab = 'dashboard' | 'wallet' | 'ids' | 'commerce' | 'settings';
 
@@ -112,6 +114,7 @@ function App() {
     }, []);
     const [tab, setTab] = useState<Tab>('dashboard');
     const [showProfile, setShowProfile] = useState(false);
+    const [showAccountSwitcher, setShowAccountSwitcher] = useState(false);
     const [sendPrefill, setSendPrefill] = useState<{ recipient: string; amount: number; feeRate?: number } | null>(null);
     const [ecashPrefill, setEcashPrefill] = useState<{ recipient: string; autoSend: boolean } | null>(null);
     const [appState, setAppState] = useState<AppState>({
@@ -127,6 +130,7 @@ function App() {
     });
     const [logs, setLogs] = useState<string[]>([]);
     const [profilePic, setProfilePic] = useState<string | null>(null);
+    const [loadingProfilePic, setLoadingProfilePic] = useState(false);
     const [isLocked, setIsLocked] = useState(true); // Start locked
     // Reset onboarding state when locking so new profiles see the welcome screen
     useEffect(() => { if (isLocked) setShowOnboarding(true); }, [isLocked]);
@@ -172,9 +176,14 @@ function App() {
     // Fetch profile picture when active keypair changes
     useEffect(() => {
         if (appState.active_keypair) {
-            fetchProfilePicture(appState.active_keypair).then(setProfilePic);
+            setProfilePic(null);
+            setLoadingProfilePic(true);
+            fetchProfilePicture(appState.active_keypair)
+                .then(setProfilePic)
+                .finally(() => setLoadingProfilePic(false));
         } else {
             setProfilePic(null);
+            setLoadingProfilePic(false);
         }
     }, [appState.active_keypair]);
 
@@ -217,6 +226,28 @@ function App() {
 
     const openProfile = () => setShowProfile(true);
     const closeProfile = () => setShowProfile(false);
+
+    const switchAccount = async (pubkey: string) => {
+        try {
+            await invoke('set_active_keypair', { pubkey });
+            setShowAccountSwitcher(false);
+        } catch (e) {
+            console.error('Failed to switch account:', e);
+        }
+    };
+
+    const truncateNpub = (npub: string) => {
+        if (npub.length <= 20) return npub;
+        return `${npub.slice(0, 12)}…${npub.slice(-6)}`;
+    };
+
+    const importedKeypairs = appState.keypairs.filter(kp => !kp.seed_id);
+    const seedKeypairGroups = appState.seeds.map(seed => ({
+        seed,
+        keypairs: appState.keypairs
+            .filter(kp => kp.seed_id === seed.id)
+            .sort((a, b) => (a.account_index ?? 0) - (b.account_index ?? 0)),
+    }));
 
     const appWindow = getCurrentWindow();
     const handleMinimize = () => appWindow.minimize();
@@ -286,18 +317,31 @@ function App() {
                             <span className="text-base font-bold tracking-tight text-foreground">DENOS</span>
                         </button>
                         {hasKeypairs && (
-                            <button
-                                onClick={openProfile}
-                                className="w-8 h-8 rounded-full overflow-hidden border-2 border-primary/30 hover:border-primary transition-colors cursor-pointer shrink-0"
-                            >
-                                {profilePic ? (
-                                    <img src={profilePic} alt="" className="w-full h-full object-cover" />
-                                ) : (
-                                    <div className="w-full h-full bg-secondary flex items-center justify-center">
-                                        <User className="w-4 h-4 text-muted-foreground" />
-                                    </div>
-                                )}
-                            </button>
+                            <div className="flex items-center gap-2">
+                                <button
+                                    onClick={() => setShowAccountSwitcher(true)}
+                                    className="w-8 h-8 rounded-full bg-secondary/80 hover:bg-secondary flex items-center justify-center border border-white/5 hover:border-primary/30 transition-all cursor-pointer shrink-0"
+                                    title="Switch account"
+                                >
+                                    <KeyRound className="w-4 h-4 text-muted-foreground" />
+                                </button>
+                                <button
+                                    onClick={openProfile}
+                                    className="w-8 h-8 rounded-full overflow-hidden border-2 border-primary/30 hover:border-primary transition-colors cursor-pointer shrink-0"
+                                >
+                                    {profilePic ? (
+                                        <img src={profilePic} alt="" className="w-full h-full object-cover" />
+                                    ) : loadingProfilePic ? (
+                                        <div className="w-full h-full bg-secondary flex items-center justify-center">
+                                            <Loader2 className="w-4 h-4 text-primary animate-spin" />
+                                        </div>
+                                    ) : (
+                                        <div className="w-full h-full bg-secondary flex items-center justify-center">
+                                            <User className="w-4 h-4 text-muted-foreground" />
+                                        </div>
+                                    )}
+                                </button>
+                            </div>
                         )}
                     </div>
                 </div>
@@ -337,6 +381,123 @@ function App() {
                     </div>
                 )}
             </main>
+
+            {/* Account Switcher Modal */}
+            <Dialog open={showAccountSwitcher} onOpenChange={setShowAccountSwitcher}>
+                <DialogContent className="max-h-[70vh] flex flex-col">
+                    <DialogHeader>
+                        <DialogTitle className="flex items-center gap-2">
+                            <KeyRound className="w-5 h-5 text-primary" />
+                            Switch Account
+                        </DialogTitle>
+                        <DialogDescription>
+                            {appState.keypairs.length} account{appState.keypairs.length !== 1 ? 's' : ''} available
+                        </DialogDescription>
+                    </DialogHeader>
+
+                    <div className="flex-1 overflow-y-auto -mx-6 px-6 space-y-4 pb-1">
+                        {/* Seed-derived accounts */}
+                        {seedKeypairGroups.map(({ seed, keypairs: seedKps }) => (
+                            seedKps.length > 0 && (
+                                <div key={seed.id} className="space-y-1.5">
+                                    <div className="flex items-center gap-2 px-1">
+                                        <Sprout className="w-3.5 h-3.5 text-muted-foreground" />
+                                        <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">{seed.name || 'Seed'}</span>
+                                        <span className="text-[10px] text-muted-foreground/60">({seedKps.length})</span>
+                                    </div>
+                                    <div className="space-y-1">
+                                        {seedKps.map(kp => {
+                                            const isActive = kp.pubkey === appState.active_keypair;
+                                            return (
+                                                <button
+                                                    key={kp.pubkey}
+                                                    onClick={() => !isActive && switchAccount(kp.pubkey)}
+                                                    className={cn(
+                                                        "w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all text-left",
+                                                        isActive
+                                                            ? "bg-primary/10 border border-primary/20 cursor-default"
+                                                            : "bg-secondary/50 border border-transparent hover:bg-secondary hover:border-white/5 cursor-pointer"
+                                                    )}
+                                                >
+                                                    <div className={cn(
+                                                        "w-8 h-8 rounded-lg flex items-center justify-center shrink-0",
+                                                        isActive ? "bg-primary/20" : "bg-secondary"
+                                                    )}>
+                                                        <Key className={cn("w-4 h-4", isActive ? "text-primary" : "text-muted-foreground")} />
+                                                    </div>
+                                                    <div className="flex-1 min-w-0">
+                                                        <div className="flex items-center gap-2">
+                                                            <span className={cn(
+                                                                "text-sm font-medium truncate",
+                                                                isActive ? "text-primary" : "text-foreground"
+                                                            )}>
+                                                                {kp.name || `Key #${kp.account_index ?? 0}`}
+                                                            </span>
+                                                            {isActive && <Badge variant="default" className="text-[10px] py-0 px-1.5 shrink-0">Active</Badge>}
+                                                        </div>
+                                                        <span className="text-[11px] text-muted-foreground font-mono">{truncateNpub(kp.npub)}</span>
+                                                    </div>
+                                                    {isActive && <Check className="w-4 h-4 text-primary shrink-0" />}
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+                            )
+                        ))}
+
+                        {/* Imported keys */}
+                        {importedKeypairs.length > 0 && (
+                            <div className="space-y-1.5">
+                                {seedKeypairGroups.some(g => g.keypairs.length > 0) && (
+                                    <div className="flex items-center gap-2 px-1">
+                                        <KeyRound className="w-3.5 h-3.5 text-muted-foreground" />
+                                        <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Imported Keys</span>
+                                        <span className="text-[10px] text-muted-foreground/60">({importedKeypairs.length})</span>
+                                    </div>
+                                )}
+                                <div className="space-y-1">
+                                    {importedKeypairs.map(kp => {
+                                        const isActive = kp.pubkey === appState.active_keypair;
+                                        return (
+                                            <button
+                                                key={kp.pubkey}
+                                                onClick={() => !isActive && switchAccount(kp.pubkey)}
+                                                className={cn(
+                                                    "w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all text-left",
+                                                    isActive
+                                                        ? "bg-primary/10 border border-primary/20 cursor-default"
+                                                        : "bg-secondary/50 border border-transparent hover:bg-secondary hover:border-white/5 cursor-pointer"
+                                                )}
+                                            >
+                                                <div className={cn(
+                                                    "w-8 h-8 rounded-lg flex items-center justify-center shrink-0",
+                                                    isActive ? "bg-primary/20" : "bg-secondary"
+                                                )}>
+                                                    <KeyRound className={cn("w-4 h-4", isActive ? "text-primary" : "text-muted-foreground")} />
+                                                </div>
+                                                <div className="flex-1 min-w-0">
+                                                    <div className="flex items-center gap-2">
+                                                        <span className={cn(
+                                                            "text-sm font-medium truncate",
+                                                            isActive ? "text-primary" : "text-foreground"
+                                                        )}>
+                                                            {kp.name || truncateNpub(kp.npub)}
+                                                        </span>
+                                                        {isActive && <Badge variant="default" className="text-[10px] py-0 px-1.5 shrink-0">Active</Badge>}
+                                                    </div>
+                                                    {kp.name && <span className="text-[11px] text-muted-foreground font-mono">{truncateNpub(kp.npub)}</span>}
+                                                </div>
+                                                {isActive && <Check className="w-4 h-4 text-primary shrink-0" />}
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                </DialogContent>
+            </Dialog>
 
             {/* Bottom nav */}
             <nav className="fixed bottom-0 left-0 right-0 z-50 flex items-center justify-around px-2.5 py-2.5">

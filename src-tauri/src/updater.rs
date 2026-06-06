@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 use tracing::{info, warn};
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 
 use crate::AppState;
 
@@ -525,6 +526,9 @@ pub async fn upload_to_blossom(
     use base64::Engine;
     use tauri::Emitter;
 
+    // Reset cancel flag
+    state.upload_cancel.store(false, Ordering::SeqCst);
+
     let data = std::fs::read(&file_path)
         .map_err(|e| format!("Failed to read file: {}", e))?;
 
@@ -565,6 +569,17 @@ pub async fn upload_to_blossom(
 
     // PUT to Blossom server with progress tracking
     let base = server_url.trim_end_matches('/');
+
+    // Check if the server already has this file (HEAD request)
+    let http_client = reqwest::Client::new();
+    let check_url = format!("{}/{}", base, file_hash);
+    if let Ok(head_resp) = http_client.head(&check_url).send().await {
+        if head_resp.status().is_success() {
+            info!("[Blossom] Server already has {}, skipping upload", file_hash);
+            return Ok(check_url);
+        }
+    }
+
     let upload_url = format!("{}/upload", base);
 
     // Create a streaming body that emits progress events
@@ -574,9 +589,15 @@ pub async fn upload_to_blossom(
     let platform_clone = platform.clone();
     let server_clone = server_host.clone();
 
+    let cancel_flag = state.upload_cancel.clone();
     let stream = async_stream::stream! {
         let mut sent: usize = 0;
         for chunk_start in (0..data.len()).step_by(chunk_size) {
+            // Check cancel flag before yielding each chunk
+            if cancel_flag.load(Ordering::SeqCst) {
+                yield Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "Upload cancelled"));
+                return;
+            }
             let chunk_end = std::cmp::min(chunk_start + chunk_size, data.len());
             let chunk = data[chunk_start..chunk_end].to_vec();
             sent += chunk.len();
@@ -594,7 +615,6 @@ pub async fn upload_to_blossom(
 
     let body = reqwest::Body::wrap_stream(stream);
 
-    let http_client = reqwest::Client::new();
     let resp = http_client.put(&upload_url)
         .header("Authorization", format!("Nostr {}", auth_b64))
         .header("Content-Type", "application/octet-stream")
@@ -613,6 +633,16 @@ pub async fn upload_to_blossom(
         let body = resp.text().await.unwrap_or_default();
         Err(format!("Upload failed ({}): {}", status, body))
     }
+}
+
+/// Cancel any in-progress Blossom upload.
+#[tauri::command]
+pub async fn cancel_blossom_upload(
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.upload_cancel.store(true, Ordering::SeqCst);
+    info!("[Blossom] Upload cancel requested");
+    Ok(())
 }
 
 /// Publish a kind:30078 update manifest event.

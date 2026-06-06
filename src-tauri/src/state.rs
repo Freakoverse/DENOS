@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, atomic::AtomicBool};
 use nostr_sdk::Client;
 use tracing::info;
 use uuid::Uuid;
@@ -298,6 +298,8 @@ pub struct AppState {
     // Multi-profile support
     pub profiles: Mutex<Vec<ProfileInfo>>,
     pub active_profile: Mutex<Option<String>>,
+    /// Flag to cancel in-progress Blossom uploads
+    pub upload_cancel: Arc<AtomicBool>,
 }
 
 const SERVICE_NAME: &str = "denos-signer";
@@ -505,6 +507,7 @@ impl AppState {
             pc55_response_channels: Mutex::new(HashMap::new()),
             profiles: Mutex::new(profiles),
             active_profile: Mutex::new(last_profile),
+            upload_cancel: Arc::new(AtomicBool::new(false)),
         }
     }
     /// Load all data for a specific profile into the in-memory state.
