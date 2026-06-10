@@ -49,13 +49,18 @@ export interface AppState {
     active_profile: string | null;
 }
 
-/* ── Fetch profile picture from kind:0 ── */
+/* ── Fetch profile metadata from kind:0 ── */
 const DEFAULT_RELAYS = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://relay.nostr.band'];
 
-async function fetchProfilePicture(pubkey: string): Promise<string | null> {
+interface ProfileMeta {
+    name: string | null;
+    picture: string | null;
+}
+
+async function fetchProfileMeta(pubkey: string): Promise<ProfileMeta> {
     return new Promise((resolve) => {
         const subId = 'av_' + Math.random().toString(36).slice(2, 8);
-        let best: { created_at: number; picture: string | null } | null = null;
+        let best: { created_at: number; name: string | null; picture: string | null } | null = null;
         let resolved = false;
         const sockets: WebSocket[] = [];
 
@@ -63,7 +68,7 @@ async function fetchProfilePicture(pubkey: string): Promise<string | null> {
             if (resolved) return;
             resolved = true;
             sockets.forEach(s => { try { s.close(); } catch { } });
-            resolve(best?.picture ?? null);
+            resolve({ name: best?.name ?? null, picture: best?.picture ?? null });
         };
 
         setTimeout(finish, 5000);
@@ -81,7 +86,11 @@ async function fetchProfilePicture(pubkey: string): Promise<string | null> {
                             const createdAt = event.created_at ?? 0;
                             if (!best || createdAt > best.created_at) {
                                 const meta = JSON.parse(event.content);
-                                best = { created_at: createdAt, picture: meta.picture || null };
+                                best = {
+                                    created_at: createdAt,
+                                    name: meta.display_name || meta.name || null,
+                                    picture: meta.picture || null,
+                                };
                             }
                         }
                         if (data[0] === 'EOSE') ws.close();
@@ -178,14 +187,28 @@ function App() {
         if (appState.active_keypair) {
             setProfilePic(null);
             setLoadingProfilePic(true);
-            fetchProfilePicture(appState.active_keypair)
-                .then(setProfilePic)
+            fetchProfileMeta(appState.active_keypair)
+                .then(meta => setProfilePic(meta.picture))
                 .finally(() => setLoadingProfilePic(false));
         } else {
             setProfilePic(null);
             setLoadingProfilePic(false);
         }
     }, [appState.active_keypair]);
+
+    // Cache kind:0 metadata for the account switcher
+    const [switcherProfiles, setSwitcherProfiles] = useState<Record<string, ProfileMeta>>({});
+    useEffect(() => {
+        if (!showAccountSwitcher) return;
+        // Fetch metadata for all keypairs we don't already have cached
+        const missing = appState.keypairs.filter(kp => !switcherProfiles[kp.pubkey]);
+        if (missing.length === 0) return;
+        missing.forEach(kp => {
+            fetchProfileMeta(kp.pubkey).then(meta => {
+                setSwitcherProfiles(prev => ({ ...prev, [kp.pubkey]: meta }));
+            });
+        });
+    }, [showAccountSwitcher, appState.keypairs]); // eslint-disable-line react-hooks/exhaustive-deps
 
     // Auto-start the signer when we have an active keypair AND user has unlocked
     useEffect(() => {
@@ -408,6 +431,7 @@ function App() {
                                     <div className="space-y-1">
                                         {seedKps.map(kp => {
                                             const isActive = kp.pubkey === appState.active_keypair;
+                                            const meta = switcherProfiles[kp.pubkey];
                                             return (
                                                 <button
                                                     key={kp.pubkey}
@@ -419,19 +443,23 @@ function App() {
                                                             : "bg-secondary/50 border border-transparent hover:bg-secondary hover:border-white/5 cursor-pointer"
                                                     )}
                                                 >
-                                                    <div className={cn(
-                                                        "w-8 h-8 rounded-lg flex items-center justify-center shrink-0",
-                                                        isActive ? "bg-primary/20" : "bg-secondary"
-                                                    )}>
-                                                        <Key className={cn("w-4 h-4", isActive ? "text-primary" : "text-muted-foreground")} />
-                                                    </div>
+                                                    {meta?.picture ? (
+                                                        <img src={meta.picture} alt="" className="w-8 h-8 rounded-full object-cover shrink-0" />
+                                                    ) : (
+                                                        <div className={cn(
+                                                            "w-8 h-8 rounded-full flex items-center justify-center shrink-0",
+                                                            isActive ? "bg-primary/20" : "bg-secondary"
+                                                        )}>
+                                                            <Key className={cn("w-4 h-4", isActive ? "text-primary" : "text-muted-foreground")} />
+                                                        </div>
+                                                    )}
                                                     <div className="flex-1 min-w-0">
                                                         <div className="flex items-center gap-2">
                                                             <span className={cn(
                                                                 "text-sm font-medium truncate",
                                                                 isActive ? "text-primary" : "text-foreground"
                                                             )}>
-                                                                {kp.name || `Key #${kp.account_index ?? 0}`}
+                                                                {meta?.name || kp.name || `Key #${kp.account_index ?? 0}`}
                                                             </span>
                                                             {isActive && <Badge variant="default" className="text-[10px] py-0 px-1.5 shrink-0">Active</Badge>}
                                                         </div>
@@ -459,6 +487,7 @@ function App() {
                                 <div className="space-y-1">
                                     {importedKeypairs.map(kp => {
                                         const isActive = kp.pubkey === appState.active_keypair;
+                                        const meta = switcherProfiles[kp.pubkey];
                                         return (
                                             <button
                                                 key={kp.pubkey}
@@ -470,23 +499,27 @@ function App() {
                                                         : "bg-secondary/50 border border-transparent hover:bg-secondary hover:border-white/5 cursor-pointer"
                                                 )}
                                             >
-                                                <div className={cn(
-                                                    "w-8 h-8 rounded-lg flex items-center justify-center shrink-0",
-                                                    isActive ? "bg-primary/20" : "bg-secondary"
-                                                )}>
-                                                    <KeyRound className={cn("w-4 h-4", isActive ? "text-primary" : "text-muted-foreground")} />
-                                                </div>
+                                                {meta?.picture ? (
+                                                    <img src={meta.picture} alt="" className="w-8 h-8 rounded-full object-cover shrink-0" />
+                                                ) : (
+                                                    <div className={cn(
+                                                        "w-8 h-8 rounded-full flex items-center justify-center shrink-0",
+                                                        isActive ? "bg-primary/20" : "bg-secondary"
+                                                    )}>
+                                                        <KeyRound className={cn("w-4 h-4", isActive ? "text-primary" : "text-muted-foreground")} />
+                                                    </div>
+                                                )}
                                                 <div className="flex-1 min-w-0">
                                                     <div className="flex items-center gap-2">
                                                         <span className={cn(
                                                             "text-sm font-medium truncate",
                                                             isActive ? "text-primary" : "text-foreground"
                                                         )}>
-                                                            {kp.name || truncateNpub(kp.npub)}
+                                                            {meta?.name || kp.name || truncateNpub(kp.npub)}
                                                         </span>
                                                         {isActive && <Badge variant="default" className="text-[10px] py-0 px-1.5 shrink-0">Active</Badge>}
                                                     </div>
-                                                    {kp.name && <span className="text-[11px] text-muted-foreground font-mono">{truncateNpub(kp.npub)}</span>}
+                                                    <span className="text-[11px] text-muted-foreground font-mono">{truncateNpub(kp.npub)}</span>
                                                 </div>
                                                 {isActive && <Check className="w-4 h-4 text-primary shrink-0" />}
                                             </button>

@@ -155,6 +155,7 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
     const [showAllNotifications, setShowAllNotifications] = useState(false);
     const [showConfirm, setShowConfirm] = useState(false);
     const [showRegenConfirm, setShowRegenConfirm] = useState(false);
+    const [showCloseConfirm, setShowCloseConfirm] = useState(false);
 
     // Cleanup / pruning state
     const [showCleanup, setShowCleanup] = useState(false);
@@ -1537,7 +1538,14 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
                                 <CardTitle className="text-base flex items-center gap-2">
                                     <ArrowDownLeft className="w-4 h-4" /> {isSp1 ? 'Receive via Silent Payment' : 'Receive Silent Payment'}
                                 </CardTitle>
-                                <button onClick={() => { setShowReceiveModal(false); setSp1VerifyTxid(''); setSp1VerifyResult(null); setSp1NotifDone(false); }} className="text-muted-foreground hover:text-foreground cursor-pointer">
+                                <button onClick={() => {
+                                    // Guard close when an NSP address has been generated (funds could be lost)
+                                    if (!isSp1 && generatedAddress) {
+                                        setShowCloseConfirm(true);
+                                    } else {
+                                        setShowReceiveModal(false); setSp1VerifyTxid(''); setSp1VerifyResult(null); setSp1NotifDone(false);
+                                    }
+                                }} className="text-muted-foreground hover:text-foreground cursor-pointer">
                                     <X className="w-4 h-4" />
                                 </button>
                             </CardHeader>
@@ -1694,16 +1702,60 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
                                         </Button>
 
                                         {generatedAddress && (
-                                            <Button variant="outline" onClick={() => setShowConfirm(true)}
-                                                className="w-full gap-2 border-primary/30 text-primary hover:bg-primary/10">
-                                                <SendIcon className="w-4 h-4" /> Payment Sent?
-                                            </Button>
+                                            <>
+                                                <Button variant="outline" onClick={() => setShowConfirm(true)}
+                                                    className="w-full gap-2 border-primary/30 text-primary hover:bg-primary/10">
+                                                    <SendIcon className="w-4 h-4" /> Payment Sent?
+                                                </Button>
+                                                <div className="flex items-start gap-2 px-3 py-2.5 rounded-xl bg-amber-500/10 border border-amber-500/20">
+                                                    <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+                                                    <p className="text-[11px] leading-relaxed text-amber-200/90">
+                                                        <span className="font-bold text-amber-400">Important:</span> You or the sender must click <span className="font-semibold">"Payment Sent?"</span> above and send a notification after the payment is made. Without it, <span className="font-semibold text-destructive">funds sent to this address are assumed lost</span> — there is no automatic way to detect the payment.
+                                                    </p>
+                                                </div>
+                                            </>
                                         )}
                                     </>
                                 )}
                             </CardContent>
                         </Card>
                     </div>
+                </div>
+            )}
+
+            {/* ═══ CLOSE CONFIRMATION MODAL ═══ */}
+            {showCloseConfirm && (
+                <div className="fixed inset-0 z-[55] bg-black/60 backdrop-blur-sm animate-fade-in flex items-center justify-center px-4">
+                    <Card className="w-[340px] shadow-2xl">
+                        <CardHeader>
+                            <CardTitle className="text-base flex items-center gap-2">
+                                <AlertTriangle className="w-4 h-4 text-yellow-500" /> Close Without Notifying?
+                            </CardTitle>
+                        </CardHeader>
+                        <CardContent className="space-y-3">
+                            <p className="text-xs text-muted-foreground leading-relaxed">
+                                You have a generated address that hasn't been paired with a payment notification yet.
+                            </p>
+                            <p className="text-xs text-muted-foreground leading-relaxed">
+                                If someone sends funds to this address without a notification being published, <span className="text-destructive font-semibold">those funds will be extremely difficult to recover</span>.
+                            </p>
+                            <div className="p-2.5 rounded-lg bg-secondary/50 border border-border">
+                                <p className="text-[10px] text-muted-foreground font-mono truncate">{censor(generatedAddress)}</p>
+                            </div>
+                            <div className="flex gap-2 pt-1">
+                                <Button variant="outline" className="flex-1 text-xs" onClick={() => {
+                                    setShowCloseConfirm(false);
+                                    setShowReceiveModal(false);
+                                    setSp1VerifyTxid(''); setSp1VerifyResult(null); setSp1NotifDone(false);
+                                }}>
+                                    Yes, close
+                                </Button>
+                                <Button className="flex-1 text-xs" onClick={() => setShowCloseConfirm(false)}>
+                                    No, wait
+                                </Button>
+                            </div>
+                        </CardContent>
+                    </Card>
                 </div>
             )}
 
