@@ -1881,10 +1881,17 @@ fn sign_event_param(signer_keys: &Keys, event_json: &str) -> Result<String, Stri
                 .filter_map(|v| v.as_str().map(String::from))
                 .collect();
             if items.is_empty() { return None; }
-            Some(Tag::custom(
-                TagKind::from(items[0].as_str()),
-                items[1..].to_vec(),
-            ))
+            // Use Tag::parse to preserve raw tag data exactly as the client sent it.
+            // Tag::custom(TagKind::from("p"), ...) causes nostr-sdk to treat well-known
+            // tags (p, e, etc.) specially, potentially reordering or dropping them during
+            // EventBuilder::sign_with_keys(). Tag::parse avoids this by keeping the raw array.
+            Tag::parse(&items).ok().or_else(|| {
+                // Fallback: if parse fails, use Tag::custom (shouldn't happen for valid tags)
+                Some(Tag::custom(
+                    TagKind::from(items[0].as_str()),
+                    items[1..].to_vec(),
+                ))
+            })
         }).collect()
     } else {
         vec![]
