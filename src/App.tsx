@@ -15,6 +15,7 @@ import { cn } from '@/lib/utils';
 import { useDragScroll } from '@/hooks/useDragScroll';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 import { Badge } from '@/components/ui/badge';
+import { CachedImg } from '@/components/CachedImg';
 
 type Tab = 'dashboard' | 'wallet' | 'ids' | 'commerce' | 'settings';
 
@@ -55,6 +56,15 @@ const DEFAULT_RELAYS = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://relay.no
 interface ProfileMeta {
     name: string | null;
     picture: string | null;
+}
+
+/** Cache the resolved profile metadata (picture URL) per pubkey so avatars render instantly
+ *  from cache, then revalidate in the background. The image blob itself is cached by CachedImg. */
+function getCachedMeta(pubkey: string): ProfileMeta | null {
+    try { const raw = localStorage.getItem('denos-pmeta-' + pubkey); return raw ? JSON.parse(raw) : null; } catch { return null; }
+}
+function setCachedMeta(pubkey: string, meta: ProfileMeta): void {
+    try { localStorage.setItem('denos-pmeta-' + pubkey, JSON.stringify(meta)); } catch { /* ignore */ }
 }
 
 async function fetchProfileMeta(pubkey: string): Promise<ProfileMeta> {
@@ -182,29 +192,28 @@ function App() {
         };
     }, []);
 
-    // Fetch profile picture when active keypair changes
+    // Show the cached avatar instantly, then revalidate in the background.
     useEffect(() => {
-        if (appState.active_keypair) {
-            setProfilePic(null);
-            setLoadingProfilePic(true);
-            fetchProfileMeta(appState.active_keypair)
-                .then(meta => setProfilePic(meta.picture))
-                .finally(() => setLoadingProfilePic(false));
-        } else {
-            setProfilePic(null);
-            setLoadingProfilePic(false);
-        }
+        const pk = appState.active_keypair;
+        if (!pk) { setProfilePic(null); setLoadingProfilePic(false); return; }
+        const cached = getCachedMeta(pk);
+        if (cached?.picture) { setProfilePic(cached.picture); setLoadingProfilePic(false); }
+        else { setProfilePic(null); setLoadingProfilePic(true); }
+        fetchProfileMeta(pk)
+            .then(meta => { setCachedMeta(pk, meta); setProfilePic(meta.picture); })
+            .finally(() => setLoadingProfilePic(false));
     }, [appState.active_keypair]);
 
     // Cache kind:0 metadata for the account switcher
     const [switcherProfiles, setSwitcherProfiles] = useState<Record<string, ProfileMeta>>({});
     useEffect(() => {
         if (!showAccountSwitcher) return;
-        // Fetch metadata for all keypairs we don't already have cached
-        const missing = appState.keypairs.filter(kp => !switcherProfiles[kp.pubkey]);
-        if (missing.length === 0) return;
-        missing.forEach(kp => {
+        // Seed from cache for instant display, then revalidate each in the background.
+        appState.keypairs.forEach(kp => {
+            const cached = getCachedMeta(kp.pubkey);
+            if (cached) setSwitcherProfiles(prev => prev[kp.pubkey] ? prev : { ...prev, [kp.pubkey]: cached });
             fetchProfileMeta(kp.pubkey).then(meta => {
+                setCachedMeta(kp.pubkey, meta);
                 setSwitcherProfiles(prev => ({ ...prev, [kp.pubkey]: meta }));
             });
         });
@@ -353,7 +362,7 @@ function App() {
                                     className="w-8 h-8 rounded-full overflow-hidden border-2 border-primary/30 hover:border-primary transition-colors cursor-pointer shrink-0"
                                 >
                                     {profilePic ? (
-                                        <img src={profilePic} alt="" className="w-full h-full object-cover" />
+                                        <CachedImg src={profilePic} alt="" className="w-full h-full object-cover" />
                                     ) : loadingProfilePic ? (
                                         <div className="w-full h-full bg-secondary flex items-center justify-center">
                                             <Loader2 className="w-4 h-4 text-primary animate-spin" />
@@ -444,7 +453,7 @@ function App() {
                                                     )}
                                                 >
                                                     {meta?.picture ? (
-                                                        <img src={meta.picture} alt="" className="w-8 h-8 rounded-full object-cover shrink-0" />
+                                                        <CachedImg src={meta.picture} alt="" className="w-8 h-8 rounded-full object-cover shrink-0" />
                                                     ) : (
                                                         <div className={cn(
                                                             "w-8 h-8 rounded-full flex items-center justify-center shrink-0",
@@ -500,7 +509,7 @@ function App() {
                                                 )}
                                             >
                                                 {meta?.picture ? (
-                                                    <img src={meta.picture} alt="" className="w-8 h-8 rounded-full object-cover shrink-0" />
+                                                    <CachedImg src={meta.picture} alt="" className="w-8 h-8 rounded-full object-cover shrink-0" />
                                                 ) : (
                                                     <div className={cn(
                                                         "w-8 h-8 rounded-full flex items-center justify-center shrink-0",

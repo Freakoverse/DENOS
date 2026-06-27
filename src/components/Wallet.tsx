@@ -52,7 +52,7 @@ import {
 } from '@/services/zcash';
 import {
     ArrowUpRight, ArrowDownLeft, RefreshCw, Copy, Check, ExternalLink,
-    X, ArrowUpDown, Send, QrCode, Loader2, AlertTriangle, WalletMinimal, Shield,
+    X, ArrowUpDown, Send, QrCode, Loader2, AlertTriangle, WalletMinimal,
     Search, KeyRound, ArrowLeft, ChevronDown,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -60,11 +60,11 @@ import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { Badge } from '@/components/ui/badge';
 import { useFeedback } from '@/components/ui/feedback';
 import { SatoshiIcon } from '@/components/SatoshiIcon';
 import { SilentWallet } from '@/components/SilentWallet';
 import { EcashWallet } from '@/components/EcashWallet';
+import { MultisigWallet } from '@/components/MultisigWallet';
 import { FollowsSelector } from '@/components/FollowsSelector';
 import { chainIcons } from '@/assets/icons/blockchain';
 import { Users } from 'lucide-react';
@@ -573,18 +573,13 @@ export function Wallet({ activePubkey, sendPrefill, onPrefillConsumed, ecashReci
         );
     }
 
-    // ── MULTI TAB (placeholder) ──
+    // ── MULTI TAB ──
     if (walletTab === 'multi') {
         return (
-            <div className="space-y-4">
+            <div className="flex flex-col gap-4 h-full overflow-hidden">
                 {renderTabs()}
-                <div className="flex flex-col items-center justify-center h-48 gap-3 text-muted-foreground">
-                    <div className="w-16 h-16 rounded-2xl bg-primary/10 flex items-center justify-center">
-                        <Shield className="w-8 h-8 text-primary" />
-                    </div>
-                    <h3 className="text-lg font-bold text-foreground">Multisig</h3>
-                    <p className="text-sm text-center max-w-xs">Bitcoin Multisig Wallet coming soon.</p>
-                    <Badge variant="secondary" className="text-xs">Coming Soon</Badge>
+                <div className="flex-1 min-h-0 bg-card/30 border border-white/5 rounded-2xl p-3 overflow-hidden">
+                    <MultisigWallet activePubkey={activePubkey} />
                 </div>
             </div>
         );

@@ -15,6 +15,8 @@
                 "title": "DENOS — Nostr Signer, ID Manager, and Payment System",
                 "width": 460,
                 "height": 780,
+                "minWidth": 460,
+                "minHeight": 780,
                 "resizable": true,
                 "decorations": false,
                 "backgroundThrottling": "disabled",
