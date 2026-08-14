@@ -10,6 +10,7 @@ import {
     BadgeCheck, Zap, Globe, FileText, Loader2, ShieldAlert, Copy, Check,
 } from 'lucide-react';
 import { dnnService } from '@/services/dnn';
+import { primeProfileMeta } from '@/services/nostrProfile';
 
 /* ── Types ── */
 interface ProfileMeta {
@@ -200,6 +201,12 @@ export function Profile({ pubkey, npub, onBack }: Props) {
             // Publish to relays via WebSocket
             await publishToRelays(signedJson, relayUrls);
             setMeta(editMeta);
+            // Reflect the change immediately in the shared identity cache (switcher, account
+            // lists, top-bar avatar) instead of waiting for the next session's revalidation.
+            if (pubkey) primeProfileMeta(pubkey, {
+                name: (editMeta.display_name || editMeta.name || '').trim() || null,
+                picture: editMeta.picture || null,
+            });
             setEditing(false);
             toast('Profile updated!', 'success');
         } catch (e: any) {

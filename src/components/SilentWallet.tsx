@@ -1,7 +1,7 @@
 /**
  * SilentWallet — Nostr Silent Payments tab (HD-wallet-like).
  */
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { QRCodeSVG } from 'qrcode.react';
@@ -23,6 +23,7 @@ import { SatoshiIcon } from '@/components/SatoshiIcon';
 import { satsToBTC, fetchTxHistory } from '@/services/bitcoin';
 import {
     createMultiKeyTaprootTransaction,
+    createMultiKeySegwitTransaction,
     broadcastTransaction, fetchUTXOs, type UTXO,
 } from '@/services/bitcoin';
 import {
@@ -36,19 +37,21 @@ import {
     fetchZcashUTXOs, fetchZcashBalance,
 } from '@/services/zcash';
 import { getFeeRates } from '@/services/bitcoin';
-import { NspConfirmModal } from '@/components/NspConfirmModal';
 import { FollowsSelector } from '@/components/FollowsSelector';
 import { nip19 } from 'nostr-tools';
 import {
-    generateTweak,
-    deriveTweakedAddress,
-    deriveTweakedAddressFromPubkey,
     tweakPrivateKey,
     getSigningKey,
     buildPaymentURI,
     subscribeToNspNotifications,
     parseNspNotification,
     createNspNotification,
+    createDeterministicNspNotification,
+    selectNspIndex,
+    deriveNspSend,
+    nspAddressHasHistory,
+    markNspAddressPending,
+    recoverNspPayments,
     publishNspNotification,
     fetchExistingNotification,
     loadNspIndex,
@@ -59,7 +62,10 @@ import {
     catchUpScan,
     loadSentList,
     saveSentList,
-    verifyPaymentOwnership,
+    verifyNspPayloadOwnership,
+    nspTweakFromSender,
+    setNspUserRelays,
+    fetchRelayList,
     type NspChain,
     type NspPayload,
     type NspConfirmedPayment,
@@ -67,15 +73,7 @@ import {
     type NspIndex,
     type RelayPublishResult,
 } from '@/services/nsp';
-import {
-    deriveScanKeys,
-    deriveScanPubKeys,
-    encodeSp1Address,
-    decodeSp1Address,
-    deriveOutputForSp1,
-    verifyTxOwnership,
-    type Sp1VerifyResult,
-} from '@/services/sp1';
+import { nspCacheGet, nspCacheSet } from '@/services/nspCache';
 
 // ── Chain / Asset Definitions ──
 
@@ -106,7 +104,6 @@ function getAssetsForChain(chain: NspChain): AssetOption[] {
     if (chain === 'bitcoin') return [
         { id: 'taproot', label: 'Taproot (P2TR)', token: null, icon: chainIcons.bitcoin },
         { id: 'native', label: 'Native SegWit', token: null, icon: chainIcons.bitcoin },
-        { id: 'sp1', label: 'Silent Payment (sp1)', token: null, icon: chainIcons.bitcoin },
     ];
     if (chain === 'zcash') return [
         { id: 'transparent', label: 'Transparent', token: null, icon: chainIcons.zcash },
@@ -136,6 +133,28 @@ const censor = (s: string, prefixLen = 6, suffixLen = 4) => {
 
 // ── Component ──
 
+/**
+ * Build a confirmed payment record from a notification payload. The spending tweak is taken
+ * from the payload (legacy) or recomputed from (sender, n) for deterministic payments; the
+ * deterministic provenance (sender, n) is preserved so the entry is re-derivable from the
+ * nsec alone. Addresses are the stable per-payment identity (unique per n).
+ */
+function buildConfirmedFromPayload(payload: NspPayload, privHex: string): NspConfirmedPayment {
+    const tweak = payload.tweak ?? nspTweakFromSender(privHex, payload.sender!, payload.n!);
+    return {
+        chain: payload.chain,
+        address: payload.address,
+        tweak,
+        asset: payload.asset,
+        token: payload.token,
+        txid: payload.txid,
+        amount: payload.amount,
+        confirmedAt: Math.floor(Date.now() / 1000),
+        sender: payload.sender,
+        n: payload.n,
+    };
+}
+
 export function SilentWallet({ activePubkey }: SilentWalletProps) {
     const { toast } = useFeedback();
 
@@ -153,9 +172,8 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
     const [showReceiveModal, setShowReceiveModal] = useState(false);
     const [showNotifications, setShowNotifications] = useState(false);
     const [showAllNotifications, setShowAllNotifications] = useState(false);
-    const [showConfirm, setShowConfirm] = useState(false);
-    const [showRegenConfirm, setShowRegenConfirm] = useState(false);
-    const [showCloseConfirm, setShowCloseConfirm] = useState(false);
+    const [showSelfAddrs, setShowSelfAddrs] = useState(false);
+    const [generatedIndex, setGeneratedIndex] = useState<number | null>(null);
 
     // Cleanup / pruning state
     const [showCleanup, setShowCleanup] = useState(false);
@@ -170,18 +188,15 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
     const [currentTweak, setCurrentTweak] = useState('');
     const [qrUri, setQrUri] = useState('');
 
-    // ── sp1 (BIP-352) state ──
-    const [sp1Address, setSp1Address] = useState('');
-    const [sp1VerifyTxid, setSp1VerifyTxid] = useState('');
-    const [sp1Verifying, setSp1Verifying] = useState(false);
-    const [sp1VerifyResult, setSp1VerifyResult] = useState<Sp1VerifyResult | null>(null);
-    const [, setSp1NotifSending] = useState(false);
-    const [sp1NotifDone, setSp1NotifDone] = useState(false);
 
     // Notifications state
     const [notifView, setNotifView] = useState<'unconfirmed' | 'confirmed'>('unconfirmed');
     const [unconfirmed, setUnconfirmed] = useState<{ event: any; payload: NspPayload; checking: boolean; verified: boolean }[]>([]);
     const [confirmed, setConfirmed] = useState<(NspConfirmedPayment & { liveBalance?: string })[]>([]);
+    // Which account the in-memory confirmed/sent lists belong to. Guards the cache-mirror effects
+    // so a mid-account-switch render (new activePubkey, still-stale lists) can't write one account's
+    // payments into another account's cache — the source of the cross-account contamination.
+    const nspOwnerRef = useRef<string | null>(null);
     const [nspIndex, setNspIndex] = useState<NspIndex | null>(null);
     const [loadingNotifs, setLoadingNotifs] = useState(false);
     const [showSilentWarning, setShowSilentWarning] = useState(() => {
@@ -207,7 +222,6 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
 
     // ── Sent list (NIP-78 d = nostr-silent-payment-sent-list) ──
     const [sentList, setSentList] = useState<NspSentEntry[]>([]);
-    const [sentListLoaded, setSentListLoaded] = useState(false);
 
     // ── Detail modal renotify flow ──
     const [detailPage, setDetailPage] = useState<'info' | 'renotify'>('info');
@@ -249,6 +263,21 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
             .catch(e => console.error('Failed to get private key:', e));
     }, [activePubkey]);
 
+    // Feed the user's own relays (configured + published NIP-65) into the NSP relay set,
+    // so the user's payment list / sent list / scan don't depend solely on hardcoded relays.
+    useEffect(() => {
+        if (!activePubkey) return;
+        const urls: string[] = [];
+        invoke<{ user_relays?: { url: string }[] }>('get_signer_state')
+            .then(s => { for (const r of s.user_relays ?? []) urls.push(r.url); })
+            .catch(() => { })
+            .finally(() => {
+                fetchRelayList(activePubkey)
+                    .then(nip65 => setNspUserRelays([...urls, ...nip65]))
+                    .catch(() => setNspUserRelays(urls));
+            });
+    }, [activePubkey]);
+
     // Reset asset when chain changes (skip if explicitly set via All Notifications nav)
     useEffect(() => {
         if (skipAssetResetRef.current) {
@@ -259,6 +288,7 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
         }
         setGeneratedAddress('');
         setCurrentTweak('');
+        setGeneratedIndex(null);
         setQrUri('');
     }, [chain]);
 
@@ -274,16 +304,127 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
         setTimeout(() => setCopiedId(null), 2000);
     };
 
-    // ── Generate Address ──
-    const handleGenerate = () => {
-        if (!privateKeyHex) return;
-        const tweak = generateTweak();
-        const addr = deriveTweakedAddress(chain, privateKeyHex, tweak, asset);
-        setCurrentTweak(tweak);
-        setGeneratedAddress(addr);
-        const uri = buildPaymentURI(chain, addr, amount || undefined, currentAsset?.token);
-        setQrUri(uri);
+    // ── Generate Address (in-person / self receive) ──
+    // Self-ECDH (sender = own npub) at the lowest unused index. Deterministic and
+    // recoverable from the nsec alone — no notification needed for these.
+    const handleGenerate = async () => {
+        if (!privateKeyHex || !activePubkey) return;
+        setGenerating(true);
+        try {
+            const { address, tweak, n } = await selectNspIndex(
+                chain as NspChain, activePubkey, privateKeyHex, asset,
+                { evmDefaultIndex: nspIndex?.evm_default_index },
+            );
+            setCurrentTweak(tweak);
+            setGeneratedIndex(n);
+            setGeneratedAddress(address);
+            setQrUri(buildPaymentURI(chain, address, amount || undefined, currentAsset?.token));
+        } catch (e) {
+            console.error('[NSP] generate failed:', e);
+            toast('Could not generate a fresh address (network?). Try again.', 'error');
+        } finally {
+            setGenerating(false);
+        }
     };
+
+    // The receive address is deterministic (self-ECDH at the lowest unused index), so there is
+    // nothing to "roll" — derive and show it as soon as the key is available.
+    useEffect(() => {
+        if (!privateKeyHex || !activePubkey || generatedAddress || generating) return;
+        void handleGenerate();
+    }, [privateKeyHex, activePubkey, chain, asset, generatedAddress]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    // Watch the generated address so an incoming payment surfaces on its own. Nothing is ever lost
+    // without this — the address is re-derivable and Recover walks the indices — it just removes
+    // the need for a notification or a manual scan in the in-person flow.
+    const autoRecordedRef = useRef<string>('');
+    useEffect(() => {
+        if (!generatedAddress || !privateKeyHex || !activePubkey || generatedIndex === null) return;
+        if (autoRecordedRef.current === generatedAddress) return;
+        let cancelled = false;
+        const check = async () => {
+            if (cancelled || autoRecordedRef.current === generatedAddress) return;
+            try {
+                const funded = ['ethereum', 'bnb', 'polygon', 'avalanche', 'base'].includes(chain)
+                    ? (await fetchEvmBalance(chain, generatedAddress)) > 0n
+                    : await nspAddressHasHistory(chain as NspChain, generatedAddress);
+                if (!funded || cancelled) return;
+                autoRecordedRef.current = generatedAddress;
+                const entry: NspConfirmedPayment = {
+                    chain: chain as NspChain, address: generatedAddress, tweak: currentTweak,
+                    asset, token: currentAsset?.token ?? null, txid: '', amount: '0',
+                    confirmedAt: Math.floor(Date.now() / 1000),
+                    sender: nip19.npubEncode(activePubkey), n: generatedIndex,
+                };
+                const prev = confirmed;
+                setConfirmed(c => c.some(p => p.address === entry.address) ? c : [...c, entry]);
+                if (nspIndex) {
+                    const idx = await addConfirmedPayments(privateKeyHex, activePubkey, nspIndex, [entry], prev);
+                    setNspIndex(idx);
+                }
+                toast('Payment received — added to your balance', 'success');
+            } catch { /* transient (network) — retried on the next tick */ }
+        };
+        void check();
+        const timer = setInterval(check, 20_000);
+        return () => { cancelled = true; clearInterval(timer); };
+    }, [generatedAddress, generatedIndex, chain, asset, privateKeyHex, activePubkey, nspIndex, confirmed]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    // Discover payments to PREVIOUS self-addresses — e.g. paid while the app was closed. The
+    // gap-walk silently skips used indices when deriving a fresh address, so without this such a
+    // payment would never be recorded. Quiet: only speaks up when it actually finds something.
+    const scanSelfForMissed = useCallback(async () => {
+        if (!privateKeyHex || !activePubkey) return;
+        try {
+            const results = await recoverNspPayments(
+                chain as NspChain, asset, activePubkey, privateKeyHex,
+                { token: currentAsset?.token ?? null },
+            );
+            const known = new Set(confirmed.map(p => p.address));
+            const found: NspConfirmedPayment[] = results
+                .filter(r => !known.has(r.address))
+                .map(r => ({
+                    chain: r.chain, address: r.address, tweak: r.tweak, asset: r.asset,
+                    token: currentAsset?.token ?? null, txid: '', amount: String(r.balance),
+                    confirmedAt: Math.floor(Date.now() / 1000), sender: r.sender, n: r.n,
+                }));
+            if (found.length === 0) return;
+            const prev = confirmed;
+            setConfirmed(c => [...c, ...found.filter(f => !c.some(p => p.address === f.address))]);
+            if (nspIndex) {
+                const idx = await addConfirmedPayments(privateKeyHex, activePubkey, nspIndex, found, prev);
+                setNspIndex(idx);
+            }
+            toast(`Found ${found.length} payment${found.length !== 1 ? 's' : ''} to your addresses`, 'success');
+        } catch { /* quiet — refresh should never nag */ }
+    }, [privateKeyHex, activePubkey, chain, asset, confirmed, nspIndex, currentAsset]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    // Every self-address up to the current index, derived locally (pure crypto, no network) so the
+    // user can see which indices have been used and confirm nothing was missed.
+    const selfAddresses = useMemo(() => {
+        if (!privateKeyHex || !activePubkey) return [];
+        const mine = confirmed.filter(p => p.chain === chain && p.asset === asset);
+        const byAddr = new Map(mine.map(p => [p.address, p]));
+        const maxN = Math.max(
+            generatedIndex ?? 0,
+            ...mine.map(p => (typeof p.n === 'number' ? p.n : 0)),
+            0,
+        );
+        const rows: { n: number; address: string; received: boolean; balance?: number; current: boolean }[] = [];
+        for (let n = 0; n <= maxN; n++) {
+            try {
+                const { address } = deriveNspSend(chain as NspChain, activePubkey, privateKeyHex, n, asset);
+                const rec = byAddr.get(address);
+                rows.push({
+                    n, address,
+                    received: !!rec,
+                    balance: rec ? nspBalances.get(rec.tweak) : undefined,
+                    current: address === generatedAddress,
+                });
+            } catch { /* skip an underivable index */ }
+        }
+        return rows;
+    }, [privateKeyHex, activePubkey, chain, asset, confirmed, generatedIndex, generatedAddress, nspBalances]);
 
     // ── Helper: resolve token decimals from EVM_CHAINS registry ──
     const getTokenDecimals = (chainId: string, token: string | null): number => {
@@ -341,58 +482,6 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
     const isBitcoin = chain === 'bitcoin';
     const isEvm = ['ethereum', 'bnb', 'polygon', 'avalanche', 'base'].includes(chain);
     const isZcash = chain === 'zcash';
-    const isSp1 = asset === 'sp1';
-
-    // ── Derive sp1 address from nsec/npub ──
-    useEffect(() => {
-        if (!privateKeyHex || !activePubkey) { setSp1Address(''); return; }
-        try {
-            const keys = deriveScanKeys(privateKeyHex, activePubkey);
-            setSp1Address(encodeSp1Address(keys.scanPub, keys.spendPub));
-        } catch (e) {
-            console.error('[SP1] Failed to derive sp1 address:', e);
-            setSp1Address('');
-        }
-    }, [privateKeyHex, activePubkey]);
-
-    // ── sp1 txid verification + self-notification ──
-    const handleSp1Verify = async () => {
-        if (!privateKeyHex || !activePubkey || !sp1VerifyTxid.trim()) return;
-        setSp1Verifying(true);
-        setSp1VerifyResult(null);
-        setSp1NotifDone(false);
-        try {
-            const keys = deriveScanKeys(privateKeyHex, activePubkey);
-            const result = await verifyTxOwnership(keys.scanPriv, keys.spendPub, sp1VerifyTxid.trim());
-            setSp1VerifyResult(result);
-
-            if (result.owned && result.tweak && result.address) {
-                // Self-notify via kind 1604
-                setSp1NotifSending(true);
-                const payload: NspPayload = {
-                    address: result.address,
-                    chain: 'bitcoin',
-                    asset: 'sp1',
-                    token: null,
-                    tweak: result.tweak,
-                    txid: sp1VerifyTxid.trim(),
-                    amount: result.amount?.toString() || '0',
-                    timestamp: Math.floor(Date.now() / 1000),
-                };
-                const { event } = createNspNotification(activePubkey, payload);
-                await publishNspNotification(event, activePubkey);
-                setSp1NotifDone(true);
-                setSp1NotifSending(false);
-                toast('Payment verified & notification sent!', 'success');
-            } else {
-                toast('No matching output found for this transaction', 'info');
-            }
-        } catch (e) {
-            console.error('[SP1] Verification error:', e);
-            toast('Verification failed: ' + String(e), 'error');
-        }
-        setSp1Verifying(false);
-    };
 
     // ── Fetch aggregated tx history for all confirmed addresses ──
     const fetchNspTxHistory = useCallback(async () => {
@@ -470,22 +559,59 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
     // ── Load Notifications ──
     useEffect(() => {
         if (!activePubkey || !privateKeyHex) return;
+        const owner = activePubkey;
+        // Entering a new account context: clear the previous account's lists and mark ownership as
+        // "loading" (null) so the cache-mirror effects can't persist stale data under this key.
+        nspOwnerRef.current = null;
+        setConfirmed([]);
+        setUnconfirmed([]);
+        setNspBalances(new Map());
         setLoadingNotifs(true);
+        let cancelled = false;
         let subRef: { stop: () => void } | null = null;
 
-        (async () => {
-            // 1. Load index + all pages
-            const index = await loadNspIndex(privateKeyHex, activePubkey);
-            setNspIndex(index);
+        // A payment belongs to this account only if this key can derive its spending key (the tweak
+        // must resolve to the stored address). Drops cross-account contamination and orphaned records.
+        const canDerive = (p: NspConfirmedPayment) => {
+            try { getSigningKey(p.chain, privateKeyHex, p.tweak, p.address, p.asset); return true; }
+            catch { return false; }
+        };
 
-            const payments = await loadAllNspPages(privateKeyHex, activePubkey, index.last_page);
-            const unique = payments.filter((p, i, arr) => arr.findIndex(x => x.tweak === p.tweak) === i);
-            setConfirmed(unique);
+        (async () => {
+            // 0. Seed from local cache instantly — survives relay pruning, loads with no network.
+            const cachedConfirmed = ((await nspCacheGet<NspConfirmedPayment[]>(owner, 'confirmed')) ?? []).filter(canDerive);
+            if (cancelled) return;
+            if (cachedConfirmed.length) setConfirmed(cachedConfirmed);
+
+            // 1. Load index + all pages from relays
+            const index = await loadNspIndex(privateKeyHex, owner);
+            if (cancelled) return;
+            setNspIndex(index);
+            const payments = await loadAllNspPages(privateKeyHex, owner, index.last_page);
+            if (cancelled) return;
+            const relayConfirmed = payments.filter((p, i, arr) => arr.findIndex(x => x.address === p.address) === i);
+
+            // Merge cache + relay (cache fills gaps the relays pruned); keep only derivable entries,
+            // then claim ownership so the cache-mirror effects may persist this account's data.
+            const mergedMap = new Map<string, NspConfirmedPayment>();
+            for (const p of [...cachedConfirmed, ...relayConfirmed]) mergedMap.set(p.address, p);
+            const merged = [...mergedMap.values()].filter(canDerive);
+            nspOwnerRef.current = owner;
+            setConfirmed(merged);
+            nspCacheSet(owner, 'confirmed', merged);
             setLoadingNotifs(false);
 
-            // Purge any unconfirmed items that are already confirmed
-            const confirmedTweaks = new Set(unique.map(p => p.tweak));
-            setUnconfirmed(prev => prev.filter(u => !confirmedTweaks.has(u.payload.tweak)));
+            // Rebroadcast any confirmed entries the relays dropped but the cache retained.
+            const relayAddrs = new Set(relayConfirmed.map(p => p.address));
+            const cacheOnly = cachedConfirmed.filter(c => !relayAddrs.has(c.address));
+            if (cacheOnly.length > 0) {
+                addConfirmedPayments(privateKeyHex, activePubkey, index, cacheOnly, relayConfirmed)
+                    .then(setNspIndex).catch(() => { });
+            }
+
+            // Purge any unconfirmed items that are already confirmed (keyed by address)
+            const confirmedAddrs = new Set(merged.map(p => p.address));
+            setUnconfirmed(prev => prev.filter(u => !confirmedAddrs.has(u.payload.address)));
 
             // 2. Catch-up scan: fetch notifications since last_scanned
             const newCursor = await catchUpScan(activePubkey, index.last_scanned, (batch) => {
@@ -493,7 +619,7 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
                     const payload = parseNspNotification(event, privateKeyHex);
                     if (!payload) continue;
                     setUnconfirmed(prev => {
-                        if (prev.some(u => u.payload.tweak === payload.tweak)) return prev;
+                        if (prev.some(u => u.payload.address === payload.address)) return prev;
                         return [...prev, { event, payload, checking: false, verified: false }];
                     });
                 }
@@ -512,12 +638,12 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
                 const payload = parseNspNotification(event, privateKeyHex);
                 if (!payload) return;
                 setUnconfirmed(prev => {
-                    if (prev.some(u => u.payload.tweak === payload.tweak)) return prev;
+                    if (prev.some(u => u.payload.address === payload.address)) return prev;
                     return [...prev, { event, payload, checking: false, verified: false }];
                 });
                 setConfirmed(prevConfirmed => {
-                    if (prevConfirmed.some(p => p.tweak === payload.tweak)) {
-                        setUnconfirmed(prev => prev.filter(u => u.payload.tweak !== payload.tweak));
+                    if (prevConfirmed.some(p => p.address === payload.address)) {
+                        setUnconfirmed(prev => prev.filter(u => u.payload.address !== payload.address));
                     }
                     return prevConfirmed;
                 });
@@ -531,55 +657,61 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
             }, now);
         })();
 
-        // Load sent list from NIP-78
-        if (!sentListLoaded) {
-            loadSentList(privateKeyHex, activePubkey).then(({ entries }) => {
-                setSentList(entries);
-                setSentListLoaded(true);
-            });
-        }
+        // Load sent list per account: cache first, then merge with relay; rebroadcast anything lost.
+        setSentList([]);
+        (async () => {
+            const cachedSent = (await nspCacheGet<NspSentEntry[]>(owner, 'sent')) ?? [];
+            if (cancelled) return;
+            if (cachedSent.length) setSentList(cachedSent);
+            const { entries: relaySent } = await loadSentList(privateKeyHex, owner);
+            if (cancelled) return;
+            const m = new Map<string, NspSentEntry>();
+            for (const e of [...cachedSent, ...relaySent]) m.set(e.txid, e);
+            const mergedSent = [...m.values()];
+            setSentList(mergedSent);
+            nspCacheSet(owner, 'sent', mergedSent);
+            const relayTxids = new Set(relaySent.map(e => e.txid));
+            if (cachedSent.some(e => !relayTxids.has(e.txid))) {
+                saveSentList(privateKeyHex, owner, mergedSent).catch(() => { });
+            }
+        })();
 
-        return () => { if (subRef) subRef.stop(); };
+        return () => { cancelled = true; if (subRef) subRef.stop(); };
     }, [activePubkey, privateKeyHex]);
+
+    // Mirror confirmed/sent state to the local cache on every change (recovery anchors). The owner
+    // guard prevents a mid-switch render from writing one account's data under another's key.
+    useEffect(() => { if (activePubkey && confirmed.length && nspOwnerRef.current === activePubkey) nspCacheSet(activePubkey, 'confirmed', confirmed); }, [confirmed, activePubkey]);
+    useEffect(() => { if (activePubkey && sentList.length && nspOwnerRef.current === activePubkey) nspCacheSet(activePubkey, 'sent', sentList); }, [sentList, activePubkey]);
 
     // ── Auto-scan unconfirmed: verify ownership → confirm permanently ──
     useEffect(() => {
         if (!privateKeyHex || unconfirmed.length === 0) return;
 
         const newlyConfirmed: NspConfirmedPayment[] = [];
-        const removedTweaks: string[] = [];
+        const removedAddrs: string[] = [];
 
         for (const item of unconfirmed) {
             if (item.checking || item.verified) continue;
 
-            // Verify ownership (tweaked key derives the expected address)
-            const owned = verifyPaymentOwnership(privateKeyHex, item.payload.tweak, item.payload.address, item.payload.chain, item.payload.asset);
+            // Verify ownership — handles deterministic (sender+n) and legacy (tweak) payloads.
+            const owned = verifyNspPayloadOwnership(privateKeyHex, item.payload);
             if (!owned) {
-                console.warn(`[NSP] ✗ Ownership verification FAILED — removing notification:`,
-                    `chain=${item.payload.chain} asset=${item.payload.asset} address=${item.payload.address} tweak=${item.payload.tweak.slice(0, 16)}...`);
-                removedTweaks.push(item.payload.tweak);
+                console.warn(`[NSP] ✗ Ownership verification FAILED — removing notification: chain=${item.payload.chain} asset=${item.payload.asset} address=${item.payload.address}`);
+                removedAddrs.push(item.payload.address);
                 continue;
             }
 
             // Ownership verified → confirm permanently (regardless of current balance)
-            newlyConfirmed.push({
-                chain: item.payload.chain,
-                address: item.payload.address,
-                tweak: item.payload.tweak,
-                asset: item.payload.asset,
-                token: item.payload.token,
-                txid: item.payload.txid,
-                amount: item.payload.amount,
-                confirmedAt: Math.floor(Date.now() / 1000),
-            });
-            removedTweaks.push(item.payload.tweak);
+            newlyConfirmed.push(buildConfirmedFromPayload(item.payload, privateKeyHex));
+            removedAddrs.push(item.payload.address);
         }
 
-        if (newlyConfirmed.length === 0 && removedTweaks.length === 0) return;
+        if (newlyConfirmed.length === 0 && removedAddrs.length === 0) return;
 
         // Remove processed items from unconfirmed
-        if (removedTweaks.length > 0) {
-            setUnconfirmed(prev => prev.filter(u => !removedTweaks.includes(u.payload.tweak)));
+        if (removedAddrs.length > 0) {
+            setUnconfirmed(prev => prev.filter(u => !removedAddrs.includes(u.payload.address)));
         }
 
         // Batch-add all newly confirmed (using functional update to avoid stale closure)
@@ -600,23 +732,18 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
         }
     }, [unconfirmed, privateKeyHex]);
 
-    // ── Manual rescan ──
-    const rescanItem = async (tweak: string) => {
-        const item = unconfirmed.find(u => u.payload.tweak === tweak);
+    // ── Manual rescan (keyed by address) ──
+    const rescanItem = async (address: string) => {
+        const item = unconfirmed.find(u => u.payload.address === address);
         if (!item) return;
         setUnconfirmed(prev => prev.map(u =>
-            u.payload.tweak === tweak ? { ...u, checking: true } : u
+            u.payload.address === address ? { ...u, checking: true } : u
         ));
-        const owned = verifyPaymentOwnership(privateKeyHex, item.payload.tweak, item.payload.address, item.payload.chain, item.payload.asset);
+        const owned = verifyNspPayloadOwnership(privateKeyHex, item.payload);
         if (owned) {
-            const payment: NspConfirmedPayment = {
-                chain: item.payload.chain, address: item.payload.address,
-                tweak: item.payload.tweak, asset: item.payload.asset,
-                token: item.payload.token, txid: item.payload.txid,
-                amount: item.payload.amount, confirmedAt: Math.floor(Date.now() / 1000),
-            };
+            const payment = buildConfirmedFromPayload(item.payload, privateKeyHex);
             setConfirmed(prev => {
-                if (prev.some(p => p.tweak === payment.tweak)) return prev;
+                if (prev.some(p => p.address === payment.address)) return prev;
                 const merged = [...prev, payment];
                 if (activePubkey && nspIndex) {
                     addConfirmedPayments(privateKeyHex, activePubkey, nspIndex, [payment], prev).then(updatedIdx => {
@@ -625,13 +752,57 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
                 }
                 return merged;
             });
-            setUnconfirmed(prev => prev.filter(u => u.payload.tweak !== tweak));
+            setUnconfirmed(prev => prev.filter(u => u.payload.address !== address));
             toast('Payment verified & confirmed!', 'success');
         } else {
             setUnconfirmed(prev => prev.map(u =>
-                u.payload.tweak === tweak ? { ...u, checking: false } : u
+                u.payload.address === address ? { ...u, checking: false } : u
             ));
             toast('Could not verify ownership', 'info');
+        }
+    };
+
+    // ── Deep recovery: walk self + known senders on the current chain to find payments
+    //    whose notification/NIP-78 record was lost. Funded addresses are merged into storage. ──
+    const handleRecover = async () => {
+        if (!privateKeyHex || !activePubkey || recovering) return;
+        setRecovering(true);
+        try {
+            const effectiveAsset = isBitcoin ? (btcSendMode === 'segwit' ? 'native' : 'taproot') : asset;
+            // Senders to walk: self (in-person) + everyone who has paid us before.
+            const senders = new Set<string>([activePubkey]);
+            for (const p of confirmed) {
+                if (!p.sender) continue;
+                try { senders.add(nip19.decode(p.sender).data as string); } catch { /* skip */ }
+            }
+            const found: NspConfirmedPayment[] = [];
+            const existingAddrs = new Set(confirmed.map(p => p.address));
+            for (const senderHex of senders) {
+                const results = await recoverNspPayments(chain as NspChain, effectiveAsset, senderHex, privateKeyHex, { token: currentAsset?.token ?? null });
+                for (const r of results) {
+                    if (existingAddrs.has(r.address)) continue;
+                    existingAddrs.add(r.address);
+                    found.push({
+                        chain: r.chain, address: r.address, tweak: r.tweak, asset: r.asset,
+                        token: currentAsset?.token ?? null, txid: '', amount: String(r.balance),
+                        confirmedAt: Math.floor(Date.now() / 1000), sender: r.sender, n: r.n,
+                    });
+                }
+            }
+            if (found.length > 0 && nspIndex) {
+                const prev = confirmed;
+                setConfirmed(c => [...c, ...found]);
+                const idx = await addConfirmedPayments(privateKeyHex, activePubkey, nspIndex, found, prev);
+                setNspIndex(idx);
+                toast(`Recovered ${found.length} payment${found.length !== 1 ? 's' : ''}`, 'success');
+            } else {
+                toast('No additional payments found', 'info');
+            }
+        } catch (e) {
+            console.error('[NSP] recovery failed:', e);
+            toast('Recovery failed — try again', 'error');
+        } finally {
+            setRecovering(false);
         }
     };
 
@@ -758,7 +929,7 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
     const [nspSendLoading, setNspSendLoading] = useState(false);
 
     // Bitcoin/Zcash: aggregated UTXOs with tagged keys
-    const [taggedUtxos, setTaggedUtxos] = useState<{ utxo: UTXO; privateKeyHex: string; rawTaproot?: boolean }[]>([]);
+    const [taggedUtxos, setTaggedUtxos] = useState<{ utxo: UTXO; privateKeyHex: string; address: string }[]>([]);
     const [aggregatedBalance, setAggregatedBalance] = useState(0);
     const [selectedFeeRate, setSelectedFeeRate] = useState(2);
     const [feeRates, setFeeRates] = useState<{ fastestFee: number; hourFee: number; economyFee: number } | null>(null);
@@ -777,9 +948,13 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
     const [nspRecipientPubkey, setNspRecipientPubkey] = useState<string | null>(null);
     const [nspRecipientName, setNspRecipientName] = useState('');
     const [nspRecipientTweak, setNspRecipientTweak] = useState('');
+    const [nspRecipientN, setNspRecipientN] = useState<number | null>(null);
+    const [nspDeriving, setNspDeriving] = useState(false);
+    const [generating, setGenerating] = useState(false);
+    const [recovering, setRecovering] = useState(false);
     const [nspDerivedAddress, setNspDerivedAddress] = useState('');
     // Bitcoin send mode toggle (Taproot, SegWit, SP) — only when Bitcoin + npub recipient
-    const [btcSendMode, setBtcSendMode] = useState<'taproot' | 'segwit' | 'sp'>('taproot');
+    const [btcSendMode, setBtcSendMode] = useState<'taproot' | 'segwit'>('taproot');
     // Notification relay progress (post-send)
     const [nspNotifying, setNspNotifying] = useState(false);
     const [nspNotifyResults, setNspNotifyResults] = useState<RelayPublishResult[]>([]);
@@ -800,6 +975,7 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
         setNspRecipientPubkey(null);
         setNspRecipientName('');
         setNspRecipientTweak('');
+        setNspRecipientN(null);
         setNspDerivedAddress('');
         setBtcSendMode('taproot');
         setNspNotifying(false);
@@ -812,19 +988,44 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
                 const sources = preselectedPayment
                     ? [preselectedPayment]
                     : filteredConfirmed.filter(p => (nspBalances.get(p.tweak) ?? 0) > 0);
-                const allTagged: { utxo: UTXO; privateKeyHex: string; rawTaproot?: boolean }[] = [];
+                const allTagged: { utxo: UTXO; privateKeyHex: string; address: string }[] = [];
                 let total = 0;
+                const skipped: string[] = [];
                 for (const p of sources) {
-                    const tweakedKey = getSigningKey(chain, privateKeyHex, p.tweak, p.address, asset);
-                    const utxos = await fetchUTXOs(p.address);
-                    const isSp1Input = asset === 'sp1';
+                    // Isolate each address: a UTXO-fetch failure or an un-derivable stored tweak
+                    // (e.g. an orphaned record from an older format) must NOT abort the whole send.
+                    let utxos: UTXO[];
+                    try {
+                        utxos = await fetchUTXOs(p.address);
+                    } catch (e) {
+                        console.warn('[NSP Send] UTXO fetch failed for', p.address, e);
+                        skipped.push(p.address);
+                        continue;
+                    }
+                    if (utxos.length === 0) continue;
+                    let tweakedKey: string;
+                    try {
+                        tweakedKey = getSigningKey(chain, privateKeyHex, p.tweak, p.address, asset);
+                    } catch (e) {
+                        console.warn('[NSP Send] cannot derive signing key for', p.address, '— skipping:', e);
+                        skipped.push(p.address);
+                        continue;
+                    }
                     for (const u of utxos) {
-                        allTagged.push({ utxo: u, privateKeyHex: tweakedKey, rawTaproot: isSp1Input });
+                        allTagged.push({ utxo: u, privateKeyHex: tweakedKey, address: p.address });
                         total += u.value;
                     }
                 }
                 setTaggedUtxos(allTagged);
                 setAggregatedBalance(total);
+                if (skipped.length > 0) {
+                    toast(
+                        allTagged.length === 0
+                            ? `Couldn't prepare your funded address(es) for spending — see console. They may be from an older format.`
+                            : `${skipped.length} address(es) couldn't be prepared and were skipped; spending the rest.`,
+                        allTagged.length === 0 ? 'error' : 'info',
+                    );
+                }
                 const rates = await getFeeRates();
                 setFeeRates(rates);
                 setSelectedFeeRate(rates.hourFee);
@@ -888,10 +1089,6 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
         if (!addr.trim()) return null; // empty = no error yet
         // npub is valid — triggers NSP derivation
         if (addr.startsWith('npub1')) return null;
-        // sp1 address — BIP-352 silent payment
-        if (addr.startsWith('sp1')) {
-            try { decodeSp1Address(addr); return null; } catch { return 'Invalid sp1 address'; }
-        }
         if (isBitcoin) {
             // Bech32 (bc1q / bc1p), legacy (1...), P2SH (3...)
             if (/^bc1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{25,87}$/i.test(addr)) return null;
@@ -908,7 +1105,6 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
         }
         return null;
     };
-    const isSp1Recipient = sendTo.startsWith('sp1');
     const recipientError = validateRecipientAddress(sendTo);
     const isValidRecipient = sendTo.trim().length > 0 && !recipientError;
 
@@ -917,29 +1113,40 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
         openSendModal(payment);
     };
 
+    // Deterministically derive the NSP one-time address for a recipient: the shared-secret
+    // tweak at the lowest unused index n (gap-walk for UTXO, fixed for EVM). Async (network).
+    const deriveNspForRecipient = useCallback(async (pubkeyHex: string, effectiveAsset: string) => {
+        if (!privateKeyHex) return;
+        setNspRecipientPubkey(pubkeyHex);
+        setNspDeriving(true);
+        setNspDerivedAddress('');
+        try {
+            const { n, address, tweak } = await selectNspIndex(
+                chain as NspChain, pubkeyHex, privateKeyHex, effectiveAsset,
+                { evmDefaultIndex: nspIndex?.evm_default_index },
+            );
+            setNspRecipientN(n);
+            setNspRecipientTweak(tweak);
+            setNspDerivedAddress(address);
+        } catch (e) {
+            console.error('[NSP] address derivation failed:', e);
+            setNspRecipientN(null);
+            setNspDerivedAddress('');
+            toast('Could not derive a fresh address (network?). Try again.', 'error');
+        } finally {
+            setNspDeriving(false);
+        }
+    }, [privateKeyHex, chain, asset, nspIndex]);
+
     // Handle follows selection — derive NSP address from recipient's pubkey
     const handleFollowsSelect = (npub: string) => {
         try {
             const decoded = nip19.decode(npub);
             if (decoded.type !== 'npub') throw new Error('Invalid npub');
             const pubkeyHex = decoded.data as string;
-            if (isBitcoin && btcSendMode === 'sp') {
-                // SP mode: derive the recipient's static sp1 address
-                const { scanPub, spendPub } = deriveScanPubKeys(pubkeyHex);
-                const sp1Addr = encodeSp1Address(scanPub, spendPub);
-                setNspRecipientPubkey(pubkeyHex);
-                setNspRecipientTweak('');  // tweak is computed at send time from outpoints
-                setNspDerivedAddress(sp1Addr);
-                setSendTo(npub);
-            } else {
-                const effectiveAsset = isBitcoin ? (btcSendMode === 'segwit' ? 'native' : 'taproot') : asset;
-                const tweak = generateTweak();
-                const derivedAddr = deriveTweakedAddressFromPubkey(chain, pubkeyHex, tweak, effectiveAsset);
-                setNspRecipientPubkey(pubkeyHex);
-                setNspRecipientTweak(tweak);
-                setNspDerivedAddress(derivedAddr);
-                setSendTo(npub);
-            }
+            setSendTo(npub);
+            const effectiveAsset = isBitcoin ? (btcSendMode === 'segwit' ? 'native' : 'taproot') : asset;
+            void deriveNspForRecipient(pubkeyHex, effectiveAsset);
         } catch (e) {
             console.error('[NSP] Failed to derive address from npub:', e);
             toast('Failed to derive NSP address for this contact', 'error');
@@ -952,39 +1159,18 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
             const decoded = nip19.decode(npub);
             if (decoded.type !== 'npub') return;
             const pubkeyHex = decoded.data as string;
-            // Don't re-derive if it's the same recipient
-            if (pubkeyHex === nspRecipientPubkey) return;
-            if (isBitcoin && btcSendMode === 'sp') {
-                const { scanPub, spendPub } = deriveScanPubKeys(pubkeyHex);
-                const sp1Addr = encodeSp1Address(scanPub, spendPub);
-                setNspRecipientPubkey(pubkeyHex);
-                setNspRecipientName('');
-                setNspRecipientTweak('');
-                setNspDerivedAddress(sp1Addr);
-            } else {
-                const effectiveAsset = isBitcoin ? (btcSendMode === 'segwit' ? 'native' : 'taproot') : asset;
-                const tweak = generateTweak();
-                const derivedAddr = deriveTweakedAddressFromPubkey(chain, pubkeyHex, tweak, effectiveAsset);
-                setNspRecipientPubkey(pubkeyHex);
-                setNspRecipientName('');
-                setNspRecipientTweak(tweak);
-                setNspDerivedAddress(derivedAddr);
-            }
+            if (pubkeyHex === nspRecipientPubkey) return; // don't re-derive same recipient
+            setNspRecipientName('');
+            const effectiveAsset = isBitcoin ? (btcSendMode === 'segwit' ? 'native' : 'taproot') : asset;
+            void deriveNspForRecipient(pubkeyHex, effectiveAsset);
         } catch { /* not a valid npub yet, ignore */ }
     };
 
-    // Regenerate a fresh NSP address for the same recipient
+    // Re-derive the NSP address for the same recipient (re-runs the gap-walk).
     const regenerateNspAddress = () => {
         if (!nspRecipientPubkey) return;
-        if (isBitcoin && btcSendMode === 'sp') {
-            // SP mode: static address, no regeneration needed
-            return;
-        }
         const effectiveAsset = isBitcoin ? (btcSendMode === 'segwit' ? 'native' : 'taproot') : asset;
-        const tweak = generateTweak();
-        const derivedAddr = deriveTweakedAddressFromPubkey(chain, nspRecipientPubkey, tweak, effectiveAsset);
-        setNspRecipientTweak(tweak);
-        setNspDerivedAddress(derivedAddr);
+        void deriveNspForRecipient(nspRecipientPubkey, effectiveAsset);
     };
 
     // ── Cleanup / Pruning ──
@@ -1046,34 +1232,19 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
     };
 
     const handleNspSend = async () => {
+        // Safety: if an NSP recipient is selected, the one-time address must have finished
+        // deriving — never fall back to broadcasting to the raw npub string.
+        if (nspRecipientPubkey && !nspDerivedAddress) {
+            toast(nspDeriving ? 'Still deriving the address — try again in a moment' : 'No address derived for this recipient', 'error');
+            return;
+        }
         // When sending to an NSP recipient (npub), use the derived address
-        let effectiveRecipient = nspDerivedAddress || sendTo.trim();
-        let sp1TweakHex = '';
+        const effectiveRecipient = nspDerivedAddress || sendTo.trim();
         if (!privateKeyHex || !effectiveRecipient) return;
         setSending(true);
         setSendError('');
 
         try {
-            // sp1 destination: derive BIP-352 ECDH output address
-            if ((isSp1Recipient || (isBitcoin && btcSendMode === 'sp' && nspRecipientPubkey)) && isBitcoin) {
-                let scanPub: Buffer, spendPub: Buffer;
-                if (isSp1Recipient) {
-                    ({ scanPub, spendPub } = decodeSp1Address(sendTo.trim()));
-                } else {
-                    ({ scanPub, spendPub } = deriveScanPubKeys(nspRecipientPubkey!));
-                }
-                // We need the outpoints from selected UTXOs to compute the ECDH
-                if (taggedUtxos.length === 0) throw new Error('No UTXOs available for sp1 derivation');
-                // Use the first key's private key as the signing key (Taproot key-path spend)
-                const signingKey = taggedUtxos[0].privateKeyHex;
-                const outpoints = taggedUtxos.map(t => ({
-                    txid: t.utxo.txid, vout: t.utxo.vout,
-                }));
-                const sp1Out = deriveOutputForSp1(signingKey, scanPub, spendPub, outpoints);
-                effectiveRecipient = sp1Out.outputAddress;
-                sp1TweakHex = sp1Out.tweak;
-            }
-
             let resultTxid = '';
 
 
@@ -1081,9 +1252,16 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
                 const amountSats = parseInt(sendAmount);
                 if (isNaN(amountSats) || amountSats <= 0) throw new Error('Invalid amount');
                 if (amountSats < 546) throw new Error(`Amount too small — Bitcoin dust limit is 546 sats (tried ${amountSats})`);
-                const { txHex, fee } = await createMultiKeyTaprootTransaction(
-                    taggedUtxos, effectiveRecipient, amountSats, selectedFeeRate
-                );
+                // Native-SegWit payments sit on P2WPKH scripts — the Taproot builder would frame
+                // them as P2TR inputs and produce an invalid transaction.
+                const { txHex, fee } = asset === 'native'
+                    ? await createMultiKeySegwitTransaction(
+                        taggedUtxos.map(t => ({ utxo: t.utxo, privateKeyHex: t.privateKeyHex, address: t.address })),
+                        effectiveRecipient, amountSats, selectedFeeRate
+                    )
+                    : await createMultiKeyTaprootTransaction(
+                        taggedUtxos, effectiveRecipient, amountSats, selectedFeeRate
+                    );
                 resultTxid = await broadcastTransaction(txHex);
                 setSendSuccess(resultTxid);
                 toast(`Sent! Fee: ${fee} sats`, 'success');
@@ -1124,82 +1302,48 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
             }
 
             // ── Auto-notify if sent via "To Following" ──
-            const isSp1NpubSend = isBitcoin && btcSendMode === 'sp' && nspRecipientPubkey && sp1TweakHex;
-            const isNspSend = nspRecipientPubkey && nspDerivedAddress && nspRecipientTweak;
-            if ((isNspSend || isSp1NpubSend) && resultTxid) {
-                const notifAddress = isSp1NpubSend ? effectiveRecipient : nspDerivedAddress;
-                const notifTweak = isSp1NpubSend ? sp1TweakHex : nspRecipientTweak;
-                const notifAsset = isSp1NpubSend ? 'sp1' : asset;
+            const isNspSend = nspRecipientPubkey && nspDerivedAddress && nspRecipientN !== null;
+            if (isNspSend && resultTxid && privateKeyHex) {
+                const notifAddress = nspDerivedAddress;
+                // Must describe the address we ACTUALLY derived (driven by btcSendMode), not the
+                // selected tab — otherwise the recipient re-derives the wrong script type, the
+                // ownership check fails, and the notification is discarded as not-theirs.
+                const notifAsset = isBitcoin ? (btcSendMode === 'segwit' ? 'native' : 'taproot') : asset;
+                const ts = Math.floor(Date.now() / 1000);
                 setNspNotifying(true);
                 setNspNotifyResults([]);
                 setNspNotifyDone(false);
                 try {
-                    const payload: NspPayload = {
-                        address: notifAddress,
-                        chain: chain as NspChain,
-                        asset: notifAsset,
-                        token: currentAsset?.token || null,
-                        tweak: notifTweak,
-                        txid: resultTxid,
-                        amount: sendAmount || '0',
-                        timestamp: Math.floor(Date.now() / 1000),
+                    const common = {
+                        txid: resultTxid, chain: chain as NspChain, asset: notifAsset,
+                        token: currentAsset?.token || null, amount: sendAmount || '0',
+                        address: notifAddress, recipientPubkey: nspRecipientPubkey!, timestamp: ts,
                     };
-                    const { event, ephemeralSkHex } = createNspNotification(nspRecipientPubkey!, payload);
-                    await publishNspNotification(
-                        event,
-                        nspRecipientPubkey!,
-                        (result) => setNspNotifyResults(prev => [...prev, result]),
-                    );
+
+                    // Deterministic NSP: notification key + sender/n payload; sender is stateless
+                    const res = createDeterministicNspNotification(privateKeyHex, nspRecipientPubkey!, nspRecipientN!, {
+                        address: notifAddress, chain: chain as NspChain, asset: notifAsset, token: currentAsset?.token || null, txid: resultTxid, amount: sendAmount || '0',
+                    });
+                    markNspAddressPending(notifAddress); // reserve this index until it hits the mempool
+                    const sentEntry: NspSentEntry = { ...common, tweak: nspRecipientTweak, n: nspRecipientN! };
+
+                    // Persist the sent record LOCALLY first — before the (failable) network
+                    // notify — so an app crash right after broadcast can't strand the funds.
+                    const updatedList = [...sentList, sentEntry];
+                    setSentList(updatedList);
+                    if (activePubkey) await nspCacheSet(activePubkey, 'sent', updatedList);
+
+                    await publishNspNotification(res.event, nspRecipientPubkey!, (result) => setNspNotifyResults(prev => [...prev, result]));
                     setNspNotifyDone(true);
 
-                    // Save to sent list (background, non-blocking)
-                    const newEntry: NspSentEntry = {
-                        txid: resultTxid,
-                        chain: chain as NspChain,
-                        asset: notifAsset,
-                        token: currentAsset?.token || null,
-                        amount: sendAmount || '0',
-                        address: notifAddress,
-                        tweak: notifTweak,
-                        recipientPubkey: nspRecipientPubkey!,
-                        senderNsec: ephemeralSkHex,
-                        timestamp: Math.floor(Date.now() / 1000),
-                    };
-                    const updatedList = [...sentList, newEntry];
-                    setSentList(updatedList);
-                    if (privateKeyHex && activePubkey) {
-                        saveSentList(privateKeyHex, activePubkey, updatedList).catch(e =>
-                            console.error('[NSP] Failed to save sent list:', e)
-                        );
+                    if (activePubkey) {
+                        saveSentList(privateKeyHex, activePubkey, updatedList).catch(e => console.error('[NSP] Failed to save sent list:', e));
                     }
                 } catch (e) {
                     console.error('[NSP] Notification failed:', e);
                     toast('Transaction sent but notification failed — you can retry manually', 'info');
                 } finally {
                     setNspNotifying(false);
-                }
-            }
-
-            // ── sp1 destination: save to sent list (no notification) ──
-            if (isSp1Recipient && sp1TweakHex && resultTxid) {
-                const newEntry: NspSentEntry = {
-                    txid: resultTxid,
-                    chain: chain as NspChain,
-                    asset: 'sp1',
-                    token: null,
-                    amount: sendAmount || '0',
-                    address: effectiveRecipient,
-                    tweak: sp1TweakHex,
-                    recipientPubkey: '', // unknown from sp1 address
-                    senderNsec: '',      // no ephemeral key needed
-                    timestamp: Math.floor(Date.now() / 1000),
-                };
-                const updatedList = [...sentList, newEntry];
-                setSentList(updatedList);
-                if (privateKeyHex && activePubkey) {
-                    saveSentList(privateKeyHex, activePubkey, updatedList).catch(e =>
-                        console.error('[SP1] Failed to save sent list:', e)
-                    );
                 }
             }
         } catch (e) {
@@ -1246,6 +1390,17 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
                 </button>
             )}
 
+            {/* ═══ DEEP RECOVERY ═══ */}
+            <button
+                onClick={handleRecover}
+                disabled={recovering || !privateKeyHex}
+                title="Scan the chain for received payments whose notification was lost (self + known senders)"
+                className="flex items-center justify-center gap-2 w-full py-2 px-3 rounded-xl bg-secondary/40 border border-border text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors cursor-pointer disabled:opacity-50 shrink-0"
+            >
+                {recovering ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                {recovering ? 'Recovering…' : 'Recover lost payments'}
+            </button>
+
             {/* ═══ BALANCE CARD ═══ */}
             <Card className="relative overflow-hidden bg-gradient-to-br from-card via-card to-secondary/20 shrink-0">
                 <CardContent className="pt-5 pb-4 px-5 space-y-4">
@@ -1275,7 +1430,7 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
                                     <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-primary" />
                                 )}
                             </button>
-                            <button onClick={() => { fetchAllNspBalances(); fetchNspTxHistory(); }} disabled={balanceLoading}
+                            <button onClick={() => { fetchAllNspBalances(); fetchNspTxHistory(); void scanSelfForMissed(); }} disabled={balanceLoading}
                                 className="p-1.5 rounded-lg hover:bg-accent transition-colors cursor-pointer text-muted-foreground hover:text-foreground">
                                 <RefreshCw className={cn("w-4 h-4", balanceLoading && "animate-spin")} />
                             </button>
@@ -1536,15 +1691,10 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
                         <Card className="w-[380px] shadow-2xl">
                             <CardHeader className="flex-row items-center justify-between">
                                 <CardTitle className="text-base flex items-center gap-2">
-                                    <ArrowDownLeft className="w-4 h-4" /> {isSp1 ? 'Receive via Silent Payment' : 'Receive Silent Payment'}
+                                    <ArrowDownLeft className="w-4 h-4" /> Receive Silent Payment
                                 </CardTitle>
                                 <button onClick={() => {
-                                    // Guard close when an NSP address has been generated (funds could be lost)
-                                    if (!isSp1 && generatedAddress) {
-                                        setShowCloseConfirm(true);
-                                    } else {
-                                        setShowReceiveModal(false); setSp1VerifyTxid(''); setSp1VerifyResult(null); setSp1NotifDone(false);
-                                    }
+                                    setShowReceiveModal(false);
                                 }} className="text-muted-foreground hover:text-foreground cursor-pointer">
                                     <X className="w-4 h-4" />
                                 </button>
@@ -1558,102 +1708,7 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
                                     <span>{currentAsset?.label}</span>
                                 </div>
 
-                                {isSp1 ? (
-                                    /* ── sp1 Receive: static address + txid verification ── */
-                                    <>
-                                        {/* Static QR */}
-                                        <div className="flex flex-col items-center gap-3">
-                                            {sp1Address ? (
-                                                <div className="bg-white p-3 rounded-xl">
-                                                    <QRCodeSVG value={sp1Address} size={180} />
-                                                </div>
-                                            ) : (
-                                                <div className="w-[204px] h-[204px] rounded-xl border-2 border-dashed border-border flex items-center justify-center">
-                                                    <Loader2 className="w-6 h-6 text-muted-foreground/30 animate-spin" />
-                                                </div>
-                                            )}
-                                        </div>
-
-                                        {/* sp1 Address */}
-                                        <div className="space-y-1.5">
-                                            <label className="text-xs text-muted-foreground font-medium">Your Silent Payment Address</label>
-                                            <div className="flex items-center gap-1.5">
-                                                <Input value={censor(sp1Address, 8, 6)} readOnly className="text-xs font-mono" />
-                                                {sp1Address && (
-                                                    <Button size="sm" variant="outline" onClick={() => copyText(sp1Address, 'sp1-addr')}>
-                                                        {copiedId === 'sp1-addr' ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                                                    </Button>
-                                                )}
-                                            </div>
-                                        </div>
-
-                                        {/* Divider */}
-                                        <div className="flex items-center gap-2 py-1">
-                                            <div className="flex-1 border-t border-border" />
-                                            <span className="text-[10px] text-muted-foreground font-medium uppercase tracking-wider">Received a payment?</span>
-                                            <div className="flex-1 border-t border-border" />
-                                        </div>
-
-                                        {/* ⚠ Notification warning */}
-                                        <div className="flex items-start gap-2 px-3 py-2.5 rounded-xl bg-amber-500/10 border border-amber-500/20">
-                                            <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
-                                            <p className="text-[11px] leading-relaxed text-amber-200/90">
-                                                <span className="font-bold text-amber-400">Important:</span> The sender must send a Nostr notification with the payment details. Without it, your funds will be <span className="font-semibold">extremely difficult to recover</span> — there is no automatic way to scan the blockchain for your transaction.
-                                            </p>
-                                        </div>
-
-                                        {/* txid verification */}
-                                        <div className="space-y-1.5">
-                                            <label className="text-xs text-muted-foreground font-medium">Transaction ID</label>
-                                            <Input
-                                                value={sp1VerifyTxid}
-                                                onChange={e => { setSp1VerifyTxid(e.target.value); setSp1VerifyResult(null); setSp1NotifDone(false); }}
-                                                placeholder="Paste txid here..."
-                                                className="text-xs font-mono"
-                                            />
-                                        </div>
-
-                                        <Button
-                                            onClick={handleSp1Verify}
-                                            className="w-full gap-2"
-                                            disabled={!sp1VerifyTxid.trim() || sp1Verifying || sp1NotifDone}
-                                        >
-                                            {sp1Verifying ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
-                                            {sp1Verifying ? 'Verifying...' : sp1NotifDone ? 'Verified ✓' : 'Verify & Send Notification'}
-                                        </Button>
-
-                                        {/* Verification result */}
-                                        {sp1VerifyResult && (
-                                            <div className={cn(
-                                                "rounded-lg px-3 py-2.5 text-xs space-y-1",
-                                                sp1VerifyResult.owned
-                                                    ? "bg-green-500/10 border border-green-500/20"
-                                                    : "bg-orange-500/10 border border-orange-500/20"
-                                            )}>
-                                                {sp1VerifyResult.owned ? (
-                                                    <>
-                                                        <div className="font-medium text-green-500 flex items-center gap-1.5">
-                                                            <Check className="w-3.5 h-3.5" /> Payment verified!
-                                                        </div>
-                                                        <div className="text-muted-foreground">
-                                                            <span className="font-mono text-[10px]">{censor(sp1VerifyResult.address || '', 8, 4)}</span>
-                                                            {sp1VerifyResult.amount && (
-                                                                <span className="ml-2">{sp1VerifyResult.amount.toLocaleString()} sats</span>
-                                                            )}
-                                                        </div>
-                                                        {sp1NotifDone && (
-                                                            <div className="text-green-500/80 text-[10px]">Notification published to relays</div>
-                                                        )}
-                                                    </>
-                                                ) : (
-                                                    <div className="font-medium text-orange-500 flex items-center gap-1.5">
-                                                        <AlertTriangle className="w-3.5 h-3.5" /> No matching output found
-                                                    </div>
-                                                )}
-                                            </div>
-                                        )}
-                                    </>
-                                ) : (
+                                {(
                                     /* ── Standard NSP Receive: generate one-time address ── */
                                     <>
                                         {/* QR Area */}
@@ -1673,7 +1728,7 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
                                         <div className="space-y-1.5">
                                             <label className="text-xs text-muted-foreground font-medium">Recipient Address</label>
                                             <div className="flex items-center gap-1.5">
-                                                <Input value={censor(generatedAddress)} readOnly placeholder="Click 'Generate' below" className="text-xs font-mono" />
+                                                <Input value={censor(generatedAddress)} readOnly placeholder={generating ? 'Deriving your address…' : 'Unavailable — unlock your key'} className="text-xs font-mono" />
                                                 {generatedAddress && (
                                                     <Button size="sm" variant="outline" onClick={() => copyText(generatedAddress, 'nsp-addr')}>
                                                         {copiedId === 'nsp-addr' ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
@@ -1690,29 +1745,42 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
                                                 placeholder="0.00" className="text-sm" />
                                         </div>
 
-                                        <Button onClick={() => {
-                                            if (generatedAddress) {
-                                                setShowRegenConfirm(true);
-                                            } else {
-                                                handleGenerate();
-                                            }
-                                        }} className="w-full gap-2" disabled={!privateKeyHex}>
-                                            <EyeOff className="w-4 h-4" />
-                                            {generatedAddress ? 'Regenerate Address' : 'Generate Address'}
-                                        </Button>
-
                                         {generatedAddress && (
                                             <>
-                                                <Button variant="outline" onClick={() => setShowConfirm(true)}
-                                                    className="w-full gap-2 border-primary/30 text-primary hover:bg-primary/10">
-                                                    <SendIcon className="w-4 h-4" /> Payment Sent?
-                                                </Button>
-                                                <div className="flex items-start gap-2 px-3 py-2.5 rounded-xl bg-amber-500/10 border border-amber-500/20">
-                                                    <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
-                                                    <p className="text-[11px] leading-relaxed text-amber-200/90">
-                                                        <span className="font-bold text-amber-400">Important:</span> You or the sender must click <span className="font-semibold">"Payment Sent?"</span> above and send a notification after the payment is made. Without it, <span className="font-semibold text-destructive">funds sent to this address are assumed lost</span> — there is no automatic way to detect the payment.
-                                                    </p>
-                                                </div>
+                                                <p className="text-[11px] leading-relaxed text-muted-foreground px-1">
+                                                    This address is derived from your key, so payments to it are always
+                                                    recoverable. It's being watched — an incoming payment appears on its own.
+                                                </p>
+
+                                                {selfAddresses.length > 0 && (
+                                                    <div className="pt-1">
+                                                        <button onClick={() => setShowSelfAddrs(v => !v)}
+                                                            className="w-full flex items-center justify-between px-1 py-1.5 text-[11px] font-medium text-muted-foreground hover:text-foreground transition-colors cursor-pointer">
+                                                            <span>Your receive addresses ({selfAddresses.length})</span>
+                                                            <ChevronDown className={cn("w-3.5 h-3.5 transition-transform", showSelfAddrs && "rotate-180")} />
+                                                        </button>
+                                                        {showSelfAddrs && (
+                                                            <div className="space-y-1 mt-1 max-h-56 overflow-y-auto">
+                                                                {selfAddresses.map(r => (
+                                                                    <div key={r.address}
+                                                                        className="flex items-center gap-2 px-2.5 py-2 rounded-lg bg-secondary/40 border border-white/5">
+                                                                        <span className="text-[10px] font-mono text-muted-foreground w-7 shrink-0">#{r.n}</span>
+                                                                        <span className="text-[10px] font-mono text-foreground truncate flex-1">{censor(r.address)}</span>
+                                                                        {r.current ? (
+                                                                            <span className="text-[10px] font-semibold text-primary shrink-0">current</span>
+                                                                        ) : r.received ? (
+                                                                            <span className="text-[10px] font-semibold text-green-500 shrink-0">
+                                                                                {r.balance ? r.balance.toLocaleString() : 'received'}
+                                                                            </span>
+                                                                        ) : (
+                                                                            <span className="text-[10px] text-muted-foreground shrink-0">unused</span>
+                                                                        )}
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                )}
                                             </>
                                         )}
                                     </>
@@ -1720,77 +1788,6 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
                             </CardContent>
                         </Card>
                     </div>
-                </div>
-            )}
-
-            {/* ═══ CLOSE CONFIRMATION MODAL ═══ */}
-            {showCloseConfirm && (
-                <div className="fixed inset-0 z-[55] bg-black/60 backdrop-blur-sm animate-fade-in flex items-center justify-center px-4">
-                    <Card className="w-[340px] shadow-2xl">
-                        <CardHeader>
-                            <CardTitle className="text-base flex items-center gap-2">
-                                <AlertTriangle className="w-4 h-4 text-yellow-500" /> Close Without Notifying?
-                            </CardTitle>
-                        </CardHeader>
-                        <CardContent className="space-y-3">
-                            <p className="text-xs text-muted-foreground leading-relaxed">
-                                You have a generated address that hasn't been paired with a payment notification yet.
-                            </p>
-                            <p className="text-xs text-muted-foreground leading-relaxed">
-                                If someone sends funds to this address without a notification being published, <span className="text-destructive font-semibold">those funds will be extremely difficult to recover</span>.
-                            </p>
-                            <div className="p-2.5 rounded-lg bg-secondary/50 border border-border">
-                                <p className="text-[10px] text-muted-foreground font-mono truncate">{censor(generatedAddress)}</p>
-                            </div>
-                            <div className="flex gap-2 pt-1">
-                                <Button variant="outline" className="flex-1 text-xs" onClick={() => {
-                                    setShowCloseConfirm(false);
-                                    setShowReceiveModal(false);
-                                    setSp1VerifyTxid(''); setSp1VerifyResult(null); setSp1NotifDone(false);
-                                }}>
-                                    Yes, close
-                                </Button>
-                                <Button className="flex-1 text-xs" onClick={() => setShowCloseConfirm(false)}>
-                                    No, wait
-                                </Button>
-                            </div>
-                        </CardContent>
-                    </Card>
-                </div>
-            )}
-
-            {/* ═══ REGENERATE CONFIRMATION MODAL ═══ */}
-            {showRegenConfirm && (
-                <div className="fixed inset-0 z-[55] bg-black/60 backdrop-blur-sm animate-fade-in flex items-center justify-center px-4">
-                    <Card className="w-[340px] shadow-2xl">
-                        <CardHeader>
-                            <CardTitle className="text-base flex items-center gap-2">
-                                <AlertTriangle className="w-4 h-4 text-yellow-500" /> Replace Address?
-                            </CardTitle>
-                        </CardHeader>
-                        <CardContent className="space-y-3">
-                            <p className="text-xs text-muted-foreground leading-relaxed">
-                                You already have a generated address. Generating a new one will <span className="text-destructive font-semibold">permanently discard</span> the current address.
-                            </p>
-                            <p className="text-xs text-muted-foreground leading-relaxed">
-                                If a sender has already been given this address but hasn't sent the payment notification yet, you will <span className="text-destructive font-semibold">lose access to any funds</span> sent to it.
-                            </p>
-                            <div className="p-2.5 rounded-lg bg-secondary/50 border border-border">
-                                <p className="text-[10px] text-muted-foreground font-mono truncate">{censor(generatedAddress)}</p>
-                            </div>
-                            <div className="flex gap-2 pt-1">
-                                <Button variant="outline" className="flex-1 text-xs" onClick={() => setShowRegenConfirm(false)}>
-                                    Cancel
-                                </Button>
-                                <Button className="flex-1 text-xs gap-1.5 bg-destructive text-destructive-foreground hover:bg-destructive/90 border-0" onClick={() => {
-                                    setShowRegenConfirm(false);
-                                    handleGenerate();
-                                }}>
-                                    <RefreshCw className="w-3.5 h-3.5 shrink-0" /> Replace
-                                </Button>
-                            </div>
-                        </CardContent>
-                    </Card>
                 </div>
             )}
 
@@ -2193,13 +2190,13 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
                                             {filtered.map(item => {
                                                 const ch = CHAINS.find(c => c.id === item.payload.chain);
                                                 return (
-                                                    <div key={item.payload.tweak} className="flex items-center gap-3 p-3 rounded-xl bg-secondary/50 border border-border">
+                                                    <div key={item.payload.address} className="flex items-center gap-3 p-3 rounded-xl bg-secondary/50 border border-border">
                                                         <img src={ch?.icon || ''} alt="" className="w-7 h-7 rounded-full shrink-0" />
                                                         <div className="flex-1 min-w-0">
                                                             <div className="text-sm font-medium truncate">{item.payload.amount} on {ch?.name}</div>
                                                             <div className="text-[10px] text-muted-foreground font-mono truncate">{censor(item.payload.address)}</div>
                                                         </div>
-                                                        <button onClick={() => rescanItem(item.payload.tweak)} disabled={item.checking}
+                                                        <button onClick={() => rescanItem(item.payload.address)} disabled={item.checking}
                                                             className="p-1.5 rounded-lg hover:bg-accent transition-colors cursor-pointer">
                                                             {item.checking ? <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" /> : <RefreshCw className="w-4 h-4 text-muted-foreground" />}
                                                         </button>
@@ -2417,7 +2414,7 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
                             {assets.map(a => (
                                 <button
                                     key={a.id}
-                                    onClick={() => { setAsset(a.id); setGeneratedAddress(''); setCurrentTweak(''); setQrUri(''); setShowAssetModal(false); }}
+                                    onClick={() => { setAsset(a.id); setGeneratedAddress(''); setCurrentTweak(''); setGeneratedIndex(null); setQrUri(''); setShowAssetModal(false); }}
                                     className={cn(
                                         "w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors cursor-pointer",
                                         asset === a.id ? "bg-primary/15 text-primary" : "hover:bg-secondary"
@@ -2433,19 +2430,6 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
             )}
 
             {/* ═══ CONFIRM MODAL ═══ */}
-            {showConfirm && activePubkey && (
-                <NspConfirmModal
-                    recipientPubkey={activePubkey}
-                    address={generatedAddress}
-                    chain={chain}
-                    asset={asset}
-                    token={currentAsset?.token || null}
-                    tweak={currentTweak}
-                    amount={amount}
-                    onClose={() => setShowConfirm(false)}
-                />
-            )}
-
             {/* ═══ NSP SEND MODAL ═══ */}
             {showSendModal && (() => {
                 const availStr = isBitcoin ? `${aggregatedBalance.toLocaleString()} sats`
@@ -2663,13 +2647,12 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
                                                         </button>
                                                     )}
                                                 </div>
-                                                {/* Bitcoin send mode toggle: Taproot / SegWit / SP */}
+                                                {/* Bitcoin send mode toggle: Taproot / SegWit */}
                                                 {isBitcoin && nspRecipientPubkey && (
                                                     <div className="flex bg-secondary border border-border rounded-lg p-0.5 gap-0.5">
                                                         {([
                                                             { id: 'taproot' as const, label: 'Taproot' },
                                                             { id: 'segwit' as const, label: 'SegWit' },
-                                                            { id: 'sp' as const, label: 'SP' },
                                                         ]).map(mode => (
                                                             <button
                                                                 key={mode.id}
@@ -2683,18 +2666,7 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
                                                                     if (btcSendMode === mode.id) return;
                                                                     setBtcSendMode(mode.id);
                                                                     // Re-derive address for new mode
-                                                                    if (mode.id === 'sp') {
-                                                                        const { scanPub, spendPub } = deriveScanPubKeys(nspRecipientPubkey);
-                                                                        const sp1Addr = encodeSp1Address(scanPub, spendPub);
-                                                                        setNspRecipientTweak('');
-                                                                        setNspDerivedAddress(sp1Addr);
-                                                                    } else {
-                                                                        const effectiveAsset = mode.id === 'segwit' ? 'native' : 'taproot';
-                                                                        const tweak = generateTweak();
-                                                                        const derivedAddr = deriveTweakedAddressFromPubkey(chain, nspRecipientPubkey, tweak, effectiveAsset);
-                                                                        setNspRecipientTweak(tweak);
-                                                                        setNspDerivedAddress(derivedAddr);
-                                                                    }
+                                                                    void deriveNspForRecipient(nspRecipientPubkey, mode.id === 'segwit' ? 'native' : 'taproot');
                                                                 }}
                                                             >
                                                                 {mode.label}
@@ -2703,6 +2675,12 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
                                                     </div>
                                                 )}
                                                 {/* NSP / SP derived address info */}
+                                                {nspRecipientPubkey && nspDeriving && !nspDerivedAddress && (
+                                                    <div className="flex items-center gap-2 p-2.5 rounded-xl bg-primary/5 border border-primary/20 animate-fade-in">
+                                                        <Loader2 className="w-3.5 h-3.5 animate-spin text-primary shrink-0" />
+                                                        <p className="text-[11px] text-muted-foreground">Deriving one-time address…</p>
+                                                    </div>
+                                                )}
                                                 {nspRecipientPubkey && nspDerivedAddress && (
                                                     <div className="flex items-center gap-2 p-2.5 rounded-xl bg-primary/5 border border-primary/20 animate-fade-in">
                                                         <div className="flex-1 min-w-0">
@@ -2712,19 +2690,16 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
                                                                 </p>
                                                             )}
                                                             <p className="text-[10px] text-muted-foreground font-mono truncate">
-                                                                {isBitcoin && btcSendMode === 'sp' ? 'SP' : 'NSP'}: {censor(nspDerivedAddress)}
+                                                                NSP: {censor(nspDerivedAddress)}
                                                             </p>
                                                         </div>
-                                                        {/* Only show regenerate button for non-SP modes */}
-                                                        {!(isBitcoin && btcSendMode === 'sp') && (
-                                                            <button
-                                                                onClick={regenerateNspAddress}
-                                                                className="p-1.5 rounded-lg bg-primary/10 hover:bg-primary/20 transition-colors cursor-pointer shrink-0"
-                                                                title="Generate new random address"
-                                                            >
-                                                                <RefreshCw className="w-3.5 h-3.5 text-primary" />
-                                                            </button>
-                                                        )}
+                                                        <button
+                                                            onClick={regenerateNspAddress}
+                                                            className="p-1.5 rounded-lg bg-primary/10 hover:bg-primary/20 transition-colors cursor-pointer shrink-0"
+                                                            title="Generate new random address"
+                                                        >
+                                                            <RefreshCw className="w-3.5 h-3.5 text-primary" />
+                                                        </button>
                                                     </div>
                                                 )}
                                             </div>
@@ -2789,7 +2764,7 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
                                                     <>
                                                         <div className="border-t border-border" />
                                                         <div className="flex justify-between items-center">
-                                                            <span className="text-xs text-muted-foreground">{isBitcoin && btcSendMode === 'sp' ? 'SP Address' : 'NSP Address'}</span>
+                                                            <span className="text-xs text-muted-foreground">NSP Address</span>
                                                             <span className="text-[10px] font-mono text-muted-foreground max-w-[200px] truncate block">
                                                                 {censor(nspDerivedAddress, 8, 4)}
                                                             </span>
@@ -2798,7 +2773,7 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
                                                         <div className="flex justify-between items-center">
                                                             <span className="text-xs text-muted-foreground">Type</span>
                                                             <span className="text-[11px] font-medium text-primary flex items-center gap-1">
-                                                                <Bell className="w-3 h-3" /> {isBitcoin && btcSendMode === 'sp' ? 'BIP-352 Silent Payment + Notify' : 'Will notify via Nostr'}
+                                                                <Bell className="w-3 h-3" /> Will notify via Nostr
                                                             </span>
                                                         </div>
                                                     </>
@@ -2904,10 +2879,13 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
                 const handleStartRenotify = async () => {
                     if (!sentEntry) return;
                     setDetailPage('renotify');
-                    setFetchingNotif(true);
                     setExistingNotifEvent(null);
                     setRenotifyResults([]);
                     setRenotifyDone(false);
+                    // Legacy entries carry an ephemeral key whose existing notification can be
+                    // looked up. Deterministic entries have no stored key — go straight to recreate.
+                    if (!sentEntry.senderNsec) { setFetchingNotif(false); return; }
+                    setFetchingNotif(true);
                     try {
                         const existing = await fetchExistingNotification(sentEntry.senderNsec, sentEntry.recipientPubkey);
                         setExistingNotifEvent(existing);
@@ -2943,17 +2921,22 @@ export function SilentWallet({ activePubkey }: SilentWalletProps) {
                     setRenotifyResults([]);
                     setRenotifyDone(false);
                     try {
-                        const payload: NspPayload = {
-                            address: sentEntry.address,
-                            chain: sentEntry.chain,
-                            asset: sentEntry.asset,
-                            token: sentEntry.token,
-                            tweak: sentEntry.tweak,
-                            txid: sentEntry.txid,
-                            amount: sentEntry.amount,
-                            timestamp: sentEntry.timestamp,
-                        };
-                        const { event } = createNspNotification(sentEntry.recipientPubkey, payload, sentEntry.senderNsec);
+                        // Deterministic entries (have n) recreate the notification statelessly from
+                        // (sender nsec, recipient, n). Legacy entries reuse the stored ephemeral key.
+                        let event: any;
+                        if (sentEntry.n !== undefined && privateKeyHex) {
+                            ({ event } = createDeterministicNspNotification(privateKeyHex, sentEntry.recipientPubkey, sentEntry.n, {
+                                address: sentEntry.address, chain: sentEntry.chain, asset: sentEntry.asset,
+                                token: sentEntry.token, txid: sentEntry.txid, amount: sentEntry.amount,
+                            }));
+                        } else {
+                            const payload: NspPayload = {
+                                address: sentEntry.address, chain: sentEntry.chain, asset: sentEntry.asset,
+                                token: sentEntry.token, tweak: sentEntry.tweak, txid: sentEntry.txid,
+                                amount: sentEntry.amount, timestamp: sentEntry.timestamp,
+                            };
+                            ({ event } = createNspNotification(sentEntry.recipientPubkey, payload, sentEntry.senderNsec));
+                        }
                         await publishNspNotification(
                             event,
                             sentEntry.recipientPubkey,

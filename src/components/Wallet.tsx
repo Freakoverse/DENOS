@@ -2,8 +2,8 @@ import { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import {
-    privateKeyToBitcoinAddress,
     privateKeyToTaprootAddress,
+    segwitAddressesByParity,
     npubToTaprootAddress,
     fetchUTXOs,
     fetchTxHistory,
@@ -226,9 +226,12 @@ export function Wallet({ activePubkey, sendPrefill, onPrefillConsumed, ecashReci
                 setPrivateKeyHex(hex);
 
                 if (isBitcoin) {
+                    // A Nostr x-only pubkey maps to TWO P2WPKH addresses. We key them by PARITY
+                    // (not by which the raw scalar happens to produce) so DENOS agrees with other
+                    // wallets: 'native' is always even (02||x), 'native-alt' always odd (03||x).
                     const addr = selectedAsset === 'taproot'
                         ? privateKeyToTaprootAddress(hex)
-                        : privateKeyToBitcoinAddress(hex);
+                        : segwitAddressesByParity(hex)[selectedAsset === 'native-alt' ? 'odd' : 'even'];
                     setAddress(addr);
                     setNostrAddress(addr);
                     setStandardAddress(addr);
@@ -374,9 +377,11 @@ export function Wallet({ activePubkey, sendPrefill, onPrefillConsumed, ecashReci
                 if (isNaN(amountSats) || amountSats <= 0) throw new Error('Invalid amount');
                 if (!selectedFeeRate) throw new Error('Select a fee rate');
 
+                // Pass the funded address so the correct key parity is selected (and so it fails
+                // closed rather than signing with a key that cannot spend these inputs).
                 const { txHex, fee } = selectedAsset === 'taproot'
                     ? await createTaprootTransaction(privateKeyHex, target, amountSats, utxos, selectedFeeRate)
-                    : await createBitcoinTransaction(privateKeyHex, target, amountSats, utxos, selectedFeeRate);
+                    : await createBitcoinTransaction(privateKeyHex, target, amountSats, utxos, selectedFeeRate, address);
 
                 const txid = await broadcastTransaction(txHex);
                 setSendSuccess(txid);
@@ -649,7 +654,7 @@ export function Wallet({ activePubkey, sendPrefill, onPrefillConsumed, ecashReci
                                     className="w-3.5 h-3.5 rounded-full object-cover shrink-0"
                                 />
                             )}
-                            {isBitcoin ? (selectedAsset === 'taproot' ? 'Taproot (P2TR)' : 'Native Segwit (P2WPKH)')
+                            {isBitcoin ? (selectedAsset === 'taproot' ? 'Taproot (P2TR)' : selectedAsset === 'native-alt' ? 'Native Segwit (odd)' : 'Native Segwit (even)')
                                 : isZcash ? 'Transparent'
                                     : currentToken?.symbol || 'Asset'}
                             <ChevronDown className="w-3 h-3 text-muted-foreground" />
@@ -908,7 +913,9 @@ export function Wallet({ activePubkey, sendPrefill, onPrefillConsumed, ecashReci
                                 <div className="space-y-1.5">
                                     <label className="text-xs text-muted-foreground font-medium">
                                         {isBitcoin
-                                            ? (selectedAsset === 'native' ? 'Native SegWit (P2WPKH)' : 'Taproot (P2TR)')
+                                            ? (selectedAsset === 'native' ? 'Native SegWit (even · P2WPKH)'
+                                                : selectedAsset === 'native-alt' ? 'Native SegWit (odd · P2WPKH)'
+                                                    : 'Taproot (P2TR)')
                                             : isZcash
                                                 ? 'Transparent (t-addr)'
                                                 : evmChain?.name || 'Address'}
@@ -1759,8 +1766,20 @@ export function Wallet({ activePubkey, sendPrefill, onPrefillConsumed, ecashReci
             {showAssetSelector && (() => {
                 let assets: { id: string; name: string; detail?: string; contractAddress?: string | null }[] = [];
                 if (isBitcoin) {
+                    // One key yields two P2WPKH addresses (02||x and 03||x). Surface both by
+                    // parity, and flag which one this key produces naturally.
+                    const parity = privateKeyHex ? segwitAddressesByParity(privateKeyHex) : null;
+                    const natural = (isEven: boolean) =>
+                        parity && parity.naturalIsEven === isEven ? ' · natural' : '';
                     assets = [
-                        { id: 'native', name: 'Native SegWit', detail: 'bc1q...' },
+                        {
+                            id: 'native', name: 'Native SegWit (even)',
+                            detail: `bc1q… · 02${natural(true)}`,
+                        },
+                        {
+                            id: 'native-alt', name: 'Native SegWit (odd)',
+                            detail: `bc1q… · 03${natural(false)}`,
+                        },
                         { id: 'taproot', name: 'Taproot', detail: 'bc1p...' },
                     ];
                 } else if (isEvm && evmChain) {

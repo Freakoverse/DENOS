@@ -2,6 +2,7 @@
  * Nostr Profile Fetcher
  * Fetches kind:0 (metadata) events from Nostr relays for a given pubkey hex
  */
+import { useState, useEffect } from 'react';
 
 export interface NostrProfile {
     name?: string;
@@ -44,6 +45,129 @@ export async function fetchNostrProfile(
     }
 
     return best ? best.profile : null;
+}
+
+// ── Cached kind:0 identity (name + picture), stale-while-revalidate ──
+//
+// Single source of truth for displaying an account's kind:0 name and avatar. Backed by the
+// `denos-pmeta-<pubkey>` localStorage keyspace. Two rules make it robust:
+//   1. NEVER REGRESS — a fetch that returns an empty field must not overwrite a good cached one.
+//      (A timed-out or partial relay response returning nothing is why names used to flip back to
+//      the npub / avatars blanked.)
+//   2. Revalidate at most once per session per pubkey — cache shows instantly; a background fetch
+//      then updates only if it brings genuinely new, non-empty data.
+
+export interface ProfileMeta {
+    name: string | null;
+    picture: string | null;
+}
+
+const metaMem = new Map<string, ProfileMeta>();
+const metaInflight = new Map<string, Promise<ProfileMeta>>();
+const attempted = new Set<string>(); // fetched this session already (even if the result was empty)
+
+/** Synchronous cache read (in-memory → localStorage). `null` if nothing is cached yet. */
+export function cachedProfileMeta(pubkeyHex: string): ProfileMeta | null {
+    if (metaMem.has(pubkeyHex)) return metaMem.get(pubkeyHex)!;
+    try {
+        const raw = localStorage.getItem('denos-pmeta-' + pubkeyHex);
+        if (raw) { const m = JSON.parse(raw) as ProfileMeta; metaMem.set(pubkeyHex, m); return m; }
+    } catch { /* ignore */ }
+    return null;
+}
+
+/** Merge a fetch result without regressing: empty fields keep the previously cached value. */
+function mergeMeta(pubkeyHex: string, incoming: ProfileMeta): ProfileMeta {
+    const prev = cachedProfileMeta(pubkeyHex);
+    const merged: ProfileMeta = {
+        name: (incoming.name && incoming.name.trim()) || prev?.name || null,
+        picture: incoming.picture || prev?.picture || null,
+    };
+    metaMem.set(pubkeyHex, merged);
+    if (!prev || prev.name !== merged.name || prev.picture !== merged.picture) {
+        try { localStorage.setItem('denos-pmeta-' + pubkeyHex, JSON.stringify(merged)); } catch { /* ignore */ }
+    }
+    return merged;
+}
+
+/** Fetch + merge a pubkey's kind:0 identity. De-duplicates concurrent calls; on failure returns
+ *  whatever is cached rather than an empty (so a failed fetch can never blank an existing value). */
+export async function resolveProfileMeta(pubkeyHex: string, relayUrls?: string[]): Promise<ProfileMeta> {
+    const inflight = metaInflight.get(pubkeyHex);
+    if (inflight) return inflight;
+    const p = fetchNostrProfile(pubkeyHex, relayUrls)
+        .then(prof => mergeMeta(pubkeyHex, {
+            name: (prof?.display_name || prof?.name || '').trim() || null,
+            picture: prof?.picture || null,
+        }))
+        .catch(() => cachedProfileMeta(pubkeyHex) || { name: null, picture: null })
+        .finally(() => { metaInflight.delete(pubkeyHex); attempted.add(pubkeyHex); });
+    metaInflight.set(pubkeyHex, p);
+    return p;
+}
+
+/** Force a background re-fetch on next use — call after the user edits their own kind:0 profile. */
+export function invalidateProfileMeta(pubkeyHex: string): void {
+    attempted.delete(pubkeyHex);
+}
+
+/** Authoritatively set a pubkey's cached identity — e.g. right after the user saves their OWN
+ *  kind:0. Overwrites (unlike the fetch merge) because this is first-party data, and marks it
+ *  attempted so a relay fetch lagging behind propagation can't immediately clobber it. */
+export function primeProfileMeta(pubkeyHex: string, meta: ProfileMeta): void {
+    metaMem.set(pubkeyHex, meta);
+    attempted.add(pubkeyHex);
+    try { localStorage.setItem('denos-pmeta-' + pubkeyHex, JSON.stringify(meta)); } catch { /* ignore */ }
+}
+
+// Name-only convenience, backed by the same cache.
+export function cachedProfileName(pubkeyHex: string): string | null | undefined {
+    const m = cachedProfileMeta(pubkeyHex);
+    return m ? m.name : undefined; // undefined = never fetched
+}
+export async function resolveProfileName(pubkeyHex: string, relayUrls?: string[]): Promise<string | null> {
+    return (await resolveProfileMeta(pubkeyHex, relayUrls)).name;
+}
+
+/** Reactive kind:0 identity for one pubkey: cache instantly, revalidate in the background once. */
+export function useProfileMeta(pubkeyHex?: string | null): ProfileMeta | null {
+    const [meta, setMeta] = useState<ProfileMeta | null>(() => (pubkeyHex ? cachedProfileMeta(pubkeyHex) : null));
+    useEffect(() => {
+        if (!pubkeyHex) { setMeta(null); return; }
+        setMeta(cachedProfileMeta(pubkeyHex));
+        if (attempted.has(pubkeyHex)) return;
+        let live = true;
+        resolveProfileMeta(pubkeyHex).then(m => { if (live) setMeta(m); });
+        return () => { live = false; };
+    }, [pubkeyHex]);
+    return meta;
+}
+
+/**
+ * Reactive kind:0 names for a set of pubkeys. Returns `pubkey -> name` only for those that HAVE a
+ * name; callers fall back to a truncated npub when absent. This map only ever *gains* names — a
+ * revalidation never removes one — so a display can't flip back to the npub once a name is known.
+ */
+export function useProfileNames(pubkeyHexes: string[]): Record<string, string> {
+    const key = pubkeyHexes.join(',');
+    const seedFromCache = (): Record<string, string> => {
+        const o: Record<string, string> = {};
+        for (const pk of pubkeyHexes) { const n = cachedProfileMeta(pk)?.name; if (n) o[pk] = n; }
+        return o;
+    };
+    const [names, setNames] = useState<Record<string, string>>(seedFromCache);
+    useEffect(() => {
+        let live = true;
+        setNames(seedFromCache());
+        for (const pk of pubkeyHexes) {
+            if (attempted.has(pk)) continue;
+            resolveProfileMeta(pk).then(m => {
+                if (m.name && live) setNames(prev => (prev[pk] === m.name ? prev : { ...prev, [pk]: m.name! }));
+            });
+        }
+        return () => { live = false; };
+    }, [key]); // eslint-disable-line react-hooks/exhaustive-deps
+    return names;
 }
 
 function fetchProfileFromRelay(

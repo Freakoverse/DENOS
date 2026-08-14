@@ -9,6 +9,86 @@ use state::AppState;
 use tauri::Manager;
 use tracing::info;
 
+/// Round the corners of the calling window (Windows 11 borderless popup) AND suppress the OS
+/// window border, so only the app's own CSS border shows (otherwise there are two borders).
+/// No-op elsewhere.
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn round_window_corners(window: tauri::WebviewWindow) {
+    use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE};
+    const DWMWCP_ROUND: i32 = 2; // DWM_WINDOW_CORNER_PREFERENCE::DWMWCP_ROUND
+    const DWMWA_BORDER_COLOR: i32 = 34;
+    const DWMWA_COLOR_NONE: u32 = 0xFFFFFFFE; // "no border"
+    if let Ok(hwnd) = window.hwnd() {
+        let pref: i32 = DWMWCP_ROUND;
+        let none: u32 = DWMWA_COLOR_NONE;
+        unsafe {
+            DwmSetWindowAttribute(
+                hwnd.0 as _,
+                DWMWA_WINDOW_CORNER_PREFERENCE as _,
+                &pref as *const i32 as *const _,
+                std::mem::size_of::<i32>() as u32,
+            );
+            DwmSetWindowAttribute(
+                hwnd.0 as _,
+                DWMWA_BORDER_COLOR as _,
+                &none as *const u32 as *const _,
+                std::mem::size_of::<u32>() as u32,
+            );
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+fn round_window_corners(_window: tauri::WebviewWindow) {}
+
+/// Size the popup and place it at the bottom-right of the monitor work area, computed entirely in
+/// Rust from the ACTUAL window size (so we never mis-assume the width) and the real work area (so we
+/// clear the taskbar). Deterministic — no JS coordinates / DPI assumptions.
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn place_notif(window: tauri::WebviewWindow, width: f64, height: f64) {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SystemParametersInfoW, SPI_GETWORKAREA};
+    let _ = window.set_size(tauri::LogicalSize::new(width, height));
+    let mut wa = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+    let ok = unsafe {
+        SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut wa as *mut RECT as *mut core::ffi::c_void, 0)
+    };
+    if ok != 0 {
+        let scale = window.scale_factor().unwrap_or(1.0);
+        let margin = (10.0 * scale).round() as i32;
+        // Use the ACTUAL outer size (physical) so the right/bottom margins are correct regardless of
+        // the real window width/height.
+        let (ww, hh) = window.outer_size()
+            .map(|s| (s.width as i32, s.height as i32))
+            .unwrap_or(((width * scale) as i32, (height * scale) as i32));
+        let x = wa.right - ww - margin;
+        let y = wa.bottom - hh - margin;
+        let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+fn place_notif(window: tauri::WebviewWindow, width: f64, height: f64) {
+    let _ = window.set_size(tauri::LogicalSize::new(width, height));
+    if let Ok(Some(m)) = window.current_monitor() {
+        let s = m.size();
+        let p = m.position();
+        let scale = window.scale_factor().unwrap_or(1.0);
+        let margin = (10.0 * scale).round() as i32;
+        let (ww, hh) = window.outer_size()
+            .map(|o| (o.width as i32, o.height as i32))
+            .unwrap_or(((width * scale) as i32, (height * scale) as i32));
+        let x = p.x + s.width as i32 - ww - margin;
+        // Rough taskbar/dock allowance since there's no work-area query here.
+        let y = p.y + s.height as i32 - hh - margin - (48.0 * scale).round() as i32;
+        let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tracing_subscriber::fmt::init();
@@ -77,12 +157,18 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                // Hide to tray instead of quitting
-                api.prevent_close();
-                let _ = window.hide();
+                // Hide the MAIN window to tray instead of quitting. Other windows (e.g. the
+                // signing-request popup `signer-notif`) must close for real — hiding them would
+                // leave a stale window that blocks any future popup from being created.
+                if window.label() == "main" {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
+            round_window_corners,
+            place_notif,
             // Key management
             keys::ping,
             keys::get_app_state,

@@ -1,5 +1,5 @@
 /**
- * NIP-NMS — Nostr Multi-Sig Groups.
+ * NIP-NBMS — Nostr Bitcoin Multi-Sig Groups.
  *
  * Phase 1: channel primitives.
  *   - Group secret (H) derivation from pairwise NIP-44 conversation keys.
@@ -7,33 +7,35 @@
  *   - Self-addressed, inner-signed NIP-17/59 envelope (the "npub messages itself" channel).
  *   - Relay publish / subscribe scoped to a single group npub.
  *
- * Crypto is all nostr-tools (nip44 + finalize/verify). The only NMS-specific parts are
+ * Crypto is all nostr-tools (nip44 + finalize/verify). The only NBMS-specific parts are
  * (1) using the group keypair instead of an ephemeral key for the gift wrap, and
  * (2) signing the inner rumor with the author's personal key so members are attributable
- *     inside a shared channel. See docs/NIP-NMS.md.
+ *     inside a shared channel. See docs/NIP-NBMS.md.
  */
 import { nip44, nip19, finalizeEvent, getPublicKey, verifyEvent, type Event } from 'nostr-tools';
 import { sha256 } from '@noble/hashes/sha2.js';
+import { hkdf } from '@noble/hashes/hkdf.js';
 import { hexToBytes, bytesToHex } from '@noble/hashes/utils.js';
 
 // ── Event kinds ──
 export const KIND_SEAL = 13;
 export const KIND_GIFT_WRAP = 1059;
 export const KIND_GROUP_META = 0;
-export const KIND_APP_DATA = 30078; // NIP-78, used for both nmsgc (personal) and msx (group)
+export const KIND_APP_DATA = 30078; // NIP-78, used for both nbmsgc (personal) and msx (group)
 
 // ── NIP-78 d-tags ──
-export const DTAG_GROUP_INDEX = 'nmsgc'; // personal: groups + H backup
+export const DTAG_GROUP_INDEX = 'nbmsgc'; // personal: groups + H backup
 export const DTAG_XPUBS = 'msx';         // group: cosigner xpub cache (advisory)
 
 // ── Channel message types (live in inner-rumor JSON content) ──
-export type NmsMessageType =
-    | 'nms-invite'
-    | 'nms-accept'
-    | 'nms-decline'
-    | 'nms-text'
-    | 'nms-xpub'
-    | 'nms-psbt';
+export type NbmsMessageType =
+    | 'nbms-invite'
+    | 'nbms-accept'
+    | 'nbms-decline'
+    | 'nbms-text'
+    | 'nbms-xpub'
+    | 'nbms-psbt'
+    | 'nbms-backup';
 
 // ── Inner-rumor tags ──
 export const TAG_XPUB = 'ns-xpub';   // [xpub, derivation_path]
@@ -57,16 +59,16 @@ function pairwiseSecret(skHex: string, otherPubHex: string): Uint8Array {
     return nip44.v2.utils.getConversationKey(hexToBytes(skHex), otherPubHex);
 }
 
-/** Domain-separation tag: keeps the NMS group key distinct from any other protocol that
+/** Domain-separation tag: keeps the NBMS group key distinct from any other protocol that
  *  might derive a key the same way from the same people. Bump the version if the
  *  derivation ever changes. */
-const NMS_DOMAIN_TAG = new TextEncoder().encode('nms-v1');
+const NBMS_DOMAIN_TAG = new TextEncoder().encode('nbms-v1');
 
 /**
  * Compute the 32-byte group secret H. **Initiator only** — only the initiator is a
  * party to every pairwise secret. Order-independent (secrets are byte-sorted first).
  *
- * Preimage: "nms-v1" || sorted(pairwise secrets) || uint32be(groupIndex)
+ * Preimage: "nbms-v1" || sorted(pairwise secrets) || uint32be(groupIndex)
  * The `groupIndex` (default 0) is reserved so the same member-set can derive multiple
  * distinct groups in the future without changing this format; today it is always 0,
  * keeping H deterministically recomputable from membership alone.
@@ -76,17 +78,17 @@ const NMS_DOMAIN_TAG = new TextEncoder().encode('nms-v1');
  * @param groupIndex      reserved ordinal for future multi-group support (default 0)
  */
 export function computeGroupSecret(initiatorSkHex: string, memberPubHexes: string[], groupIndex = 0): Uint8Array {
-    if (memberPubHexes.length === 0) throw new Error('NMS: a group needs at least one other member');
+    if (memberPubHexes.length === 0) throw new Error('NBMS: a group needs at least one other member');
     const secrets = memberPubHexes.map(pub => pairwiseSecret(initiatorSkHex, pub));
     // Lexicographic byte sort so H is independent of member-selection order.
     secrets.sort(compareBytes);
 
     const idx = new Uint8Array(4);
     new DataView(idx.buffer).setUint32(0, groupIndex >>> 0, false); // big-endian
-    const preimage = new Uint8Array(NMS_DOMAIN_TAG.length + secrets.length * 32 + 4);
-    preimage.set(NMS_DOMAIN_TAG, 0);
-    secrets.forEach((s, i) => preimage.set(s, NMS_DOMAIN_TAG.length + i * 32));
-    preimage.set(idx, NMS_DOMAIN_TAG.length + secrets.length * 32);
+    const preimage = new Uint8Array(NBMS_DOMAIN_TAG.length + secrets.length * 32 + 4);
+    preimage.set(NBMS_DOMAIN_TAG, 0);
+    secrets.forEach((s, i) => preimage.set(s, NBMS_DOMAIN_TAG.length + i * 32));
+    preimage.set(idx, NBMS_DOMAIN_TAG.length + secrets.length * 32);
     return sha256(preimage);
 }
 
@@ -116,14 +118,33 @@ export interface GroupKeypair {
  * it is out of range, which we surface as a clear error.
  */
 export function deriveGroupKeypair(H: Uint8Array): GroupKeypair {
-    if (H.length !== 32) throw new Error('NMS: group secret must be 32 bytes');
+    if (H.length !== 32) throw new Error('NBMS: group secret must be 32 bytes');
     let pubkey: string;
     try {
         pubkey = getPublicKey(H);
     } catch {
-        throw new Error('NMS: group secret is not a valid key (re-create the group)');
+        throw new Error('NBMS: group secret is not a valid key (re-create the group)');
     }
     return { sk: H, skHex: bytesToHex(H), pubkey, npub: nip19.npubEncode(pubkey) };
+}
+
+/** Versioned KDF context for the per-member, per-group backup key (see {@link deriveBackupKeypair}). */
+const BACKUP_KDF_INFO = new TextEncoder().encode('nbms-backup-v1');
+
+/**
+ * Derive a member's private backup keypair for a group — a "group of one" used as a
+ * self-addressed channel where the member mirrors their own sent messages, so a relay-side
+ * deletion by another member never costs them the original event.
+ *
+ *   backupSk = HKDF-SHA256(ikm = personal private key, salt = H, info = "nbms-backup-v1")
+ *
+ * Only the member can derive it (it needs their private key), and it is re-derivable on any
+ * device from their nsec + H (already in their `nbmsgc` backup). No other member can produce
+ * or delete events under it. Inherits the channel's invisibility and authors-filterability.
+ */
+export function deriveBackupKeypair(personalSkHex: string, H: Uint8Array): GroupKeypair {
+    const sk = hkdf(sha256, hexToBytes(personalSkHex), H, BACKUP_KDF_INFO, 32);
+    return deriveGroupKeypair(sk);
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -131,8 +152,8 @@ export function deriveGroupKeypair(H: Uint8Array): GroupKeypair {
 // ──────────────────────────────────────────────────────────────────────────
 
 /** The inner message a member wants to put on the channel. */
-export interface NmsInner {
-    type: NmsMessageType;
+export interface NbmsInner {
+    type: NbmsMessageType;
     content: Record<string, unknown>;
     tags?: string[][];
     /** Inner-rumor kind. Defaults to 14 (NIP-17 chat). */
@@ -147,7 +168,7 @@ function selfConversationKey(skHex: string): Uint8Array {
 /**
  * Wrap a message for the group channel.
  *
- * Layering (NMS variant of NIP-17/59):
+ * Layering (NBMS variant of NIP-17/59):
  *   rumor  — SIGNED by the author's personal key (attribution + verifiability)
  *   seal   — kind 13, signed by the GROUP key, NIP-44 self-encrypted (group→group)
  *   wrap   — kind 1059, signed by the GROUP key (not ephemeral), self-encrypted, p=group
@@ -159,7 +180,7 @@ function selfConversationKey(skHex: string): Uint8Array {
  * @param authorSkHex  the publishing member's personal private key (hex)
  * @param group        the group keypair (held by all members)
  */
-export function wrapGroupMessage(inner: NmsInner, authorSkHex: string, group: GroupKeypair): Event {
+export function wrapGroupMessage(inner: NbmsInner, authorSkHex: string, group: GroupKeypair): Event {
     const rumor = finalizeEvent(
         {
             kind: inner.kind ?? 14,
@@ -169,7 +190,15 @@ export function wrapGroupMessage(inner: NmsInner, authorSkHex: string, group: Gr
         },
         hexToBytes(authorSkHex),
     );
+    return sealAndWrap(rumor, group);
+}
 
+/**
+ * Seal + wrap an already-signed inner rumor for the group channel. Shared by the normal send
+ * path and by {@link rewrapRumor}. The seal and wrap are self-encrypted to the group key and
+ * signed by it; their timestamps are jittered into the past (NIP-59 timing resistance).
+ */
+function sealAndWrap(rumor: Event, group: GroupKeypair): Event {
     const groupKey = selfConversationKey(group.skHex);
 
     const seal = finalizeEvent(
@@ -195,10 +224,49 @@ export function wrapGroupMessage(inner: NmsInner, authorSkHex: string, group: Gr
     return wrap;
 }
 
-export interface NmsUnwrapped {
+/**
+ * Re-envelope an EXISTING, author-signed inner rumor into a fresh gift wrap. Used to restore a
+ * message a member deleted on relays: the new wrap has a different event id (fresh NIP-44 nonce
+ * + jittered timestamp), so the old NIP-09 deletion — which names the prior wrap id — does not
+ * apply. The rumor (content + the author's signature) is carried over verbatim, so authorship
+ * and the message's logical timestamp are unchanged and the inner rumor id stays stable for
+ * de-duplication against any surviving copies.
+ */
+export function rewrapRumor(rumor: Event, group: GroupKeypair): Event {
+    return sealAndWrap(rumor, group);
+}
+
+// ── Personal backup channel (mirror your own messages to your derived "group of one") ──
+
+/**
+ * Publish a personal backup of one of your own channel wraps to your derived backup channel,
+ * so a deletion by another member never costs you the original event. The payload is the whole
+ * original group wrap (both encryption layers intact), recovered verbatim on restore.
+ * Best-effort; returns the number of relays that accepted it.
+ */
+export async function backupOwnWrap(originalWrap: Event, backup: GroupKeypair, relays?: string[]): Promise<number> {
+    const wrap = wrapGroupMessage({ type: 'nbms-backup', content: { wrap: originalWrap } }, backup.skHex, backup);
+    return publishToRelays(wrap, relays);
+}
+
+/**
+ * Fetch + decrypt this member's backup channel and return the ORIGINAL group wraps they
+ * mirrored. The caller (which holds the group key) unwraps each to index it by inner rumor id.
+ */
+export async function fetchOwnBackups(backup: GroupKeypair, opts: { limit?: number } = {}, relays?: string[]): Promise<Event[]> {
+    const items = await fetchChannelMessages(backup, { limit: opts.limit ?? 500 }, relays);
+    const out: Event[] = [];
+    for (const { msg } of items) {
+        const w = msg.type === 'nbms-backup' ? (msg.content as { wrap?: Event }).wrap : undefined;
+        if (w && w.id) out.push(w);
+    }
+    return out;
+}
+
+export interface NbmsUnwrapped {
     /** The real author's pubkey (hex), cryptographically verified. */
     author: string;
-    type: NmsMessageType;
+    type: NbmsMessageType;
     content: Record<string, unknown>;
     tags: string[][];
     created_at: number;
@@ -211,7 +279,7 @@ export interface NmsUnwrapped {
  * verify — callers MUST treat null as "ignore this message". The author signature on the
  * inner rumor is verified here; never trust an unwrapped message that returns null.
  */
-export function unwrapGroupMessage(wrap: Event, group: GroupKeypair): NmsUnwrapped | null {
+export function unwrapGroupMessage(wrap: Event, group: GroupKeypair): NbmsUnwrapped | null {
     try {
         // The wrap and seal are signed by the group key; decrypt with the group self-key.
         if (wrap.kind !== KIND_GIFT_WRAP || wrap.pubkey !== group.pubkey) return null;
@@ -224,7 +292,7 @@ export function unwrapGroupMessage(wrap: Event, group: GroupKeypair): NmsUnwrapp
         // The crux: the rumor must be a valid, signed event by its claimed author.
         if (!rumor.pubkey || !rumor.sig || !verifyEvent(rumor)) return null;
 
-        const parsed = JSON.parse(rumor.content) as { type: NmsMessageType } & Record<string, unknown>;
+        const parsed = JSON.parse(rumor.content) as { type: NbmsMessageType } & Record<string, unknown>;
         const { type, ...content } = parsed;
         return {
             author: rumor.pubkey,
@@ -240,10 +308,10 @@ export function unwrapGroupMessage(wrap: Event, group: GroupKeypair): NmsUnwrapp
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-//  Encrypt-to-self helpers (kind:0 about, nmsgc, msx content)
+//  Encrypt-to-self helpers (kind:0 about, nbmsgc, msx content)
 // ──────────────────────────────────────────────────────────────────────────
 
-/** NIP-44 self-encrypt arbitrary JSON under a key (group key for msx/kind:0, personal key for nmsgc). */
+/** NIP-44 self-encrypt arbitrary JSON under a key (group key for msx/kind:0, personal key for nbmsgc). */
 export function encryptToSelf(skHex: string, payload: unknown): string {
     return nip44.v2.encrypt(JSON.stringify(payload), selfConversationKey(skHex));
 }
@@ -256,7 +324,7 @@ export function decryptToSelf<T = unknown>(skHex: string, ciphertext: string): T
 //  Relay I/O (scoped to the group channel)
 // ──────────────────────────────────────────────────────────────────────────
 
-export const NMS_DEFAULT_RELAYS = [
+export const NBMS_DEFAULT_RELAYS = [
     'wss://relay.damus.io',
     'wss://nos.lol',
     'wss://relay.nostr.band',
@@ -264,7 +332,7 @@ export const NMS_DEFAULT_RELAYS = [
 ];
 
 /** Publish a signed event to relays; resolves with the number of relays that accepted. */
-export async function publishToRelays(signed: Event, relays: string[] = NMS_DEFAULT_RELAYS): Promise<number> {
+export async function publishToRelays(signed: Event, relays: string[] = NBMS_DEFAULT_RELAYS): Promise<number> {
     let ok = 0;
     await Promise.allSettled(relays.map(url => new Promise<void>(resolve => {
         try {
@@ -292,12 +360,12 @@ export async function publishToRelays(signed: Event, relays: string[] = NMS_DEFA
  */
 export function subscribeGroupChannel(
     group: GroupKeypair,
-    onMessage: (msg: NmsUnwrapped, raw: Event) => void,
-    relays: string[] = NMS_DEFAULT_RELAYS,
+    onMessage: (msg: NbmsUnwrapped, raw: Event) => void,
+    relays: string[] = NBMS_DEFAULT_RELAYS,
     limit = 300,
 ): { stop: () => void } {
     const sockets: WebSocket[] = [];
-    const subId = 'nms_' + group.pubkey.slice(0, 12);
+    const subId = 'nbms_' + group.pubkey.slice(0, 12);
     const seen = new Set<string>(); // dedupe wraps across relays
     const filter: Record<string, unknown> = { kinds: [KIND_GIFT_WRAP], '#p': [group.pubkey], limit };
 
@@ -337,13 +405,13 @@ export function subscribeGroupChannel(
 export function fetchChannelMessages(
     group: GroupKeypair,
     opts: { until?: number; since?: number; limit?: number } = {},
-    relays: string[] = NMS_DEFAULT_RELAYS,
-): Promise<{ msg: NmsUnwrapped; raw: Event }[]> {
+    relays: string[] = NBMS_DEFAULT_RELAYS,
+): Promise<{ msg: NbmsUnwrapped; raw: Event }[]> {
     return new Promise(resolve => {
         const sockets: WebSocket[] = [];
-        const subId = 'nmsfc_' + Math.random().toString(36).slice(2, 8);
+        const subId = 'nbmsfc_' + Math.random().toString(36).slice(2, 8);
         const seen = new Set<string>();
-        const out: { msg: NmsUnwrapped; raw: Event }[] = [];
+        const out: { msg: NbmsUnwrapped; raw: Event }[] = [];
         let eose = 0;
         let done = false;
         const finish = () => {

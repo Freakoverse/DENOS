@@ -1,5 +1,5 @@
 /**
- * NIP-NMS — local channel-message cache.
+ * NIP-NBMS — local channel-message cache.
  *
  * A single IndexedDB pool across ALL group chats, budgeted at 100 MB. As new messages
  * come in and the pool exceeds budget, the oldest messages (by inner timestamp) are pruned
@@ -7,13 +7,15 @@
  * erase what we've already cached) and gives instant history on open.
  */
 
-const DB_NAME = 'denos-nms-chat';
-const DB_VERSION = 1;
+import type { Event } from 'nostr-tools';
+
+const DB_NAME = 'denos-nbms-chat';
+const DB_VERSION = 2; // v2: keyed by inner rumor id (was wrap id) + stores the rumor for restore
 const STORE = 'messages';
 const BUDGET_BYTES = 100 * 1024 * 1024;
 
 export interface CachedChatMsg {
-    id: string;            // gift-wrap id (primary key)
+    id: string;            // inner rumor id (primary key) — stable across re-wraps
     groupNpub: string;
     author: string;
     type: string;
@@ -21,6 +23,7 @@ export interface CachedChatMsg {
     rawCreatedAt: number;  // wrap time (pagination cursor)
     content: Record<string, unknown>;
     tags: string[][];
+    rumor?: Event;         // verified inner rumor, kept so a deleted message can be re-wrapped & restored
     size: number;          // bytes
 }
 
@@ -31,11 +34,11 @@ function db(): Promise<IDBDatabase> {
         const req = indexedDB.open(DB_NAME, DB_VERSION);
         req.onupgradeneeded = () => {
             const d = req.result;
-            if (!d.objectStoreNames.contains(STORE)) {
-                const os = d.createObjectStore(STORE, { keyPath: 'id' });
-                os.createIndex('groupNpub', 'groupNpub', { unique: false });
-                os.createIndex('created_at', 'created_at', { unique: false });
-            }
+            // v1 was keyed by wrap id; drop it and recreate keyed by rumor id.
+            if (d.objectStoreNames.contains(STORE)) d.deleteObjectStore(STORE);
+            const os = d.createObjectStore(STORE, { keyPath: 'id' });
+            os.createIndex('groupNpub', 'groupNpub', { unique: false });
+            os.createIndex('created_at', 'created_at', { unique: false });
         };
         req.onsuccess = () => resolve(req.result);
         req.onerror = () => reject(req.error);
@@ -59,6 +62,7 @@ export interface IncomingMsg {
     rawCreatedAt?: number;
     content: Record<string, unknown>;
     tags?: string[][];
+    rumor?: Event;
 }
 
 /** Upsert messages for a group into the pool, then schedule a background prune. */
@@ -72,7 +76,7 @@ export async function cacheMessages(groupNpub: string, msgs: IncomingMsg[]): Pro
             os.put({
                 id: m.id, groupNpub, author: m.author, type: m.type,
                 created_at: m.created_at, rawCreatedAt: m.rawCreatedAt ?? m.created_at,
-                content: m.content, tags: m.tags ?? [], size: sizeOf(m.content, m.tags ?? []),
+                content: m.content, tags: m.tags ?? [], rumor: m.rumor, size: sizeOf(m.content, m.tags ?? []),
             } as CachedChatMsg);
         }
         await txDone(tx);

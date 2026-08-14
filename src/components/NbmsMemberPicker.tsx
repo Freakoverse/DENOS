@@ -1,5 +1,5 @@
 /**
- * NmsMemberPicker — multi-select picker over the active keypair's Nostr follows.
+ * NbmsMemberPicker — multi-select picker over the active keypair's Nostr follows.
  * Used by the multisig group-creation wizard. Modeled on FollowsSelector but selects
  * many members and returns their hex pubkeys.
  */
@@ -42,7 +42,7 @@ async function resolveIdentifier(input: string): Promise<string | null> {
     return null;
 }
 
-interface NmsMemberPickerProps {
+interface NbmsMemberPickerProps {
     isOpen: boolean;
     onClose: () => void;
     /** Returns the selected members as hex pubkeys (excludes the active user). */
@@ -57,7 +57,7 @@ interface Contact {
     loading: boolean;
 }
 
-export const NmsMemberPicker: React.FC<NmsMemberPickerProps> = ({ isOpen, onClose, onConfirm, activePubkey }) => {
+export const NbmsMemberPicker: React.FC<NbmsMemberPickerProps> = ({ isOpen, onClose, onConfirm, activePubkey }) => {
     const { toast } = useFeedback();
     const [contacts, setContacts] = useState<Contact[]>([]);
     const [manual, setManual] = useState<Contact[]>([]);

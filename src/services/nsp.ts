@@ -9,7 +9,7 @@
 import * as bitcoin from 'bitcoinjs-lib';
 import * as ecc from '@bitcoinerlab/secp256k1';
 import { Buffer } from 'buffer';
-import { nip44, finalizeEvent, getPublicKey } from 'nostr-tools';
+import { nip44, finalizeEvent, getPublicKey, nip19 } from 'nostr-tools';
 import { hexToBytes, bytesToHex } from '@noble/hashes/utils.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { keccak256 } from 'js-sha3';
@@ -18,9 +18,10 @@ import { getECPair } from '@/services/bitcoin';
 import {
     privateKeyToBitcoinAddress,
     privateKeyToTaprootAddress,
+    negatePrivateKey,
     fetchUTXOs,
+    fetchTxHistory,
 } from '@/services/bitcoin';
-import { deriveScanKeys } from '@/services/sp1';
 import {
     fetchEvmBalance,
     fetchTokenBalance,
@@ -28,6 +29,7 @@ import {
 import {
     deriveZcashAddress,
     fetchZcashBalance,
+    fetchZcashTxHistory,
     pubkeyHexToZcashAddress,
 } from '@/services/zcash';
 
@@ -49,6 +51,27 @@ const HARDCODED_RELAYS = [
     'wss://relay.snort.social',
 ];
 
+/**
+ * The user's own configured relays, merged with the hardcoded set for all operations on
+ * the user's OWN data (NIP-78 index/pages/sent list, catch-up scan, live subscription).
+ * Populated by the app via setNspUserRelays and persisted so it survives reloads. This
+ * removes the single-point-of-failure of depending only on the hardcoded relays.
+ */
+let nspUserRelays: string[] = (() => {
+    try { const raw = localStorage.getItem('denos-nsp-user-relays'); return raw ? JSON.parse(raw) : []; } catch { return []; }
+})();
+
+export function setNspUserRelays(urls: string[]): void {
+    const clean = [...new Set(urls.filter(u => /^wss?:\/\//i.test(u)))];
+    nspUserRelays = clean;
+    try { localStorage.setItem('denos-nsp-user-relays', JSON.stringify(clean)); } catch { /* ignore */ }
+}
+
+/** Hardcoded relays unioned with the user's configured relays. */
+function getRelays(): string[] {
+    return [...new Set([...HARDCODED_RELAYS, ...nspUserRelays])];
+}
+
 // ── Types ──
 
 export type NspChain = 'bitcoin' | 'ethereum' | 'bnb' | 'polygon' | 'avalanche' | 'base' | 'zcash';
@@ -58,21 +81,29 @@ export interface NspPayload {
     chain: NspChain;
     asset: string;
     token: string | null;
-    tweak: string;
     txid: string;
     amount: string;
     timestamp: number;
+    /** Deterministic payments: the sender's npub and index, from which the recipient
+     *  recomputes the tweak. Legacy payments instead carry `tweak`. */
+    sender?: string;
+    n?: number;
+    /** Legacy random-tweak payments only. */
+    tweak?: string;
 }
 
 export interface NspConfirmedPayment {
     chain: NspChain;
     address: string;
-    tweak: string;
+    tweak: string;        // spending tweak (derived deterministically, or legacy random)
     asset: string;
     token: string | null;
     txid: string;
     amount: string;
     confirmedAt: number;
+    /** Deterministic provenance — lets the entry be re-derived from the nsec alone. */
+    sender?: string;
+    n?: number;
 }
 
 export interface RelayPublishResult {
@@ -87,18 +118,26 @@ export interface NspSentEntry {
     asset: string;
     token: string | null;
     amount: string;
-    address: string;         // tweaked address sent to
-    tweak: string;           // tweak used for derivation
-    recipientPubkey: string; // recipient hex pubkey
-    senderNsec: string;      // ephemeral sender privkey hex (for renotify)
+    address: string;          // tweaked address sent to
+    tweak: string;            // tweak used for derivation (derivable; kept for display)
+    recipientPubkey: string;  // recipient hex pubkey
     timestamp: number;
+    /** Deterministic payments: the index. Renotification recomputes everything from
+     *  (sender nsec, recipientPubkey, n) — no stored ephemeral key needed. */
+    n?: number;
+    /** Legacy only: the ephemeral private key used to sign the original notification. */
+    senderNsec?: string;
 }
 
 export interface NspIndex {
     last_page: number;
     slots: Record<string, number>;
     last_scanned: number;
+    /** User's default index for EVM receive addresses (0–999). Travels with the self-state. */
+    evm_default_index?: number;
 }
+
+const EVM_CHAINS_SET = new Set<NspChain>(['ethereum', 'bnb', 'polygon', 'avalanche', 'base']);
 
 function pageTag(n: number): string {
     return `nostr-silent-payment-list-${n}`;
@@ -119,7 +158,7 @@ async function fetchBestNip78(
         const bestEvents = new Map<string, any>();
         let resolvedCount = 0;
         let resolved = false;
-        const totalRelays = HARDCODED_RELAYS.length;
+        const totalRelays = getRelays().length;
         const sockets: WebSocket[] = [];
         const subId = 'nsp_q_' + Math.random().toString(36).slice(2, 8);
 
@@ -137,7 +176,7 @@ async function fetchBestNip78(
 
         setTimeout(finish, timeoutMs);
 
-        for (const relayUrl of HARDCODED_RELAYS) {
+        for (const relayUrl of getRelays()) {
             try {
                 const ws = new WebSocket(relayUrl);
                 sockets.push(ws);
@@ -190,7 +229,7 @@ async function publishNip78(
     const signedEvent = finalizeEvent(template, sk);
 
     let successCount = 0;
-    const promises = HARDCODED_RELAYS.map(relayUrl =>
+    const promises = getRelays().map(relayUrl =>
         new Promise<void>((resolve) => {
             try {
                 const ws = new WebSocket(relayUrl);
@@ -215,11 +254,239 @@ async function publishNip78(
 
 // ── 1. Tweak Generation ──
 
+/**
+ * LEGACY: random per-payment tweak. Kept so payments created under the old random-tweak
+ * scheme remain spendable. New payments use the deterministic derivation below.
+ */
 export function generateTweak(): string {
     const preimage = `${Date.now()}:${crypto.randomUUID()}`;
     const data = new TextEncoder().encode(preimage);
     const hash = sha256(data);
     return bytesToHex(hash);
+}
+
+// ── 1b. Deterministic (ECDH-derived) tweak — NIP-NSP core ──
+
+const NSP_TWEAK_DOMAIN = new TextEncoder().encode('nsp-tweak-v1');
+const NSP_NOTIF_DOMAIN = new TextEncoder().encode('nsp-notif-v1');
+
+/** 4-byte big-endian encoding of an index n. */
+function ser32(n: number): Uint8Array {
+    const b = new Uint8Array(4);
+    new DataView(b.buffer).setUint32(0, n >>> 0, false);
+    return b;
+}
+
+/**
+ * Deterministic shared secret S between two Nostr identities.
+ *
+ * S = NIP-44 v2 conversation key (HKDF over the x-coordinate of the secp256k1 ECDH).
+ * It is **symmetric** — computeSharedSecret(d_A, P_B) === computeSharedSecret(d_B, P_A) —
+ * even when either key has odd-y parity, because it is keyed on the ECDH *x-coordinate*
+ * (x(kP) === x(-kP)). Computable only by a holder of one of the two private keys; a third
+ * party who knows only both npubs cannot derive it (Diffie–Hellman assumption).
+ *
+ * @param selfPrivHex    the caller's private key (hex)
+ * @param otherPubHex    the counterparty's x-only pubkey (hex, from their npub)
+ */
+export function computeSharedSecret(selfPrivHex: string, otherPubHex: string): string {
+    const key = nip44.v2.utils.getConversationKey(hexToBytes(selfPrivHex), otherPubHex);
+    return bytesToHex(key);
+}
+
+function domainHash(domain: Uint8Array, sharedHex: string, n: number): string {
+    const S = hexToBytes(sharedHex);
+    const idx = ser32(n);
+    const buf = new Uint8Array(domain.length + S.length + idx.length);
+    buf.set(domain, 0);
+    buf.set(S, domain.length);
+    buf.set(idx, domain.length + S.length);
+    return bytesToHex(sha256(buf));
+}
+
+/** Deterministic tweak t(n) = SHA-256("nsp-tweak-v1" || S || ser32(n)). */
+export function nspTweak(sharedHex: string, n: number): string {
+    return domainHash(NSP_TWEAK_DOMAIN, sharedHex, n);
+}
+
+/** Deterministic notification signing key k(n) = SHA-256("nsp-notif-v1" || S || ser32(n)). */
+export function nspNotifKey(sharedHex: string, n: number): string {
+    return domainHash(NSP_NOTIF_DOMAIN, sharedHex, n);
+}
+
+/**
+ * Sender side: derive the one-time address for paying a recipient at index n, plus the
+ * tweak used. The address is derived from the recipient's PUBLIC key (P_R + t·G).
+ */
+export function deriveNspSend(
+    chain: NspChain,
+    recipientPubHex: string,
+    senderPrivHex: string,
+    n: number,
+    asset: string = 'taproot',
+): { address: string; tweak: string; shared: string } {
+    const shared = computeSharedSecret(senderPrivHex, recipientPubHex);
+    const tweak = nspTweak(shared, n);
+    const address = deriveTweakedAddressFromPubkey(chain, recipientPubHex, tweak, asset);
+    return { address, tweak, shared };
+}
+
+/**
+ * Recipient side: derive the SAME one-time address and the spending tweak from the sender's
+ * npub at index n. The address is derived from the recipient's PRIVATE key (d_even + t) and
+ * MUST equal the sender's derivation — this is the correctness guarantee that funds sent to
+ * the address are spendable.
+ */
+export function deriveNspReceive(
+    chain: NspChain,
+    senderPubHex: string,
+    recipientPrivHex: string,
+    n: number,
+    asset: string = 'taproot',
+): { address: string; tweak: string; shared: string } {
+    const shared = computeSharedSecret(recipientPrivHex, senderPubHex);
+    const tweak = nspTweak(shared, n);
+    const address = deriveTweakedAddress(chain, recipientPrivHex, tweak, asset);
+    return { address, tweak, shared };
+}
+
+// ── 1c. Index (n) selection — gap-walk for UTXO, fixed for EVM ──
+
+/**
+ * Addresses used this session but possibly not yet visible on-chain. Soft state: cleared on
+ * reload, which at worst risks one address reuse, never funds. Prevents back-to-back sends
+ * to the same pair from both picking the same index before the first hits the mempool.
+ */
+const nspPendingAddresses = new Set<string>();
+export function markNspAddressPending(address: string): void { nspPendingAddresses.add(address); }
+
+/**
+ * Whether an address has ANY on-chain or mempool history (used). esplora `/txs` includes
+ * unconfirmed transactions, so this is mempool-aware. Throws if the lookup fails on all
+ * nodes — the caller aborts rather than risk reusing an address.
+ */
+export async function nspAddressHasHistory(chain: NspChain, address: string): Promise<boolean> {
+    if (chain === 'bitcoin') return (await fetchTxHistory(address)).length > 0;
+    if (chain === 'zcash') return (await fetchZcashTxHistory(address)).length > 0;
+    return false; // EVM does not gap-walk
+}
+
+/**
+ * Select the index `n` and one-time address for an NSP send.
+ *   - EVM chains: fixed index (the user's `evmDefaultIndex`, default 0) — no walk.
+ *   - UTXO chains: the lowest unused index, by gap-walking derived addresses in parallel
+ *     batches and treating confirmed/mempool history and the session pending-cache as "used".
+ *
+ * `hasHistoryFn` is injectable for testing; production uses `nspAddressHasHistory`.
+ */
+export async function selectNspIndex(
+    chain: NspChain,
+    recipientPubHex: string,
+    senderPrivHex: string,
+    asset: string = 'taproot',
+    opts: {
+        evmDefaultIndex?: number;
+        batch?: number;
+        maxBatches?: number;
+        hasHistoryFn?: (chain: NspChain, address: string) => Promise<boolean>;
+    } = {},
+): Promise<{ n: number; address: string; tweak: string }> {
+    const derive = (n: number) => deriveNspSend(chain, recipientPubHex, senderPrivHex, n, asset);
+
+    if (EVM_CHAINS_SET.has(chain)) {
+        const n = Math.max(0, Math.min(999, Math.floor(opts.evmDefaultIndex ?? 0)));
+        const { address, tweak } = derive(n);
+        return { n, address, tweak };
+    }
+
+    const batch = opts.batch ?? 10;
+    // No practical ceiling. Unlike an HD gap limit (which stops after N consecutive UNUSED
+    // addresses, because you cannot know where a wallet ends), this walk only advances while
+    // lookups SUCCEED and report "used" — an unambiguous signal that the index really is taken.
+    // A failed lookup throws and exits, so this cannot spin on network errors; the walk is bounded
+    // by how many addresses have genuinely been used. The high value is a runaway backstop only.
+    const maxBatches = opts.maxBatches ?? 10_000;
+    const hasHistory = opts.hasHistoryFn ?? nspAddressHasHistory;
+
+    for (let b = 0; b < maxBatches; b++) {
+        const cand = Array.from({ length: batch }, (_, i) => ({ n: b * batch + i, ...derive(b * batch + i) }));
+        const used = await Promise.all(cand.map(c =>
+            nspPendingAddresses.has(c.address) ? Promise.resolve(true) : hasHistory(chain, c.address),
+        ));
+        const firstFree = used.findIndex(u => !u);
+        if (firstFree >= 0) {
+            const chosen = cand[firstFree];
+            return { n: chosen.n, address: chosen.address, tweak: chosen.tweak };
+        }
+    }
+    throw new Error(`NSP: every index below ${batch * maxBatches} is already used`);
+}
+
+// ── 1d. Recovery walk ──
+
+export interface NspRecoverResult {
+    chain: NspChain;
+    asset: string;
+    address: string;
+    tweak: string;
+    n: number;
+    sender: string;            // sender npub (own npub for self/in-person)
+    balance: number | bigint;
+}
+
+/**
+ * Recover received payments for a (sender → self) chain by deriving addresses at successive
+ * indices and checking them on-chain. UTXO chains use a gap-limited walk; EVM scans a small
+ * bounded set (addresses are reused, so few indices exist). `senderPubHex = own pubkey`
+ * recovers in-person/self payments; a known sender's pubkey recovers remote payments whose
+ * notification was lost. Returns funded addresses with full provenance (sender + n).
+ *
+ * `checkFn`/`historyFn` are injectable for testing; production uses the on-chain lookups.
+ */
+export async function recoverNspPayments(
+    chain: NspChain,
+    asset: string,
+    senderPubHex: string,
+    recipientPrivHex: string,
+    opts: {
+        token?: string | null;
+        gapLimit?: number;
+        maxScan?: number;
+        checkFn?: (chain: NspChain, address: string, token?: string | null) => Promise<{ balance: number | bigint; hasFunds: boolean }>;
+        historyFn?: (chain: NspChain, address: string) => Promise<boolean>;
+    } = {},
+): Promise<NspRecoverResult[]> {
+    const token = opts.token ?? null;
+    const check = opts.checkFn ?? checkTweakedAddressBalance;
+    const history = opts.historyFn ?? nspAddressHasHistory;
+    const senderNpub = nip19.npubEncode(senderPubHex);
+    const found: NspRecoverResult[] = [];
+
+    const record = (n: number, address: string, tweak: string, balance: number | bigint) =>
+        found.push({ chain, asset, address, tweak, n, sender: senderNpub, balance });
+
+    if (EVM_CHAINS_SET.has(chain)) {
+        // EVM: bounded scan (addresses are reused per sender; few indices in play).
+        for (let n = 0; n < (opts.maxScan ?? 10); n++) {
+            const { address, tweak } = deriveNspReceive(chain, senderPubHex, recipientPrivHex, n, asset);
+            const { balance, hasFunds } = await check(chain, address, token);
+            if (hasFunds) record(n, address, tweak, balance);
+        }
+        return found;
+    }
+
+    // UTXO: gap-limited walk. History keeps the gap open across swept (0-balance) addresses.
+    const gapLimit = opts.gapLimit ?? 10;
+    const maxScan = opts.maxScan ?? 200;
+    let gap = 0;
+    for (let n = 0; n < maxScan && gap < gapLimit; n++) {
+        const { address, tweak } = deriveNspReceive(chain, senderPubHex, recipientPrivHex, n, asset);
+        const used = await history(chain, address);
+        const { balance, hasFunds } = await check(chain, address, token);
+        if (used || hasFunds) gap = 0; else gap++;
+        if (hasFunds) record(n, address, tweak, balance);
+    }
+    return found;
 }
 
 // ── 2. Key Tweaking ──
@@ -288,27 +555,64 @@ export function getSigningKey(
     confirmedAddress: string,
     asset: string = 'taproot',
 ): string {
-    // ── sp1 (BIP-352): completely different key derivation ──
-    // signing_key = (spend_priv + t_k) mod n
-    // where spend_priv comes from deriveScanKeys, NOT the standard NSP tweak
-    if (asset === 'sp1' && chain === 'bitcoin') {
-        const keyPair = getECPair().fromPrivateKey(Buffer.from(privateKeyHex, 'hex'));
-        const pubkeyHex = Buffer.from(keyPair.publicKey.slice(1)).toString('hex');
-        const keys = deriveScanKeys(privateKeyHex, pubkeyHex);
-        const spendPrivBig = BigInt('0x' + keys.spendPriv);
-        const tweakBig = BigInt('0x' + tweakHex);
-        const signingKey = ((spendPrivBig + tweakBig) % SECP256K1_N).toString(16).padStart(64, '0');
-        return signingKey;
+
+    // Candidate selection: try each derivation path in BOTH y-parities and keep the key whose
+    // own address actually equals the funded one.
+    //
+    // Parity matters because a secp256k1 x-coordinate has two valid y values. Taproot and EVM
+    // are unaffected (x-only / natural (x,y) respectively) and match on the first candidate, so
+    // their behaviour is unchanged — but P2WPKH commits to the exact compressed pubkey, and the
+    // address path normalises to even-y while the tweak returns natural parity. Without this,
+    // roughly half of native-SegWit payments would be signed with a key that cannot spend them.
+    const candidates = [
+        tweakPrivateKey(privateKeyHex, tweakHex),
+        tweakPrivateKeyLegacy(privateKeyHex, tweakHex),
+    ].flatMap(k => [k, negatePrivateKey(k)]);
+
+    for (const candidate of candidates) {
+        if (addressForKey(chain, candidate, asset).toLowerCase() === confirmedAddress.toLowerCase()) {
+            return candidate;
+        }
     }
 
-    // Try normalized key first
-    const normalizedKey = tweakPrivateKey(privateKeyHex, tweakHex);
-    const normalizedAddr = deriveTweakedAddress(chain, privateKeyHex, tweakHex, asset);
-    if (normalizedAddr.toLowerCase() === confirmedAddress.toLowerCase()) {
-        return normalizedKey;
+    // Fail closed. Returning a non-matching key would produce a transaction the network rejects
+    // (and could send change to an address the user does not control).
+    throw new Error(`No derivation controls ${confirmedAddress} — refusing to sign`);
+}
+
+/**
+ * Address for an ALREADY-FINAL key, applying no further parity normalisation. This is the
+ * inverse check used by {@link getSigningKey}: it answers "what does this exact key control?",
+ * whereas {@link deriveTweakedAddress} answers "what address should this tweak produce?".
+ */
+function addressForKey(chain: NspChain, keyHex: string, asset: string): string {
+    switch (chain) {
+        case 'bitcoin':
+            return asset === 'taproot'
+                ? privateKeyToTaprootAddress(keyHex)
+                : privateKeyToBitcoinAddress(keyHex);
+        case 'ethereum':
+        case 'bnb':
+        case 'polygon':
+        case 'avalanche':
+        case 'base': {
+            const keyPair = getECPair().fromPrivateKey(Buffer.from(keyHex, 'hex'));
+            const uncompressed = Buffer.from(ecc.pointCompress(keyPair.publicKey, false));
+            const xy = uncompressed.slice(1);
+            const rawAddr = keccak256(xy).slice(-40);
+            const addrLower = rawAddr.toLowerCase();
+            const checksumHash = keccak256(addrLower);
+            let checksummed = '0x';
+            for (let i = 0; i < addrLower.length; i++) {
+                checksummed += parseInt(checksumHash[i], 16) >= 8 ? addrLower[i].toUpperCase() : addrLower[i];
+            }
+            return checksummed;
+        }
+        case 'zcash':
+            return deriveZcashAddress(keyHex);
+        default:
+            throw new Error(`Unsupported chain: ${chain}`);
     }
-    // Fall back to legacy key
-    return tweakPrivateKeyLegacy(privateKeyHex, tweakHex);
 }
 
 // ── 3. Multi-Chain Tweaked Address Derivation ──
@@ -488,8 +792,79 @@ function nip44Decrypt(recipientPrivkeyHex: string, senderPubkeyHex: string, ciph
 
 // ── 6. Kind 1604 — NSP Notification ──
 
+/** Decode an npub (or pass through a 64-char hex pubkey) to x-only hex. */
+function npubToHex(npubOrHex: string): string {
+    if (/^[0-9a-fA-F]{64}$/.test(npubOrHex)) return npubOrHex.toLowerCase();
+    const d = nip19.decode(npubOrHex);
+    if (d.type !== 'npub') throw new Error('NSP: expected npub');
+    return d.data as string;
+}
+
+/** Recompute the spending tweak for a deterministic payment from its (sender, n). */
+export function nspTweakFromSender(recipientPrivHex: string, senderNpubOrHex: string, n: number): string {
+    const shared = computeSharedSecret(recipientPrivHex, npubToHex(senderNpubOrHex));
+    return nspTweak(shared, n);
+}
+
 /**
- * Generate an ephemeral key pair, create a kind 1604 event with NIP-44 encrypted payload.
+ * Create a deterministic kind:1604 notification. The signing key is k(n) derived from the
+ * shared secret (not ephemeral/random), so the sender holds no per-payment state and can
+ * recreate this exact-author notification to re-notify. The payload carries the sender's
+ * npub and index `n` (encrypted) so the recipient can recompute the tweak and recover.
+ */
+export function createDeterministicNspNotification(
+    senderPrivHex: string,
+    recipientPubHex: string,
+    n: number,
+    fields: { address: string; chain: NspChain; asset: string; token: string | null; txid: string; amount: string },
+): { event: any; notifPubkey: string; n: number } {
+    const shared = computeSharedSecret(senderPrivHex, recipientPubHex);
+    const notifSkHex = nspNotifKey(shared, n);
+    const notifSk = hexToBytes(notifSkHex);
+    const senderNpub = nip19.npubEncode(getPublicKey(hexToBytes(senderPrivHex)));
+
+    const payload: NspPayload = {
+        ...fields,
+        sender: senderNpub,
+        n,
+        timestamp: Math.floor(Date.now() / 1000),
+    };
+    const encrypted = nip44Encrypt(notifSkHex, recipientPubHex, JSON.stringify(payload));
+    const template = {
+        kind: KIND_NSP_NOTIFICATION,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [['p', recipientPubHex]],
+        content: encrypted,
+    };
+    const event = finalizeEvent(template, notifSk);
+    return { event, notifPubkey: getPublicKey(notifSk), n };
+}
+
+/**
+ * Verify a decrypted notification payload belongs to us. Handles both deterministic
+ * (sender + n) and legacy (tweak) payments. Cryptographic only — does NOT prove an on-chain
+ * payment was made (callers SHOULD additionally gate on a real txid/balance against spam).
+ */
+export function verifyNspPayloadOwnership(recipientPrivHex: string, payload: NspPayload): boolean {
+    try {
+        const asset = payload.asset || 'taproot';
+        if (payload.sender && payload.n !== undefined) {
+            const senderHex = npubToHex(payload.sender);
+            const { address } = deriveNspReceive(payload.chain, senderHex, recipientPrivHex, payload.n, asset);
+            return address.toLowerCase() === payload.address.toLowerCase();
+        }
+        if (payload.tweak) {
+            return verifyPaymentOwnership(recipientPrivHex, payload.tweak, payload.address, payload.chain, asset);
+        }
+        return false;
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * LEGACY: ephemeral-key notification (random tweak in payload). Retained so old send flows
+ * keep working; new sends use createDeterministicNspNotification.
  */
 export function createNspNotification(
     recipientPubkeyHex: string,
@@ -540,9 +915,11 @@ export function parseNspNotification(
         const plaintext = nip44Decrypt(recipientPrivkeyHex, senderPubkey, event.content);
         const parsed = JSON.parse(plaintext);
 
-        // Validate required fields
-        if (!parsed.address || !parsed.chain || !parsed.tweak) {
-            console.warn('[NSP] Invalid notification payload — missing required fields:', { address: !!parsed.address, chain: !!parsed.chain, tweak: !!parsed.tweak });
+        // Valid if it carries an address+chain and EITHER a deterministic (sender + n) or a
+        // legacy (tweak) derivation source.
+        const hasDeterministic = !!parsed.sender && parsed.n !== undefined;
+        if (!parsed.address || !parsed.chain || (!hasDeterministic && !parsed.tweak)) {
+            console.warn('[NSP] Invalid notification payload — missing required fields');
             return null;
         }
 
@@ -835,7 +1212,7 @@ export async function fetchNotificationBatch(
         const events = new Map<string, any>();
         let resolvedCount = 0;
         let resolved = false;
-        const totalRelays = HARDCODED_RELAYS.length;
+        const totalRelays = getRelays().length;
         const sockets: WebSocket[] = [];
         const subId = 'nsp_batch_' + Math.random().toString(36).slice(2, 8);
         const filter: any = { kinds: [KIND_NSP_NOTIFICATION], '#p': [pubkeyHex], limit };
@@ -854,7 +1231,7 @@ export async function fetchNotificationBatch(
         const tryFinish = () => { resolvedCount++; if (resolvedCount >= totalRelays) finish(); };
         setTimeout(finish, 8000);
 
-        for (const relayUrl of HARDCODED_RELAYS) {
+        for (const relayUrl of getRelays()) {
             try {
                 const ws = new WebSocket(relayUrl);
                 sockets.push(ws);
@@ -957,7 +1334,7 @@ export async function saveSentList(
     const signedEvent = finalizeEvent(template, sk);
 
     let successCount = 0;
-    const promises = HARDCODED_RELAYS.map(relayUrl => {
+    const promises = getRelays().map(relayUrl => {
         return new Promise<void>((resolve) => {
             try {
                 const ws = new WebSocket(relayUrl);
@@ -996,7 +1373,7 @@ export async function loadSentList(
         let bestEvent: any = null;
         let resolvedCount = 0;
         let resolved = false;
-        const totalRelays = HARDCODED_RELAYS.length;
+        const totalRelays = getRelays().length;
         const sockets: WebSocket[] = [];
         const subId = 'nsp_sent_' + Math.random().toString(36).slice(2, 8);
 
@@ -1037,7 +1414,7 @@ export async function loadSentList(
             }
         }, 6000);
 
-        for (const relayUrl of HARDCODED_RELAYS) {
+        for (const relayUrl of getRelays()) {
             try {
                 const ws = new WebSocket(relayUrl);
                 sockets.push(ws);
@@ -1081,7 +1458,7 @@ export async function fetchExistingNotification(
         let foundEvent: any = null;
         let resolvedCount = 0;
         let resolved = false;
-        const totalRelays = HARDCODED_RELAYS.length;
+        const totalRelays = getRelays().length;
         const sockets: WebSocket[] = [];
         const subId = 'nsp_fetch_' + Math.random().toString(36).slice(2, 8);
 
@@ -1103,7 +1480,7 @@ export async function fetchExistingNotification(
             }
         }, 5000);
 
-        for (const relayUrl of HARDCODED_RELAYS) {
+        for (const relayUrl of getRelays()) {
             try {
                 const ws = new WebSocket(relayUrl);
                 sockets.push(ws);
@@ -1146,33 +1523,6 @@ export function verifyPaymentOwnership(
     asset: string = 'taproot',
 ): boolean {
     try {
-        // ── sp1 (BIP-352): completely different derivation path ──
-        // The "tweak" for sp1 is the BIP-352 shared secret tweak t_k.
-        // candidate = SpendPub + t_k · G  (output key, no TapTweak)
-        if (asset === 'sp1' && chain === 'bitcoin') {
-            const tweakBytes = hexToBytes(tweakHex);
-            const tweakPoint = ecc.pointFromScalar(tweakBytes);
-            if (!tweakPoint) return false;
-
-            // Derive spendPub using the canonical deriveScanKeys path
-            const pubkeyHex = bytesToHex(getECPair().fromPrivateKey(
-                Buffer.from(privateKeyHex, 'hex')).publicKey.slice(1));
-            const keys = deriveScanKeys(privateKeyHex, pubkeyHex);
-
-            const candidatePub = ecc.pointAdd(keys.spendPub, tweakPoint);
-            if (!candidatePub) return false;
-
-            // BIP-352: output key is the raw candidate (no TapTweak)
-            const xOnly = Buffer.from(candidatePub).slice(1);
-            const derivedAddr = bitcoin.address.toBech32(xOnly, 1, bitcoin.networks.bitcoin.bech32);
-            if (derivedAddr.toLowerCase() === claimedAddress.toLowerCase()) return true;
-
-            console.warn(`[NSP] sp1 ownership mismatch:`,
-                `\n  derived  =${derivedAddr}`,
-                `\n  claimed  =${claimedAddress}`,
-                `\n  tweak    =${tweakHex.slice(0, 16)}...`);
-            return false;
-        }
 
         // Primary: current derivation (base key normalized to even-y)
         const derived = deriveTweakedAddress(chain, privateKeyHex, tweakHex, asset);
@@ -1294,9 +1644,9 @@ export function subscribeToNspNotifications(
     };
     if (sinceTimestamp > 0) filter.since = sinceTimestamp;
 
-    console.log(`[NSP] Subscribing to kind ${KIND_NSP_NOTIFICATION} for ${pubkeyHex.slice(0, 12)}... since=${sinceTimestamp} on ${HARDCODED_RELAYS.length} relays`);
+    console.log(`[NSP] Subscribing to kind ${KIND_NSP_NOTIFICATION} for ${pubkeyHex.slice(0, 12)}... since=${sinceTimestamp} on ${getRelays().length} relays`);
 
-    for (const relayUrl of HARDCODED_RELAYS) {
+    for (const relayUrl of getRelays()) {
         try {
             const ws = new WebSocket(relayUrl);
             ws.onopen = () => {

@@ -13,6 +13,7 @@ import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { useFeedback } from '@/components/ui/feedback';
+import { useProfileNames } from '@/services/nostrProfile';
 import { PinPrompt } from '@/components/PinPrompt';
 
 interface Props {
@@ -109,6 +110,11 @@ export function KeypairManager({ appState, onBack }: Props) {
 
     const importedKeypairs = appState.keypairs.filter(kp => !kp.seed_id);
     const seeds = appState.seeds;
+
+    // Accounts are shown by their kind:0 profile name (falling back to a truncated npub), not the
+    // local label — the local name is only an internal default like "Account 3".
+    const profileNames = useProfileNames(appState.keypairs.map(k => k.pubkey));
+    const displayName = (kp: Keypair) => profileNames[kp.pubkey] || truncateMiddle(kp.npub);
 
     // ── Actions ──
 
@@ -1055,7 +1061,7 @@ export function KeypairManager({ appState, onBack }: Props) {
                                                 >
                                                     <div className="flex flex-col gap-1 min-w-0 flex-1">
                                                         <div className="flex items-center gap-2">
-                                                            <span className="text-base font-medium truncate">{kp.name || 'Unnamed Key'}</span>
+                                                            <span className="text-base font-medium truncate">{displayName(kp)}</span>
                                                             {isActive && (
                                                                 <Badge variant="default" className="text-[10px] py-0 px-1.5">Active</Badge>
                                                             )}
@@ -1391,7 +1397,7 @@ export function KeypairManager({ appState, onBack }: Props) {
                                             >
                                                 <div className="flex flex-col gap-1 min-w-0 flex-1">
                                                     <div className="flex items-center gap-2">
-                                                        <span className="text-base font-medium truncate">{kp.name || 'Unnamed Key'}</span>
+                                                        <span className="text-base font-medium truncate">{displayName(kp)}</span>
                                                         {isActive && (
                                                             <Badge variant="default" className="text-[10px] py-0 px-1.5">Active</Badge>
                                                         )}

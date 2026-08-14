@@ -9,6 +9,11 @@ if (typeof window !== 'undefined' && !(window as any).Buffer) {
     (window as any).Buffer = Buffer;
 }
 
+/** BIP125 opt-in Replace-By-Fee: marks every input replaceable so a low-fee tx can be
+ *  fee-bumped instead of getting stuck. 0xffffffff disables RBF (and locktime); any value
+ *  ≤ 0xfffffffd opts in. Locktime stays 0, so the tx is still immediately final. */
+const RBF_SEQUENCE = 0xfffffffd;
+
 // Lazy initialization
 let ECPair: ECPairAPI | null = null;
 
@@ -116,6 +121,77 @@ export function privateKeyToBitcoinAddress(privateKeyHex: string): string {
         console.error('Error deriving P2WPKH address:', error);
         return '';
     }
+}
+
+// ── Key parity ──
+//
+// A secp256k1 x-coordinate has TWO valid y values, and a Nostr pubkey is x-only. So one key
+// yields two distinct P2WPKH addresses: `02||x` (spendable by `d`) and `03||x` (spendable by
+// `n - d`). Negating the scalar flips y-parity while preserving x. Signing an input with the
+// wrong parity produces a valid-looking but unspendable transaction, so anything that spends
+// P2WPKH must select the parity that actually controls the address being spent.
+
+const SECP256K1_N = BigInt('0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141');
+
+/** The counterpart key: same x-coordinate, opposite y-parity. */
+export function negatePrivateKey(privateKeyHex: string): string {
+    const d = BigInt('0x' + privateKeyHex);
+    return (SECP256K1_N - d).toString(16).padStart(64, '0');
+}
+
+/** Both P2WPKH addresses reachable from one key, tagged by which one is the natural parity. */
+export function bothSegwitAddresses(privateKeyHex: string): {
+    natural: string;
+    alternate: string;
+    naturalIsEven: boolean;
+} {
+    const keyPair = getECPair().fromPrivateKey(Buffer.from(privateKeyHex, 'hex'));
+    return {
+        natural: privateKeyToBitcoinAddress(privateKeyHex),
+        alternate: privateKeyToBitcoinAddress(negatePrivateKey(privateKeyHex)),
+        naturalIsEven: keyPair.publicKey[0] === 0x02,
+    };
+}
+
+/**
+ * The two P2WPKH addresses keyed by y-parity rather than by "whichever this key happened to
+ * produce". Parity is the stable, npub-derivable framing — anyone can compute both `02||x` and
+ * `03||x` from a pubkey — whereas which one is *natural* depends on the raw stored scalar and
+ * cannot be determined from the npub. Presenting by parity keeps DENOS aligned with other
+ * wallets; `naturalIsEven` is surfaced purely as a label.
+ */
+export function segwitAddressesByParity(privateKeyHex: string): {
+    even: string;
+    odd: string;
+    naturalIsEven: boolean;
+} {
+    const { natural, alternate, naturalIsEven } = bothSegwitAddresses(privateKeyHex);
+    return {
+        even: naturalIsEven ? natural : alternate,
+        odd: naturalIsEven ? alternate : natural,
+        naturalIsEven,
+    };
+}
+
+/** The private key controlling the even-y (`02||x`) or odd-y (`03||x`) P2WPKH address. */
+export function segwitKeyForParity(privateKeyHex: string, parity: 'even' | 'odd'): string {
+    const keyPair = getECPair().fromPrivateKey(Buffer.from(privateKeyHex, 'hex'));
+    const naturalIsEven = keyPair.publicKey[0] === 0x02;
+    return (parity === 'even') === naturalIsEven ? privateKeyHex : negatePrivateKey(privateKeyHex);
+}
+
+/**
+ * Pick whichever of (d, n - d) actually controls `address`.
+ *
+ * Fails closed: throws if neither parity matches, rather than signing with a key that cannot
+ * spend the input (which would yield a transaction the network rejects, or worse, change sent
+ * to an address the user does not control).
+ */
+export function segwitKeyForAddress(privateKeyHex: string, address: string): string {
+    for (const candidate of [privateKeyHex, negatePrivateKey(privateKeyHex)]) {
+        if (privateKeyToBitcoinAddress(candidate) === address) return candidate;
+    }
+    throw new Error(`Neither key parity controls ${address} — refusing to sign`);
 }
 
 export function privateKeyToTaprootAddress(privateKeyHex: string): string {
@@ -228,14 +304,24 @@ export async function broadcastTransaction(txHex: string): Promise<string> {
 
 // ── Transaction creation ──
 
+/**
+ * Spend from a single P2WPKH address.
+ *
+ * `fromAddress` is the address the UTXOs actually sit on. When supplied, the signing key is
+ * chosen by matching parity against it (see {@link segwitKeyForAddress}) so either of the two
+ * addresses a key maps to can be spent; it also becomes the change address. When omitted the
+ * natural parity is used, matching {@link privateKeyToBitcoinAddress}.
+ */
 export async function createBitcoinTransaction(
     privateKeyHex: string,
     toAddress: string,
     amountSats: number,
     utxos: UTXO[],
-    feeRate: number
+    feeRate: number,
+    fromAddress?: string
 ): Promise<{ txHex: string; fee: number }> {
-    const privateKeyBuffer = Buffer.from(privateKeyHex, 'hex');
+    const signingKeyHex = fromAddress ? segwitKeyForAddress(privateKeyHex, fromAddress) : privateKeyHex;
+    const privateKeyBuffer = Buffer.from(signingKeyHex, 'hex');
     const keyPair = getECPair().fromPrivateKey(privateKeyBuffer);
     const compressedPubkey = keyPair.publicKey;
 
@@ -257,6 +343,7 @@ export async function createBitcoinTransaction(
                 script: changeOutput,
                 value: BigInt(utxo.value),
             },
+            sequence: RBF_SEQUENCE,
         });
         totalInput += utxo.value;
     }
@@ -314,6 +401,7 @@ export async function createTaprootTransaction(
                 value: BigInt(utxo.value),
             },
             tapInternalKey: internalPubkey,
+            sequence: RBF_SEQUENCE,
         });
         totalInput += utxo.value;
     }
@@ -346,12 +434,74 @@ export async function createTaprootTransaction(
 }
 
 /**
+ * Build a P2WPKH (native SegWit) transaction from UTXOs spread across multiple addresses, each
+ * with its own key — the SegWit counterpart of {@link createMultiKeyTaprootTransaction}, used to
+ * spend NSP payments received on native-SegWit addresses.
+ *
+ * Each entry's key parity is resolved against its own address, and the derived script is checked
+ * against that address, so a mismatch throws rather than producing an unspendable transaction.
+ * Change returns to the first input's address.
+ */
+export async function createMultiKeySegwitTransaction(
+    taggedUtxos: { utxo: UTXO; privateKeyHex: string; address: string }[],
+    toAddress: string,
+    amountSats: number,
+    feeRate: number
+): Promise<{ txHex: string; fee: number }> {
+    if (taggedUtxos.length === 0) throw new Error('No UTXOs provided');
+
+    const psbt = new bitcoin.Psbt({ network: bitcoin.networks.bitcoin });
+    const signers: ReturnType<ReturnType<typeof getECPair>['fromPrivateKey']>[] = [];
+
+    let totalInput = 0;
+    for (const { utxo, privateKeyHex, address } of taggedUtxos) {
+        // Fails closed if neither parity controls this address.
+        const keyHex = segwitKeyForAddress(privateKeyHex, address);
+        const kp = getECPair().fromPrivateKey(Buffer.from(keyHex, 'hex'));
+        const { address: derived, output } = bitcoin.payments.p2wpkh({
+            pubkey: kp.publicKey,
+            network: bitcoin.networks.bitcoin,
+        });
+        if (!output || derived !== address) {
+            throw new Error(`Derived script does not match ${address} — refusing to sign`);
+        }
+        psbt.addInput({
+            hash: utxo.txid,
+            index: utxo.vout,
+            witnessUtxo: { script: output, value: BigInt(utxo.value) },
+            sequence: RBF_SEQUENCE,
+        });
+        totalInput += utxo.value;
+        signers.push(kp);
+    }
+
+    const estimatedSize = taggedUtxos.length * 68 + 2 * 31 + 10.5;
+    const estimatedFee = Math.ceil(estimatedSize * feeRate);
+    const change = totalInput - amountSats - estimatedFee;
+
+    if (change < 0) {
+        throw new Error(`Insufficient funds. Need ${amountSats + estimatedFee} sats, have ${totalInput} sats`);
+    }
+
+    psbt.addOutput({ address: toAddress, value: BigInt(amountSats) });
+    if (change > 546) {
+        psbt.addOutput({ address: taggedUtxos[0].address, value: BigInt(change) });
+    }
+
+    signers.forEach((kp, i) => psbt.signInput(i, kp));
+
+    psbt.finalizeAllInputs();
+    const tx = psbt.extractTransaction();
+    return { txHex: tx.toHex(), fee: estimatedFee };
+}
+
+/**
  * Build a Taproot transaction using UTXOs from multiple addresses,
  * each signed with its own private key. HD-wallet-style coin selection.
  * Change is sent back to the first input address.
  */
 export async function createMultiKeyTaprootTransaction(
-    taggedUtxos: { utxo: UTXO; privateKeyHex: string; rawTaproot?: boolean }[],
+    taggedUtxos: { utxo: UTXO; privateKeyHex: string }[],
     toAddress: string,
     amountSats: number,
     feeRate: number
@@ -363,50 +513,34 @@ export async function createMultiKeyTaprootTransaction(
     // Derive change address from the first key
     const firstKeyPair = getECPair().fromPrivateKey(Buffer.from(taggedUtxos[0].privateKeyHex, 'hex'));
     const firstInternalPub = firstKeyPair.publicKey.slice(1, 33);
-    let changeAddress: string;
-    if (taggedUtxos[0].rawTaproot) {
-        // BIP-352: change goes back to the raw candidate address (no TapTweak)
-        changeAddress = bitcoin.address.toBech32(firstInternalPub, 1, bitcoin.networks.bitcoin.bech32);
-    } else {
-        const { address } = bitcoin.payments.p2tr({
-            internalPubkey: firstInternalPub,
-            network: bitcoin.networks.bitcoin,
-        });
-        if (!address) throw new Error('Failed to derive change address');
-        changeAddress = address;
-    }
+    const { address: changeAddress } = bitcoin.payments.p2tr({
+        internalPubkey: firstInternalPub,
+        network: bitcoin.networks.bitcoin,
+    });
+    if (!changeAddress) throw new Error('Failed to derive change address');
 
     // Add all inputs
     let totalInput = 0;
     const signers: ReturnType<ReturnType<typeof getECPair>['fromPrivateKey']>[] = [];
-    const rawFlags: boolean[] = [];
-    for (const { utxo, privateKeyHex, rawTaproot } of taggedUtxos) {
+    for (const { utxo, privateKeyHex } of taggedUtxos) {
         const kp = getECPair().fromPrivateKey(Buffer.from(privateKeyHex, 'hex'));
         const internalPub = kp.publicKey.slice(1, 33); // x-only
 
-        let output: Buffer;
-        if (rawTaproot) {
-            // BIP-352: the x-only pubkey IS the output key directly (no TapTweak).
-            // Build scriptPubKey manually: OP_1 <32-byte x-only key>
-            output = Buffer.concat([Buffer.from([0x51, 0x20]), internalPub]);
-        } else {
-            const p2tr = bitcoin.payments.p2tr({
-                internalPubkey: internalPub,
-                network: bitcoin.networks.bitcoin,
-            });
-            if (!p2tr.output) throw new Error('Failed to derive output script');
-            output = Buffer.from(p2tr.output);
-        }
+        const p2tr = bitcoin.payments.p2tr({
+            internalPubkey: internalPub,
+            network: bitcoin.networks.bitcoin,
+        });
+        if (!p2tr.output) throw new Error('Failed to derive output script');
 
         psbt.addInput({
             hash: utxo.txid,
             index: utxo.vout,
-            witnessUtxo: { script: output, value: BigInt(utxo.value) },
+            witnessUtxo: { script: Buffer.from(p2tr.output), value: BigInt(utxo.value) },
             tapInternalKey: internalPub,
+            sequence: RBF_SEQUENCE,
         });
         totalInput += utxo.value;
         signers.push(kp);
-        rawFlags.push(!!rawTaproot);
     }
 
     const estimatedSize = taggedUtxos.length * 57.5 + 2 * 43 + 10.5;
@@ -422,20 +556,13 @@ export async function createMultiKeyTaprootTransaction(
         psbt.addOutput({ address: changeAddress, value: BigInt(change) });
     }
 
-    // Sign each input with its corresponding signer
+    // Sign each input (standard Taproot key-path: apply TapTweak before signing)
     for (let i = 0; i < signers.length; i++) {
-        if (rawFlags[i]) {
-            // BIP-352 raw output: sign directly with the key (no TapTweak)
-            // The output key IS privkey·G, so sign with the raw private key
-            psbt.signInput(i, signers[i]);
-        } else {
-            // Standard Taproot: apply TapTweak before signing
-            const internalPub = signers[i].publicKey.slice(1, 33);
-            const tweakedSigner = signers[i].tweak(
-                bitcoin.crypto.taggedHash('TapTweak', internalPub)
-            );
-            psbt.signInput(i, tweakedSigner);
-        }
+        const internalPub = signers[i].publicKey.slice(1, 33);
+        const tweakedSigner = signers[i].tweak(
+            bitcoin.crypto.taggedHash('TapTweak', internalPub)
+        );
+        psbt.signInput(i, tweakedSigner);
     }
 
     psbt.finalizeAllInputs();

@@ -16,6 +16,7 @@ import { useDragScroll } from '@/hooks/useDragScroll';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 import { Badge } from '@/components/ui/badge';
 import { CachedImg } from '@/components/CachedImg';
+import { type ProfileMeta, cachedProfileMeta, resolveProfileMeta } from '@/services/nostrProfile';
 
 type Tab = 'dashboard' | 'wallet' | 'ids' | 'commerce' | 'settings';
 
@@ -48,68 +49,6 @@ export interface AppState {
     lock_timeout_minutes: number;
     profiles: ProfileListItem[];
     active_profile: string | null;
-}
-
-/* ── Fetch profile metadata from kind:0 ── */
-const DEFAULT_RELAYS = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://relay.nostr.band'];
-
-interface ProfileMeta {
-    name: string | null;
-    picture: string | null;
-}
-
-/** Cache the resolved profile metadata (picture URL) per pubkey so avatars render instantly
- *  from cache, then revalidate in the background. The image blob itself is cached by CachedImg. */
-function getCachedMeta(pubkey: string): ProfileMeta | null {
-    try { const raw = localStorage.getItem('denos-pmeta-' + pubkey); return raw ? JSON.parse(raw) : null; } catch { return null; }
-}
-function setCachedMeta(pubkey: string, meta: ProfileMeta): void {
-    try { localStorage.setItem('denos-pmeta-' + pubkey, JSON.stringify(meta)); } catch { /* ignore */ }
-}
-
-async function fetchProfileMeta(pubkey: string): Promise<ProfileMeta> {
-    return new Promise((resolve) => {
-        const subId = 'av_' + Math.random().toString(36).slice(2, 8);
-        let best: { created_at: number; name: string | null; picture: string | null } | null = null;
-        let resolved = false;
-        const sockets: WebSocket[] = [];
-
-        const finish = () => {
-            if (resolved) return;
-            resolved = true;
-            sockets.forEach(s => { try { s.close(); } catch { } });
-            resolve({ name: best?.name ?? null, picture: best?.picture ?? null });
-        };
-
-        setTimeout(finish, 5000);
-
-        for (const url of DEFAULT_RELAYS) {
-            try {
-                const ws = new WebSocket(url);
-                sockets.push(ws);
-                ws.onopen = () => ws.send(JSON.stringify(['REQ', subId, { kinds: [0], authors: [pubkey], limit: 1 }]));
-                ws.onmessage = (msg) => {
-                    try {
-                        const data = JSON.parse(msg.data);
-                        if (data[0] === 'EVENT' && data[2]) {
-                            const event = data[2];
-                            const createdAt = event.created_at ?? 0;
-                            if (!best || createdAt > best.created_at) {
-                                const meta = JSON.parse(event.content);
-                                best = {
-                                    created_at: createdAt,
-                                    name: meta.display_name || meta.name || null,
-                                    picture: meta.picture || null,
-                                };
-                            }
-                        }
-                        if (data[0] === 'EOSE') ws.close();
-                    } catch { }
-                };
-                ws.onerror = () => ws.close();
-            } catch { }
-        }
-    });
 }
 
 const baseTabs: { id: Tab; label: string; icon: typeof Users }[] = [
@@ -196,11 +135,13 @@ function App() {
     useEffect(() => {
         const pk = appState.active_keypair;
         if (!pk) { setProfilePic(null); setLoadingProfilePic(false); return; }
-        const cached = getCachedMeta(pk);
+        const cached = cachedProfileMeta(pk);
         if (cached?.picture) { setProfilePic(cached.picture); setLoadingProfilePic(false); }
         else { setProfilePic(null); setLoadingProfilePic(true); }
-        fetchProfileMeta(pk)
-            .then(meta => { setCachedMeta(pk, meta); setProfilePic(meta.picture); })
+        // Never-regress resolve: a failed/empty fetch returns the cached value, so the avatar
+        // never blanks once known.
+        resolveProfileMeta(pk)
+            .then(meta => { if (meta.picture) setProfilePic(meta.picture); })
             .finally(() => setLoadingProfilePic(false));
     }, [appState.active_keypair]);
 
@@ -210,10 +151,9 @@ function App() {
         if (!showAccountSwitcher) return;
         // Seed from cache for instant display, then revalidate each in the background.
         appState.keypairs.forEach(kp => {
-            const cached = getCachedMeta(kp.pubkey);
+            const cached = cachedProfileMeta(kp.pubkey);
             if (cached) setSwitcherProfiles(prev => prev[kp.pubkey] ? prev : { ...prev, [kp.pubkey]: cached });
-            fetchProfileMeta(kp.pubkey).then(meta => {
-                setCachedMeta(kp.pubkey, meta);
+            resolveProfileMeta(kp.pubkey).then(meta => {
                 setSwitcherProfiles(prev => ({ ...prev, [kp.pubkey]: meta }));
             });
         });
@@ -468,7 +408,7 @@ function App() {
                                                                 "text-sm font-medium truncate",
                                                                 isActive ? "text-primary" : "text-foreground"
                                                             )}>
-                                                                {meta?.name || kp.name || `Key #${kp.account_index ?? 0}`}
+                                                                {meta?.name || truncateNpub(kp.npub)}
                                                             </span>
                                                             {isActive && <Badge variant="default" className="text-[10px] py-0 px-1.5 shrink-0">Active</Badge>}
                                                         </div>
@@ -524,7 +464,7 @@ function App() {
                                                             "text-sm font-medium truncate",
                                                             isActive ? "text-primary" : "text-foreground"
                                                         )}>
-                                                            {meta?.name || kp.name || truncateNpub(kp.npub)}
+                                                            {meta?.name || truncateNpub(kp.npub)}
                                                         </span>
                                                         {isActive && <Badge variant="default" className="text-[10px] py-0 px-1.5 shrink-0">Active</Badge>}
                                                     </div>

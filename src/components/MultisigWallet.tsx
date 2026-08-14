@@ -1,5 +1,5 @@
 /**
- * MultisigWallet — NIP-NMS multisig tab (Phase 3 UI).
+ * MultisigWallet — NIP-NBMS multisig tab (Phase 3 UI).
  *
  * Views:
  *   - list:   existing groups (local cache) + "Create multisig group"
@@ -10,39 +10,40 @@
  */
 import { useState, useEffect, useRef, useCallback, useMemo, useLayoutEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Plus, Shield, ArrowLeft, Loader2, Users, Send, Check, Clock, X, Sprout, Wallet as WalletIcon, RefreshCw, UserPlus, Copy, KeyRound, ChevronDown, AlertTriangle, Eye, EyeOff, Lock, History, ExternalLink, ArrowUpRight, ArrowDownLeft, Pencil } from 'lucide-react';
+import { Plus, Shield, ArrowLeft, Loader2, Users, Send, Check, Clock, X, Sprout, Wallet as WalletIcon, RefreshCw, UserPlus, Copy, KeyRound, ChevronDown, AlertTriangle, Eye, EyeOff, Lock, History, ExternalLink, ArrowUpRight, ArrowDownLeft, Pencil, DownloadCloud } from 'lucide-react';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { cn } from '@/lib/utils';
 import { useFeedback } from '@/components/ui/feedback';
 import { Badge } from '@/components/ui/badge';
-import { NmsMemberPicker } from '@/components/NmsMemberPicker';
+import { NbmsMemberPicker } from '@/components/NbmsMemberPicker';
 import { CachedImg } from '@/components/CachedImg';
 import { fetchNostrProfile, type NostrProfile } from '@/services/nostrProfile';
 import { hexToBytes } from '@noble/hashes/utils.js';
-import { nip19 } from 'nostr-tools';
+import { nip19, type Event } from 'nostr-tools';
 import {
-    deriveGroupKeypair, wrapGroupMessage, subscribeGroupChannel, fetchChannelMessages,
-    publishToRelays, type GroupKeypair, type NmsMessageType, type NmsUnwrapped,
-} from '@/services/nms';
-import { getCachedMessages, cacheMessages } from '@/services/nmsChatCache';
+    deriveGroupKeypair, wrapGroupMessage, unwrapGroupMessage, rewrapRumor, deriveBackupKeypair, backupOwnWrap, fetchOwnBackups,
+    subscribeGroupChannel, fetchChannelMessages, publishToRelays,
+    type GroupKeypair, type NbmsMessageType, type NbmsUnwrapped,
+} from '@/services/nbms';
+import { getCachedMessages, cacheMessages } from '@/services/nbmsChatCache';
 import {
     createGroupAsInitiator, getLocalGroups, saveLocalGroup,
     applyConsent, isGroupReady, publishMembershipRecord,
     fetchRecentInvites, acceptInvite, declineInvite, resendInvite,
     extractXpub, applyXpub, sendCosignerXpub, allXpubsCollected, publishXpubsCache, cosignerList,
     sendPsbtProposal, sendPsbtSignature, sendPsbtDecline, sendPsbtBroadcast, fetchGroupProfile,
-    syncGroupIndex, ensureBackupsAlive,
-    type PsbtSummary, type NmsGroup, type MemberStatus, type NmsInvite, type CosignerXpub, type GroupProfile,
-} from '@/services/nmsGroup';
+    syncGroupIndex, ensureBackupsAlive, recoverGroups,
+    type PsbtSummary, type NbmsGroup, type MemberStatus, type NbmsInvite, type CosignerXpub, type GroupProfile,
+} from '@/services/nbmsGroup';
 import {
     deriveCosignerXpub, deriveCosignerXpubFromNsec, cosignerAccountFromSeed, cosignerAccountFromNsec,
-    deriveMultisigAddress, isValidXpub, xpubFingerprint, buildDescriptor, NMS_DERIVATION_PATH,
-} from '@/services/nmsWallet';
+    deriveMultisigAddress, buildDescriptor, NBMS_DERIVATION_PATH,
+} from '@/services/nbmsWallet';
 import {
     buildMultisigPsbt, signMultisigPsbt, combinePsbts, countSignatures, finalizeMultisigPsbt, estimateVbytes,
     type SpendableUtxo,
-} from '@/services/nmsPsbt';
-import { scanWallet, fetchWalletHistory, type WalletScan, type NmsTx } from '@/services/nmsWalletScan';
+} from '@/services/nbmsPsbt';
+import { scanWallet, fetchWalletHistory, type WalletScan, type NbmsTx } from '@/services/nbmsWalletScan';
 import { List } from 'lucide-react';
 import { satsToBTC, btcToSats, fetchUTXOs, broadcastTransaction, getFeeRates, npubToTaprootAddress, type FeeRates } from '@/services/bitcoin';
 import { QRCodeSVG } from 'qrcode.react';
@@ -57,11 +58,15 @@ type View = 'list' | 'create' | 'chat' | 'invites';
 interface ChatMsg {
     id: string;
     author: string;
-    type: NmsMessageType;
+    type: NbmsMessageType;
     created_at: number;
     content: Record<string, unknown>;
     tags: string[][];
     rawCreatedAt: number; // gift-wrap time, for pagination
+    /** Verified inner rumor (author-signed) — kept so a deleted message can be re-wrapped & restored. */
+    rumor?: Event;
+    /** Set when this message is in our backup/cache but the relays are no longer serving it. */
+    missing?: boolean;
 }
 
 /** Aggregated state of one PSBT proposal, assembled from its channel messages. */
@@ -75,11 +80,11 @@ interface Proposal {
     txid?: string;
 }
 
-/** Fold the channel's nms-psbt messages into per-uuid proposals. */
+/** Fold the channel's nbms-psbt messages into per-uuid proposals. */
 function buildProposals(messages: ChatMsg[]): Record<string, Proposal> {
     const map: Record<string, Proposal> = {};
     for (const m of messages) {
-        if (m.type !== 'nms-psbt') continue;
+        if (m.type !== 'nbms-psbt') continue;
         const uuid = m.tags.find(t => t[0] === 'psbt')?.[1];
         if (!uuid) continue;
         const approved = m.tags.find(t => t[0] === 'approved')?.[1] === 'yes';
@@ -157,15 +162,15 @@ const statusMeta: Record<MemberStatus, { label: string; cls: string; Icon: typeo
 export function MultisigWallet({ activePubkey }: Props) {
     const { toast } = useFeedback();
     const [view, setView] = useState<View>('list');
-    const [groups, setGroups] = useState<NmsGroup[]>([]);
+    const [groups, setGroups] = useState<NbmsGroup[]>([]);
     const [activeNpub, setActiveNpub] = useState<string | null>(null);
-    const [invites, setInvites] = useState<NmsInvite[]>([]);
+    const [invites, setInvites] = useState<NbmsInvite[]>([]);
     const [loadingInvites, setLoadingInvites] = useState(false);
     const [busyInvite, setBusyInvite] = useState<string | null>(null);
     const skRef = useRef<string | null>(null);
     const backupCheckedRef = useRef<string | null>(null); // pubkey we've run the backup-alive check for
 
-    // Build/cache/publish the personal nmsgc backup from current local groups.
+    // Build/cache/publish the personal nbmsgc backup from current local groups.
     const syncBackup = useCallback(() => {
         const sk = skRef.current;
         if (sk && activePubkey) syncGroupIndex(sk, activePubkey, getLocalGroups(activePubkey)).catch(() => { });
@@ -194,7 +199,7 @@ export function MultisigWallet({ activePubkey }: Props) {
             .then(sk => {
                 skRef.current = sk;
                 loadInvites(sk, activePubkey);
-                // Once per session per account: rebroadcast nmsgc/msx backups if relays dropped them.
+                // Once per session per account: rebroadcast nbmsgc/msx backups if relays dropped them.
                 if (backupCheckedRef.current !== activePubkey) {
                     backupCheckedRef.current = activePubkey;
                     ensureBackupsAlive(activePubkey, local.map(g => g.groupNpub)).catch(() => { });
@@ -207,7 +212,51 @@ export function MultisigWallet({ activePubkey }: Props) {
         if (activePubkey) setGroups(getLocalGroups(activePubkey));
     }, [activePubkey]);
 
-    const handleAccept = async (invite: NmsInvite) => {
+    // Refresh group profiles (name/picture) from their kind:0 so an initiator's edit shows up in
+    // the list without every member having to open each chat. Runs once per account load.
+    useEffect(() => {
+        if (!activePubkey) return;
+        let cancelled = false;
+        (async () => {
+            for (const g of getLocalGroups(activePubkey)) {
+                const pf = await fetchGroupProfile(g).catch(() => null);
+                if (cancelled || !pf) continue;
+                const cur = getLocalGroups(activePubkey).find(x => x.groupNpub === g.groupNpub);
+                if (!cur) continue;
+                if (cur.profile?.name !== pf.name || cur.profile?.picture !== pf.picture || cur.profile?.about !== pf.about) {
+                    saveLocalGroup(activePubkey, { ...cur, profile: pf });
+                    if (!cancelled) setGroups(getLocalGroups(activePubkey));
+                }
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [activePubkey]);
+
+    // Phase 7 — rebuild groups from the personal nbmsgc backup (recovery on a fresh device /
+    // after a reinstall). Groups already present locally are left untouched.
+    const [recovering, setRecovering] = useState(false);
+    const handleRecover = useCallback(async () => {
+        const sk = skRef.current;
+        if (!sk || !activePubkey || recovering) return;
+        setRecovering(true);
+        try {
+            const { recovered, total } = await recoverGroups(sk, activePubkey);
+            refreshGroups();
+            if (recovered.length > 0) {
+                toast(`Recovered ${recovered.length} group${recovered.length > 1 ? 's' : ''} — open each to rebuild its wallets`, 'success');
+            } else if (total === 0) {
+                toast('No group backup found for this account', 'info');
+            } else {
+                toast('All backed-up groups are already here', 'info');
+            }
+        } catch {
+            toast('Recovery failed — could not reach relays', 'error');
+        } finally {
+            setRecovering(false);
+        }
+    }, [activePubkey, recovering, refreshGroups, toast]);
+
+    const handleAccept = async (invite: NbmsInvite) => {
         const sk = skRef.current;
         if (!sk || !activePubkey) { toast('Signing key unavailable', 'error'); return; }
         setBusyInvite(invite.groupNpub);
@@ -215,7 +264,7 @@ export function MultisigWallet({ activePubkey }: Props) {
             const group = await acceptInvite(invite, sk, activePubkey);
             setInvites(prev => prev.filter(i => i.groupNpub !== invite.groupNpub));
             refreshGroups();
-            syncBackup(); // record the newly-joined group in the nmsgc backup
+            syncBackup(); // record the newly-joined group in the nbmsgc backup
             setActiveNpub(group.groupNpub);
             setView('chat');
             toast('Joined group', 'success');
@@ -226,7 +275,7 @@ export function MultisigWallet({ activePubkey }: Props) {
         }
     };
 
-    const handleDecline = async (invite: NmsInvite) => {
+    const handleDecline = async (invite: NbmsInvite) => {
         const sk = skRef.current;
         if (!sk) return;
         setBusyInvite(invite.groupNpub);
@@ -293,6 +342,10 @@ export function MultisigWallet({ activePubkey }: Props) {
                         className="w-8 h-8 rounded-lg bg-secondary flex items-center justify-center hover:bg-secondary/80 transition-colors cursor-pointer">
                         <RefreshCw className={cn("w-3.5 h-3.5 text-muted-foreground", loadingInvites && "animate-spin")} />
                     </button>
+                    <button onClick={handleRecover} disabled={recovering} title="Recover groups from your backup"
+                        className="w-8 h-8 rounded-lg bg-secondary flex items-center justify-center hover:bg-secondary/80 transition-colors cursor-pointer disabled:opacity-50">
+                        {recovering ? <Loader2 className="w-3.5 h-3.5 text-muted-foreground animate-spin" /> : <DownloadCloud className="w-3.5 h-3.5 text-muted-foreground" />}
+                    </button>
                     <button onClick={() => setView('create')}
                         className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-primary text-primary-foreground text-xs font-semibold hover:bg-primary/80 transition-colors cursor-pointer">
                         <Plus className="w-3.5 h-3.5" /> New
@@ -334,6 +387,11 @@ export function MultisigWallet({ activePubkey }: Props) {
                         <button onClick={() => setView('create')}
                             className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-primary text-primary-foreground font-semibold text-sm hover:bg-primary/80 transition-colors cursor-pointer">
                             <Plus className="w-4 h-4" /> Create multisig group
+                        </button>
+                        <button onClick={handleRecover} disabled={recovering}
+                            className="flex items-center gap-2 text-xs text-muted-foreground hover:text-foreground transition-colors cursor-pointer disabled:opacity-50">
+                            {recovering ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <DownloadCloud className="w-3.5 h-3.5" />}
+                            {recovering ? 'Recovering…' : 'Recover from backup'}
                         </button>
                     </div>
                 ) : (
@@ -386,7 +444,7 @@ function CreateGroup({ activePubkey, getSk, onCancel, onCreated }: {
     activePubkey: string;
     getSk: () => string | null;
     onCancel: () => void;
-    onCreated: (g: NmsGroup) => void;
+    onCreated: (g: NbmsGroup) => void;
 }) {
     const { toast } = useFeedback();
     const [pickerOpen, setPickerOpen] = useState(true);
@@ -473,7 +531,7 @@ function CreateGroup({ activePubkey, getSk, onCancel, onCreated }: {
                 </div>
             )}
 
-            <NmsMemberPicker
+            <NbmsMemberPicker
                 isOpen={pickerOpen}
                 onClose={() => setPickerOpen(false)}
                 onConfirm={setMemberHexes}
@@ -488,7 +546,7 @@ function CreateGroup({ activePubkey, getSk, onCancel, onCreated }: {
 // ──────────────────────────────────────────────────────────────────────────
 
 function GroupChat({ group, ownerHex, getSk, onBack, onGroupUpdate }: {
-    group: NmsGroup;
+    group: NbmsGroup;
     ownerHex: string;
     getSk: () => string | null;
     onBack: () => void;
@@ -496,7 +554,7 @@ function GroupChat({ group, ownerHex, getSk, onBack, onGroupUpdate }: {
 }) {
     const { toast } = useFeedback();
     const [messages, setMessages] = useState<ChatMsg[]>([]);
-    const [roster, setRoster] = useState<NmsGroup>(group);
+    const [roster, setRoster] = useState<NbmsGroup>(group);
     const [draft, setDraft] = useState('');
     const [sending, setSending] = useState(false);
     const [showMembers, setShowMembers] = useState(false);
@@ -506,14 +564,23 @@ function GroupChat({ group, ownerHex, getSk, onBack, onGroupUpdate }: {
     const [groupProfileOpen, setGroupProfileOpen] = useState(false);
     const [loadingOlder, setLoadingOlder] = useState(false);
     const [reachedEnd, setReachedEnd] = useState(false);
+    // Deletion-resilience diff: which rumor ids the relays have actually served us this session,
+    // my personal-backup mirror of own messages, and when the diff is allowed to flag gaps.
+    const [relaySeen, setRelaySeen] = useState<Set<string>>(new Set());
+    const [backupExtras, setBackupExtras] = useState<ChatMsg[]>([]);
+    const [diffReady, setDiffReady] = useState(false);
+    const [restoreBusy, setRestoreBusy] = useState<string | null>(null);
     const groupKeyRef = useRef<GroupKeypair | null>(null);
     const scrollRef = useRef<HTMLDivElement>(null);
     const publishedReadyRef = useRef(false);
     const olderLoadRef = useRef<number | null>(null); // prev scrollHeight while prepending older
     const didInitialScrollRef = useRef(false);
 
-    const toChatMsg = (msg: NmsUnwrapped, raw: { id: string; created_at: number }): ChatMsg => ({
-        id: raw.id, author: msg.author, type: msg.type, created_at: msg.created_at, content: msg.content, tags: msg.tags, rawCreatedAt: raw.created_at,
+    // Messages are identified by the INNER RUMOR id, not the wrap id: re-wrapping a message
+    // (to restore it after a deletion) produces a new wrap but the same rumor, so this keeps
+    // de-dup stable and merges any surviving copies into one.
+    const toChatMsg = (msg: NbmsUnwrapped, raw: { created_at: number }): ChatMsg => ({
+        id: msg.rumor.id, author: msg.author, type: msg.type, created_at: msg.created_at, content: msg.content, tags: msg.tags, rawCreatedAt: raw.created_at, rumor: msg.rumor,
     });
 
     const handleReinvite = async (memberHex: string) => {
@@ -544,7 +611,7 @@ function GroupChat({ group, ownerHex, getSk, onBack, onGroupUpdate }: {
             setMessages(prev => {
                 const ids = new Set(prev.map(p => p.id));
                 const add = cached.filter(c => !ids.has(c.id)).map(c => ({
-                    id: c.id, author: c.author, type: c.type as NmsMessageType, created_at: c.created_at, content: c.content, tags: c.tags, rawCreatedAt: c.rawCreatedAt,
+                    id: c.id, author: c.author, type: c.type as NbmsMessageType, created_at: c.created_at, content: c.content, tags: c.tags, rawCreatedAt: c.rawCreatedAt, rumor: c.rumor,
                 }));
                 return [...prev, ...add].sort((a, b) => a.created_at - b.created_at);
             });
@@ -558,13 +625,14 @@ function GroupChat({ group, ownerHex, getSk, onBack, onGroupUpdate }: {
         if (!gk) return;
         const sub = subscribeGroupChannel(gk, (msg, raw) => {
             const cm = toChatMsg(msg, raw);
-            setMessages(prev => prev.some(m => m.id === raw.id) ? prev : [...prev, cm].sort((a, b) => a.created_at - b.created_at));
+            setMessages(prev => prev.some(m => m.id === cm.id) ? prev : [...prev, cm].sort((a, b) => a.created_at - b.created_at));
+            setRelaySeen(prev => prev.has(cm.id) ? prev : new Set(prev).add(cm.id)); // relay is serving this
             cacheMessages(group.groupNpub, [cm]);
 
-            if (msg.type === 'nms-accept' || msg.type === 'nms-decline') {
+            if (msg.type === 'nbms-accept' || msg.type === 'nbms-decline') {
                 setRoster(prev => applyConsent(prev, msg));
             }
-            if (msg.type === 'nms-xpub') {
+            if (msg.type === 'nbms-xpub') {
                 const x = extractXpub(msg);
                 if (x) setRoster(prev => applyXpub(prev, x));
             }
@@ -600,6 +668,29 @@ function GroupChat({ group, ownerHex, getSk, onBack, onGroupUpdate }: {
         if (nearBottom) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
     }, [messages]);
 
+    // Personal-backup diff: pull my backup channel, then — once the live fetch has had time to
+    // settle — flag any backed-up message the relays are no longer serving. Self-healing: the
+    // flag clears as soon as the message reappears in `relaySeen` (e.g. after a rebroadcast).
+    useEffect(() => {
+        const gk = groupKeyRef.current;
+        const sk = getSk();
+        setDiffReady(false); setBackupExtras([]); setRelaySeen(new Set());
+        if (!gk || !sk) return;
+        let cancelled = false;
+        (async () => {
+            try {
+                const bk = deriveBackupKeypair(sk, hexToBytes(group.hHex));
+                const wraps = await fetchOwnBackups(bk);
+                if (cancelled) return;
+                const extras: ChatMsg[] = [];
+                for (const w of wraps) { const u = unwrapGroupMessage(w, gk); if (u) extras.push(toChatMsg(u, w)); }
+                setBackupExtras(extras);
+            } catch { /* best-effort */ }
+        })();
+        const t = setTimeout(() => { if (!cancelled) setDiffReady(true); }, 6000);
+        return () => { cancelled = true; clearTimeout(t); };
+    }, [group.groupNpub]); // eslint-disable-line react-hooks/exhaustive-deps
+
     // Scroll-up pagination: fetch older messages from relays when near the top.
     const loadOlder = useCallback(async () => {
         const gk = groupKeyRef.current;
@@ -609,6 +700,7 @@ function GroupChat({ group, ownerHex, getSk, onBack, onGroupUpdate }: {
         try {
             const oldestRaw = Math.min(...messages.map(m => m.rawCreatedAt));
             const older = await fetchChannelMessages(gk, { until: oldestRaw - 1, limit: 40 });
+            setRelaySeen(prev => { const n = new Set(prev); older.forEach(({ msg }) => n.add(msg.rumor.id)); return n; });
             const existing = new Set(messages.map(m => m.id));
             const fresh = older.map(({ msg, raw }) => toChatMsg(msg, raw)).filter(m => !existing.has(m.id));
             if (fresh.length === 0) { setReachedEnd(true); return; }
@@ -664,12 +756,20 @@ function GroupChat({ group, ownerHex, getSk, onBack, onGroupUpdate }: {
         if (!body || !sk || !gk) return;
         setSending(true);
         try {
-            const wrap = wrapGroupMessage({ type: 'nms-text', content: { body } }, sk, gk);
-            // Optimistic local echo.
-            setMessages(prev => [...prev, { id: wrap.id, author: ownerHex, type: 'nms-text', created_at: Math.floor(Date.now() / 1000), content: { body }, tags: [], rawCreatedAt: Math.floor(Date.now() / 1000) }]);
+            const wrap = wrapGroupMessage({ type: 'nbms-text', content: { body } }, sk, gk);
+            // Optimistic local echo, keyed by the inner rumor id (the same id the relay round-trip carries).
+            const echo = unwrapGroupMessage(wrap, gk);
+            if (echo) {
+                const cm = toChatMsg(echo, wrap);
+                setMessages(prev => prev.some(m => m.id === cm.id) ? prev : [...prev, cm].sort((a, b) => a.created_at - b.created_at));
+                cacheMessages(group.groupNpub, [cm]);
+            }
             setDraft('');
             const ok = await publishToRelays(wrap);
             if (ok === 0) toast('Message not delivered to any relay', 'error');
+            // Mirror to my personal backup channel (best-effort) so a deletion by another member
+            // never costs me the original — restorable later from this derived "group of one".
+            try { backupOwnWrap(wrap, deriveBackupKeypair(sk, hexToBytes(group.hHex))).catch(() => { }); } catch { /* ignore */ }
         } catch {
             toast('Failed to send', 'error');
         } finally {
@@ -680,6 +780,53 @@ function GroupChat({ group, ownerHex, getSk, onBack, onGroupUpdate }: {
     // Aggregate PSBT proposals from the channel.
     const proposals = useMemo(() => buildProposals(messages), [messages]);
     const [psbtBusy, setPsbtBusy] = useState<string | null>(null);
+
+    // Render list = loaded messages ∪ backup-only entries (fresh device / pruned cache), each
+    // flagged `missing` when the relays aren't serving it. The "missing" judgement is bounded to
+    // the window we actually observed from relays, so older history we simply didn't re-fetch
+    // isn't falsely flagged; if we saw nothing from relays, nothing is flagged.
+    const displayMessages = useMemo(() => {
+        const byId = new Map<string, ChatMsg>();
+        for (const m of messages) byId.set(m.id, m);
+        for (const e of backupExtras) if (!byId.has(e.id)) byId.set(e.id, e);
+        const list = [...byId.values()].sort((a, b) => a.created_at - b.created_at);
+        if (!diffReady) return list;
+        let oldestRelay = Infinity;
+        for (const m of messages) if (relaySeen.has(m.id) && m.created_at < oldestRelay) oldestRelay = m.created_at;
+        if (oldestRelay === Infinity) return list;
+        return list.map(m =>
+            (!!m.rumor && !relaySeen.has(m.id) && m.created_at >= oldestRelay) ? { ...m, missing: true } : m,
+        );
+    }, [messages, backupExtras, relaySeen, diffReady]);
+
+    // Restore a message the relays dropped: re-wrap the original author-signed rumor into a fresh
+    // envelope (new id the prior deletion can't name) and re-publish. Optimistically clears the
+    // flag; the round-trip via the live subscription confirms it.
+    const handleRestore = async (m: ChatMsg) => {
+        const gk = groupKeyRef.current;
+        if (!gk || !m.rumor) return;
+        setRestoreBusy(m.id);
+        try {
+            const fresh = rewrapRumor(m.rumor, gk);
+            const ok = await publishToRelays(fresh);
+            if (ok > 0) {
+                setRelaySeen(prev => new Set(prev).add(m.id));
+                const u = unwrapGroupMessage(fresh, gk);
+                if (u) {
+                    const cm = toChatMsg(u, fresh);
+                    setMessages(prev => prev.some(x => x.id === cm.id) ? prev : [...prev, cm].sort((a, b) => a.created_at - b.created_at));
+                    cacheMessages(group.groupNpub, [cm]);
+                }
+                toast('Rebroadcast to the channel', 'success');
+            } else {
+                toast('No relay accepted the rebroadcast', 'error');
+            }
+        } catch {
+            toast('Failed to rebroadcast', 'error');
+        } finally {
+            setRestoreBusy(null);
+        }
+    };
 
     const handleSign = async (p: Proposal) => {
         const sk = getSk();
@@ -805,22 +952,37 @@ function GroupChat({ group, ownerHex, getSk, onBack, onGroupUpdate }: {
                     {loadingOlder && (
                         <div className="flex justify-center py-2"><Loader2 className="w-4 h-4 animate-spin text-muted-foreground" /></div>
                     )}
-                    {messages.length === 0 ? (
+                    {displayMessages.length === 0 ? (
                         <div className="m-auto flex flex-col items-center justify-center gap-2 text-muted-foreground">
                             <Users className="w-8 h-8 opacity-30" />
                             <p className="text-xs">No messages yet. Say hi 👋</p>
                         </div>
-                    ) : messages.map(m => {
-                        if (m.type === 'nms-psbt') {
+                    ) : displayMessages.map(m => {
+                        let row;
+                        if (m.type === 'nbms-psbt') {
                             const uuid = m.tags.find(t => t[0] === 'psbt')?.[1];
                             const isProposal = !!m.content.summary;
-                            if (isProposal && uuid && proposals[uuid]) {
-                                return <PsbtCard key={m.id} proposal={proposals[uuid]} ownerHex={ownerHex} profile={profiles[proposals[uuid].proposer]} profiles={profiles}
-                                    busy={psbtBusy === uuid} onSign={handleSign} onDecline={handleDecline} onBroadcast={handleBroadcast} />;
-                            }
-                            return <PsbtSystemLine key={m.id} msg={m} profile={profiles[m.author]} />;
+                            row = (isProposal && uuid && proposals[uuid])
+                                ? <PsbtCard proposal={proposals[uuid]} ownerHex={ownerHex} profile={profiles[proposals[uuid].proposer]} profiles={profiles}
+                                    busy={psbtBusy === uuid} onSign={handleSign} onDecline={handleDecline} onBroadcast={handleBroadcast} />
+                                : <PsbtSystemLine msg={m} profile={profiles[m.author]} />;
+                        } else {
+                            row = <MessageRow msg={m} mine={m.author === ownerHex} profile={profiles[m.author]} />;
                         }
-                        return <MessageRow key={m.id} msg={m} mine={m.author === ownerHex} profile={profiles[m.author]} />;
+                        return (
+                            <div key={m.id} className={cn(m.missing && "opacity-90")}>
+                                {row}
+                                {m.missing && (
+                                    <div className={cn("flex items-center gap-2 px-1 mt-1", m.author === ownerHex && "justify-end")}>
+                                        <span className="text-[10px] text-amber-500 flex items-center gap-1"><AlertTriangle className="w-3 h-3" /> Not on relays</span>
+                                        <button onClick={() => handleRestore(m)} disabled={restoreBusy === m.id}
+                                            className="text-[10px] font-semibold text-primary hover:underline disabled:opacity-50 flex items-center gap-1 cursor-pointer">
+                                            {restoreBusy === m.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />} Rebroadcast
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
+                        );
                     })}
                 </div>
             </div>
@@ -847,7 +1009,7 @@ function GroupChat({ group, ownerHex, getSk, onBack, onGroupUpdate }: {
 
 /** View / edit the group's encrypted profile (initiator can edit). */
 function GroupProfileModal({ group, isInitiator, onSave, onClose }: {
-    group: NmsGroup;
+    group: NbmsGroup;
     isInitiator: boolean;
     onSave: (pf: GroupProfile) => Promise<void>;
     onClose: () => void;
@@ -941,8 +1103,8 @@ function MessageRow({ msg, mine, profile }: { msg: ChatMsg; mine: boolean; profi
     const name = profile?.display_name || profile?.name || null;
     const npub = nip19Npub(msg.author);
 
-    if (msg.type === 'nms-accept' || msg.type === 'nms-decline') {
-        const joined = msg.type === 'nms-accept';
+    if (msg.type === 'nbms-accept' || msg.type === 'nbms-decline') {
+        const joined = msg.type === 'nbms-accept';
         return (
             <div className="flex items-center gap-2.5 w-full py-2 px-3 rounded-xl bg-secondary/30 border border-white/5">
                 <Avatar profile={profile} seed={npub.slice(5, 7)} />
@@ -958,7 +1120,7 @@ function MessageRow({ msg, mine, profile }: { msg: ChatMsg; mine: boolean; profi
         );
     }
 
-    if (msg.type === 'nms-text') {
+    if (msg.type === 'nbms-text') {
         if (mine) {
             return (
                 <div className="flex justify-end">
@@ -984,7 +1146,7 @@ function MessageRow({ msg, mine, profile }: { msg: ChatMsg; mine: boolean; profi
         );
     }
 
-    if (msg.type === 'nms-xpub') {
+    if (msg.type === 'nbms-xpub') {
         return (
             <div className="flex items-center gap-2.5 w-full py-2 px-3 rounded-xl bg-secondary/30 border border-white/5">
                 <Avatar profile={profile} seed={npub.slice(5, 7)} />
@@ -1008,9 +1170,11 @@ function PsbtSystemLine({ msg, profile }: { msg: ChatMsg; profile: NostrProfile 
     const npub = nip19Npub(msg.author);
     const approved = msg.tags.find(t => t[0] === 'approved')?.[1] === 'yes';
     const txid = msg.content.txid as string | undefined;
-    const label = txid ? 'broadcast the transaction' : approved ? 'signed the transaction' : 'declined the transaction';
+    const label = txid ? 'broadcasted the transaction' : approved ? 'signed the transaction' : 'declined the transaction';
     const color = txid ? 'text-primary' : approved ? 'text-green-500' : 'text-red-500';
-    const Icon = txid ? ExternalLink : approved ? Check : X;
+    // No icon for the broadcast line — it's a status, not a link; the external-link glyph wrongly
+    // implied it was clickable. Signed/declined keep their check/cross (not misleading).
+    const Icon = txid ? null : approved ? Check : X;
     return (
         <div className="flex items-center gap-2.5 w-full py-2 px-3 rounded-xl bg-secondary/30 border border-white/5">
             <Avatar profile={profile} seed={npub.slice(5, 7)} />
@@ -1019,7 +1183,7 @@ function PsbtSystemLine({ msg, profile }: { msg: ChatMsg; profile: NostrProfile 
                 {name && <div className="text-[10px] text-muted-foreground font-mono truncate">{npub}</div>}
             </div>
             <span className={cn('text-[11px] font-medium flex items-center gap-1 shrink-0', color)}>
-                <Icon className="w-3.5 h-3.5" /> {label}
+                {Icon && <Icon className="w-3.5 h-3.5" />} {label}
             </span>
         </div>
     );
@@ -1229,7 +1393,7 @@ function SecretReveal({ value, mode, label, caption }: { value: string; mode: 'w
 // ──────────────────────────────────────────────────────────────────────────
 
 function WalletSetup({ group, ownerHex, getSk, profiles, onBack, onXpubSent }: {
-    group: NmsGroup;
+    group: NbmsGroup;
     ownerHex: string;
     getSk: () => string | null;
     profiles: Record<string, NostrProfile | null>;
@@ -1239,12 +1403,9 @@ function WalletSetup({ group, ownerHex, getSk, profiles, onBack, onXpubSent }: {
     const { toast } = useFeedback();
     const [seedId, setSeedId] = useState<string | null | undefined>(undefined); // undefined = loading
     const [modalOpen, setModalOpen] = useState(false);
-    const [tab, setTab] = useState<'current' | 'imported'>('current');
     const [deriving, setDeriving] = useState(false);
     const [derived, setDerived] = useState<{ xpub: string; fingerprint: string; path: string; mnemonic?: string; fromNsec?: boolean } | null>(null);
     const [deriveError, setDeriveError] = useState<string | null>(null);
-    const [importXpub, setImportXpub] = useState('');
-    const [importFp, setImportFp] = useState('');
     const [sending, setSending] = useState(false);
     const [expandedMember, setExpandedMember] = useState<string | null>(null);
     const [detailsOpen, setDetailsOpen] = useState(false);
@@ -1280,8 +1441,7 @@ function WalletSetup({ group, ownerHex, getSk, profiles, onBack, onXpubSent }: {
     }, [ownerHex]);
 
     const openModal = () => {
-        setDerived(null); setDeriveError(null); setImportXpub(''); setImportFp('');
-        setTab('current');
+        setDerived(null); setDeriveError(null);
         setModalOpen(true);
     };
 
@@ -1327,12 +1487,12 @@ function WalletSetup({ group, ownerHex, getSk, profiles, onBack, onXpubSent }: {
         }
     };
 
-    // Derive once the modal is on the Current tab and we know which method to use.
+    // Derive once the modal opens and we know which method to use.
     useEffect(() => {
-        if (modalOpen && tab === 'current' && seedId !== undefined && !derived && !deriving && !deriveError) {
+        if (modalOpen && seedId !== undefined && !derived && !deriving && !deriveError) {
             deriveCurrent();
         }
-    }, [modalOpen, tab, seedId]); // eslint-disable-line react-hooks/exhaustive-deps
+    }, [modalOpen, seedId]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const doSend = async (xpub: string, fingerprint: string, path: string) => {
         const sk = getSk();
@@ -1351,13 +1511,6 @@ function WalletSetup({ group, ownerHex, getSk, profiles, onBack, onXpubSent }: {
         } finally {
             setSending(false);
         }
-    };
-
-    const confirmImported = () => {
-        const xpub = importXpub.trim();
-        if (!isValidXpub(xpub)) { toast('Invalid xpub', 'error'); return; }
-        const fp = importFp.trim() || xpubFingerprint(xpub);
-        doSend(xpub, fp, NMS_DERIVATION_PATH);
     };
 
     return (
@@ -1472,27 +1625,12 @@ function WalletSetup({ group, ownerHex, getSk, profiles, onBack, onXpubSent }: {
                             <button onClick={() => setModalOpen(false)} className="text-muted-foreground hover:text-foreground cursor-pointer"><X className="w-5 h-5" /></button>
                         </div>
 
-                        {/* Tabs */}
-                        <div className="flex gap-1 p-3 shrink-0">
-                            <button onClick={() => setTab('current')}
-                                className={cn("flex-1 py-2 rounded-lg text-xs font-semibold transition-colors cursor-pointer",
-                                    tab === 'current' ? "bg-primary text-primary-foreground" : "bg-secondary text-muted-foreground hover:bg-secondary/80")}>
-                                Current
-                            </button>
-                            <button onClick={() => setTab('imported')}
-                                className={cn("flex-1 py-2 rounded-lg text-xs font-semibold transition-colors cursor-pointer",
-                                    tab === 'imported' ? "bg-primary text-primary-foreground" : "bg-secondary text-muted-foreground hover:bg-secondary/80")}>
-                                Imported
-                            </button>
-                        </div>
-
-                        <div className="flex-1 overflow-y-auto px-4 pb-4">
-                            {tab === 'current' ? (
-                                <div className="space-y-3">
+                        <div className="flex-1 overflow-y-auto px-4 pb-4 pt-2">
+                            <div className="space-y-3">
                                     <p className="text-[11px] text-muted-foreground">
                                         {derived?.fromNsec
-                                            ? <>Your account has no seed, so a dedicated key is derived from your account key + this group's secret on <span className="font-mono">{NMS_DERIVATION_PATH}</span>. Back up the words below to recover independently.</>
-                                            : <>Derived from your seed with this group's passphrase on <span className="font-mono">{NMS_DERIVATION_PATH}</span>. Your main wallet is untouched.</>}
+                                            ? <>Your account has no seed, so a dedicated key is derived from your account key + this group's secret on <span className="font-mono">{NBMS_DERIVATION_PATH}</span>. Back up the words below to recover independently.</>
+                                            : <>Derived from your seed with this group's passphrase on <span className="font-mono">{NBMS_DERIVATION_PATH}</span>. Your main wallet is untouched.</>}
                                     </p>
                                     {deriving ? (
                                         <div className="flex items-center justify-center py-8"><Loader2 className="w-6 h-6 animate-spin text-primary" /></div>
@@ -1517,22 +1655,7 @@ function WalletSetup({ group, ownerHex, getSk, profiles, onBack, onXpubSent }: {
                                             </button>
                                         </div>
                                     ) : null}
-                                </div>
-                            ) : (
-                                <div className="space-y-3">
-                                    <p className="text-[11px] text-muted-foreground">
-                                        Paste an account-level xpub on a P2WSH multisig path. Provide its master fingerprint if you have it (needed for correct multisig recovery).
-                                    </p>
-                                    <textarea value={importXpub} onChange={e => setImportXpub(e.target.value)} placeholder="xpub…" rows={3}
-                                        className="w-full bg-background border border-border rounded-xl px-3 py-2.5 text-foreground text-xs font-mono focus:ring-2 focus:ring-primary outline-none resize-none" />
-                                    <input value={importFp} onChange={e => setImportFp(e.target.value)} placeholder="Master fingerprint (optional, 8 hex)"
-                                        className="w-full bg-background border border-border rounded-xl px-3 py-2.5 text-foreground text-xs font-mono focus:ring-2 focus:ring-primary outline-none" />
-                                    <button onClick={confirmImported} disabled={sending || !importXpub.trim()}
-                                        className="w-full py-2.5 rounded-xl bg-primary text-primary-foreground text-sm font-bold hover:bg-primary/80 transition-colors cursor-pointer disabled:opacity-50 flex items-center justify-center gap-1.5">
-                                        {sending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />} Confirm & send
-                                    </button>
-                                </div>
-                            )}
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -1579,7 +1702,7 @@ function WalletSetup({ group, ownerHex, getSk, profiles, onBack, onXpubSent }: {
 }
 
 /** One threshold's wallet: balance, receive address (lazy-scanned), send, history, descriptor export. */
-function WalletCard({ keys, m, n, group, ownerHex, getSk }: { keys: CosignerXpub[]; m: number; n: number; group: NmsGroup; ownerHex: string; getSk: () => string | null }) {
+function WalletCard({ keys, m, n, group, ownerHex, getSk }: { keys: CosignerXpub[]; m: number; n: number; group: NbmsGroup; ownerHex: string; getSk: () => string | null }) {
     const { toast } = useFeedback();
     const [scan, setScan] = useState<WalletScan | null>(null);
     const [loading, setLoading] = useState(true);
@@ -1588,8 +1711,10 @@ function WalletCard({ keys, m, n, group, ownerHex, getSk }: { keys: CosignerXpub
     const [copied, setCopied] = useState<string | null>(null);
     const [qrFull, setQrFull] = useState(false);
     const [historyOpen, setHistoryOpen] = useState(false);
-    const [history, setHistory] = useState<NmsTx[] | null>(null);
+    const [history, setHistory] = useState<NbmsTx[] | null>(null);
     const [historyLoading, setHistoryLoading] = useState(false);
+    const [historyErr, setHistoryErr] = useState<string | null>(null);
+    const scanRef = useRef<WalletScan | null>(null);
     const [addressesOpen, setAddressesOpen] = useState(false);
     const [addrTab, setAddrTab] = useState<'receive' | 'change'>('receive');
     const [sendOpen, setSendOpen] = useState(false);
@@ -1627,12 +1752,27 @@ function WalletCard({ keys, m, n, group, ownerHex, getSk }: { keys: CosignerXpub
         } finally { setProposing(false); }
     };
 
+    // `keys` is a fresh array on every parent render (cosignerList rebuilds it), so key the scan
+    // off a STABLE signature of its contents. Depending on the array reference re-fired the scan
+    // on every render, hammering the Bitcoin nodes into rate-limiting — which then silently
+    // blanked the balance/receive-address and emptied the history.
+    const keySig = keys.map(k => k.xpub).join(',');
     const load = useCallback(() => {
-        setLoading(true); setErr(null);
-        scanWallet(keys, m).then(setScan).catch(() => setErr('Failed to load balance')).finally(() => setLoading(false));
-    }, [keys, m]);
+        setErr(null);
+        if (!scanRef.current) setLoading(true); // only show the spinner on the first load, not refreshes
+        scanWallet(keys, m)
+            .then(s => { scanRef.current = s; setScan(s); })
+            .catch(() => setErr('Failed to load balance'))
+            .finally(() => setLoading(false));
+    }, [keySig, m]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    useEffect(() => { load(); }, [load]);
+    // Scan once, then refresh on a slow interval so balances/addresses update after
+    // sends/receives without the render-driven scan storm.
+    useEffect(() => {
+        load();
+        const id = setInterval(load, 60_000);
+        return () => clearInterval(id);
+    }, [load]);
 
     const copy = (text: string, key: string) => {
         navigator.clipboard.writeText(text).then(() => {
@@ -1644,8 +1784,11 @@ function WalletCard({ keys, m, n, group, ownerHex, getSk }: { keys: CosignerXpub
     const openHistory = () => {
         setHistoryOpen(true);
         if (!history && scan) {
-            setHistoryLoading(true);
-            fetchWalletHistory(scan.usedAddresses).then(setHistory).catch(() => setHistory([])).finally(() => setHistoryLoading(false));
+            setHistoryLoading(true); setHistoryErr(null);
+            fetchWalletHistory(scan.usedAddresses)
+                .then(setHistory)
+                .catch(() => setHistoryErr('Couldn’t load history — nodes unreachable. Close and reopen to retry.'))
+                .finally(() => setHistoryLoading(false));
         }
     };
 
@@ -1739,6 +1882,11 @@ function WalletCard({ keys, m, n, group, ownerHex, getSk }: { keys: CosignerXpub
                         <div className="flex-1 overflow-y-auto p-3 space-y-1.5">
                             {historyLoading ? (
                                 <div className="flex items-center justify-center py-10"><Loader2 className="w-6 h-6 animate-spin text-primary" /></div>
+                            ) : historyErr ? (
+                                <div className="flex flex-col items-center justify-center py-10 gap-2 text-muted-foreground">
+                                    <AlertTriangle className="w-8 h-8 opacity-40 text-amber-500" />
+                                    <p className="text-sm text-center px-4">{historyErr}</p>
+                                </div>
                             ) : !history || history.length === 0 ? (
                                 <div className="flex flex-col items-center justify-center py-10 gap-2 text-muted-foreground">
                                     <History className="w-8 h-8 opacity-30" />
@@ -1845,7 +1993,7 @@ function WalletCard({ keys, m, n, group, ownerHex, getSk }: { keys: CosignerXpub
 }
 
 /** A transaction row in the wallet history; expands to show txid + explorer link. */
-function TxRow({ tx, onCopy, copied }: { tx: NmsTx; onCopy: (text: string, key: string) => void; copied: string | null }) {
+function TxRow({ tx, onCopy, copied }: { tx: NbmsTx; onCopy: (text: string, key: string) => void; copied: string | null }) {
     const [open, setOpen] = useState(false);
     const incoming = tx.delta >= 0;
     const date = tx.blockTime ? new Date(tx.blockTime * 1000).toLocaleString() : 'Pending';
@@ -1887,7 +2035,7 @@ function TxRow({ tx, onCopy, copied }: { tx: NmsTx; onCopy: (text: string, key: 
 // ──────────────────────────────────────────────────────────────────────────
 
 function MembersPanel({ group, isInitiator, reinviting, onReinvite, onBack }: {
-    group: NmsGroup;
+    group: NbmsGroup;
     isInitiator: boolean;
     reinviting: string | null;
     onReinvite: (memberHex: string) => void;
@@ -1993,10 +2141,10 @@ function MembersPanel({ group, isInitiator, reinviting, onReinvite, onBack }: {
 // ──────────────────────────────────────────────────────────────────────────
 
 function InvitesPage({ invites, busyInvite, onAccept, onDecline, onBack }: {
-    invites: NmsInvite[];
+    invites: NbmsInvite[];
     busyInvite: string | null;
-    onAccept: (inv: NmsInvite) => void;
-    onDecline: (inv: NmsInvite) => void;
+    onAccept: (inv: NbmsInvite) => void;
+    onDecline: (inv: NbmsInvite) => void;
     onBack: () => void;
 }) {
     const { toast } = useFeedback();

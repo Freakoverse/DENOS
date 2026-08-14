@@ -1,5 +1,5 @@
 /**
- * NIP-NMS — Phase 4: cosigner key derivation.
+ * NIP-NBMS — Phase 4: cosigner key derivation.
  *
  * Each member contributes an xpub derived from their existing BIP39 seed using the group
  * secret H as the passphrase, on the BIP48 native-segwit P2WSH multisig path. The
@@ -20,10 +20,10 @@ import { Buffer } from 'buffer';
 
 /** Versioned KDF context, so this derivation can never collide with another use of the
  *  nsec and can be revised in the future without breaking existing wallets. */
-const NSEC_KDF_INFO = new TextEncoder().encode('nms-cosigner-v1');
+const NSEC_KDF_INFO = new TextEncoder().encode('nbms-cosigner-v1');
 
 /** BIP48 path: purpose 48' / coin 0' (mainnet) / account 0' / script-type 2' (P2WSH native segwit). */
-export const NMS_DERIVATION_PATH = "m/48'/0'/0'/2'";
+export const NBMS_DERIVATION_PATH = "m/48'/0'/0'/2'";
 
 export interface DerivedCosignerKey {
     xpub: string;
@@ -38,12 +38,12 @@ export interface DerivedCosignerKey {
 export function deriveCosignerXpub(mnemonic: string, passphraseHex: string): DerivedCosignerKey {
     const seed = mnemonicToSeedSync(mnemonic.trim(), passphraseHex);
     const root = HDKey.fromMasterSeed(seed);
-    const node = root.derive(NMS_DERIVATION_PATH);
-    if (!node.publicExtendedKey) throw new Error('NMS: xpub derivation failed');
+    const node = root.derive(NBMS_DERIVATION_PATH);
+    if (!node.publicExtendedKey) throw new Error('NBMS: xpub derivation failed');
     return {
         xpub: node.publicExtendedKey,
         fingerprint: root.fingerprint.toString(16).padStart(8, '0'),
-        path: NMS_DERIVATION_PATH,
+        path: NBMS_DERIVATION_PATH,
     };
 }
 
@@ -77,13 +77,13 @@ export function deriveCosignerXpubFromNsec(nsecHex: string, passphraseHex: strin
 /** Account-level HDKey (with private key) for signing — seed path: mnemonic + passphrase H. */
 export function cosignerAccountFromSeed(mnemonic: string, passphraseHex: string): HDKey {
     const seed = mnemonicToSeedSync(mnemonic.trim(), passphraseHex);
-    return HDKey.fromMasterSeed(seed).derive(NMS_DERIVATION_PATH);
+    return HDKey.fromMasterSeed(seed).derive(NBMS_DERIVATION_PATH);
 }
 
 /** Account-level HDKey (with private key) for signing — nsec path: HKDF mnemonic, no passphrase. */
 export function cosignerAccountFromNsec(nsecHex: string, passphraseHex: string): HDKey {
     const seed = mnemonicToSeedSync(nsecToMnemonic(nsecHex, passphraseHex), '');
-    return HDKey.fromMasterSeed(seed).derive(NMS_DERIVATION_PATH);
+    return HDKey.fromMasterSeed(seed).derive(NBMS_DERIVATION_PATH);
 }
 
 /** Loose validation of a pasted xpub (for the "imported" tab). */
@@ -136,13 +136,13 @@ export function multisigPaymentForIndex(
 ): MultisigPayment {
     const pubkeys = keys.map(k => {
         const node = HDKey.fromExtendedKey(k.xpub).deriveChild(chain).deriveChild(index);
-        if (!node.publicKey) throw new Error('NMS: cannot derive cosigner pubkey');
+        if (!node.publicKey) throw new Error('NBMS: cannot derive cosigner pubkey');
         return Buffer.from(node.publicKey);
     });
     pubkeys.sort((a, b) => a.compare(b)); // BIP67
     const p2ms = bitcoin.payments.p2ms({ m, pubkeys, network });
     const p2wsh = bitcoin.payments.p2wsh({ redeem: p2ms, network });
-    if (!p2wsh.address || !p2wsh.output || !p2ms.output) throw new Error('NMS: payment build failed');
+    if (!p2wsh.address || !p2wsh.output || !p2ms.output) throw new Error('NBMS: payment build failed');
     return { address: p2wsh.address, output: p2wsh.output as Buffer, witnessScript: p2ms.output as Buffer };
 }
 

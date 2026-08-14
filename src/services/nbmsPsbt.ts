@@ -1,5 +1,5 @@
 /**
- * NIP-NMS — Phase 6: multisig PSBT engine (build → sign → combine → finalize).
+ * NIP-NBMS — Phase 6: multisig PSBT engine (build → sign → combine → finalize).
  *
  * Propose-once / sign-many: the proposer freezes inputs/outputs/fee into a PSBT; every
  * member signs that exact PSBT (partial sigs combine in any order); once the threshold is
@@ -12,7 +12,7 @@ import * as bitcoin from 'bitcoinjs-lib';
 import { Buffer } from 'buffer';
 import { HDKey } from '@scure/bip32';
 import { getECPair } from './bitcoin';
-import { multisigPaymentForIndex, NMS_DERIVATION_PATH } from './nmsWallet';
+import { multisigPaymentForIndex, NBMS_DERIVATION_PATH } from './nbmsWallet';
 
 export interface DescriptorKeyFull {
     xpub: string;
@@ -28,6 +28,9 @@ export interface SpendableUtxo {
 }
 
 const NETWORK = bitcoin.networks.bitcoin;
+
+/** BIP125 opt-in Replace-By-Fee (see bitcoin.ts) — signals the multisig spend as fee-bumpable. */
+const RBF_SEQUENCE = 0xfffffffd;
 
 /** Build the canonical unsigned PSBT for a spend. */
 export function buildMultisigPsbt(params: {
@@ -48,11 +51,11 @@ export function buildMultisigPsbt(params: {
         const pay = multisigPaymentForIndex(params.keys, params.m, u.chain, u.index, network);
         const bip32Derivation = params.keys.map(k => {
             const node = HDKey.fromExtendedKey(k.xpub).deriveChild(u.chain).deriveChild(u.index);
-            if (!node.publicKey) throw new Error('NMS: cannot derive input pubkey');
+            if (!node.publicKey) throw new Error('NBMS: cannot derive input pubkey');
             return {
                 masterFingerprint: Buffer.from(/^[0-9a-fA-F]{8}$/.test(k.fingerprint) ? k.fingerprint : '00000000', 'hex'),
                 pubkey: Buffer.from(node.publicKey),
-                path: `${NMS_DERIVATION_PATH}/${u.chain}/${u.index}`,
+                path: `${NBMS_DERIVATION_PATH}/${u.chain}/${u.index}`,
             };
         });
         psbt.addInput({
@@ -61,6 +64,7 @@ export function buildMultisigPsbt(params: {
             witnessUtxo: { script: pay.output, value: BigInt(u.value) },
             witnessScript: pay.witnessScript,
             bip32Derivation,
+            sequence: RBF_SEQUENCE,
         });
         totalIn += u.value;
     }

@@ -42,6 +42,10 @@ async-stream = "0.3"
 bytes = "1"
 url = "2"
 
+# Windows 11 rounded window corners (DWM) + work-area query for the borderless popup placement.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_UI_WindowsAndMessaging"] }
+
 [profile.dev]
 incremental = true
 
