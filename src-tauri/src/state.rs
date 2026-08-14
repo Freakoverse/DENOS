@@ -69,6 +69,68 @@ fn default_policy() -> String {
     "manual".to_string()
 }
 
+/// Bound a `Connection` so its serialized form fits the OS keyring's per-entry limit (Windows
+/// Credential Manager caps a secret at 2560 UTF-16 code units). `app_name`/`app_url`/`relay_urls`
+/// come straight from the client's `nostrconnect://` URI and are otherwise unbounded, so a client
+/// with a huge name, a `data:` URL, or a long relay list would make the write fail (which surfaced
+/// as "Error setting policy: … longer than platform limit of 2560 chars").
+///
+/// Per-field caps handle the common cases; a final total-size guard drops cosmetic fields until it
+/// fits, so the write can never exceed the limit regardless of what the client sent.
+fn sanitize_connection(c: &Connection) -> Connection {
+    fn take_chars(s: &str, max: usize) -> String {
+        s.chars().take(max).collect()
+    }
+    // A URL kept for display only; drop inline `data:` URIs (can be tens of KB) and cap length.
+    fn clean_url(u: &Option<String>, max: usize) -> Option<String> {
+        u.as_ref()
+            .filter(|s| !s.trim_start().to_ascii_lowercase().starts_with("data:"))
+            .map(|s| take_chars(s, max))
+    }
+
+    let mut out = c.clone();
+    out.app_name = take_chars(&out.app_name, 128);
+    out.app_url = clean_url(&out.app_url, 256);
+    out.app_icon = clean_url(&out.app_icon, 256);
+    out.relay_urls = out.relay_urls.iter().take(12).map(|r| take_chars(r, 160)).collect();
+    out.auto_approve_kinds.truncate(128);
+    if out.custom_rules.len() > 128 {
+        out.custom_rules = out.custom_rules.iter().take(128).map(|(k, v)| (k.clone(), v.clone())).collect();
+    }
+
+    // Final guard: measure the real UTF-16 length and shed cosmetic fields until it fits.
+    const LIMIT_UTF16: usize = 1100; // keyring's real per-entry cap is 1280 UTF-16 units // headroom under the 2560 platform cap
+    let utf16_len = |cn: &Connection| serde_json::to_string(cn).map(|s| s.encode_utf16().count()).unwrap_or(usize::MAX);
+    if utf16_len(&out) > LIMIT_UTF16 { out.app_icon = None; }
+    if utf16_len(&out) > LIMIT_UTF16 { out.app_url = None; }
+    if utf16_len(&out) > LIMIT_UTF16 { out.relay_urls.truncate(4); }
+    if utf16_len(&out) > LIMIT_UTF16 { out.app_name = take_chars(&out.app_name, 32); }
+    // Last resort — shed the remaining variable-length fields so the fixed core (ids + pubkeys)
+    // is all that's left, which is far under the limit. Policy still applies (booleans/strings).
+    if utf16_len(&out) > LIMIT_UTF16 { out.relay_urls.clear(); }
+    if utf16_len(&out) > LIMIT_UTF16 { out.auto_approve_kinds.clear(); }
+    if utf16_len(&out) > LIMIT_UTF16 { out.custom_rules.clear(); }
+    out
+}
+
+/// UPV2 sessions are stored per-entry in the keyring too, and `client_name`/`instance_id` come
+/// from the client — so bound them the same way to stay under the 2560 UTF-16 limit.
+fn sanitize_upv2_session(s: &Upv2Session) -> Upv2Session {
+    fn take_chars(s: &str, max: usize) -> String { s.chars().take(max).collect() }
+    let mut out = s.clone();
+    out.client_name = take_chars(&out.client_name, 128);
+    out.instance_id = take_chars(&out.instance_id, 128);
+    if out.custom_rules.len() > 128 {
+        out.custom_rules = out.custom_rules.iter().take(128).map(|(k, v)| (k.clone(), v.clone())).collect();
+    }
+    const LIMIT_UTF16: usize = 1100; // keyring's real per-entry cap is 1280 UTF-16 units
+    let utf16_len = |cn: &Upv2Session| serde_json::to_string(cn).map(|x| x.encode_utf16().count()).unwrap_or(usize::MAX);
+    if utf16_len(&out) > LIMIT_UTF16 { out.client_name = take_chars(&out.client_name, 32); }
+    if utf16_len(&out) > LIMIT_UTF16 { out.instance_id = take_chars(&out.instance_id, 32); }
+    if utf16_len(&out) > LIMIT_UTF16 { out.custom_rules.clear(); }
+    out
+}
+
 fn default_source() -> String {
     "nip46".to_string()
 }
@@ -761,11 +823,18 @@ impl AppState {
 
     pub fn save_connections(&self) -> Result<(), String> {
         let pid = self.profile_id();
-        let connections = self.connections.lock().unwrap();
+        // Snapshot under the lock, then release it BEFORE any keyring I/O. The
+        // keyring writes are slow (Windows Credential Manager), so holding the
+        // connections lock across them stalls every request handler that needs it
+        // (e.g. the connect approval path) for seconds.
+        let conns: Vec<Connection> = {
+            let connections = self.connections.lock().unwrap();
+            connections.clone()
+        };
         // Load old index to find removed entries
         let old_ids = load_from_keyring::<Vec<String>>(&pk(&pid, KEY_CONNECTIONS))
             .unwrap_or_default();
-        let conn_ids: Vec<String> = connections.iter().map(|c| c.id.clone()).collect();
+        let conn_ids: Vec<String> = conns.iter().map(|c| c.id.clone()).collect();
         // Delete credential entries for removed connections
         for old_id in &old_ids {
             if !conn_ids.contains(old_id) {
@@ -773,8 +842,9 @@ impl AppState {
             }
         }
         save_to_keyring(&pk(&pid, KEY_CONNECTIONS), &conn_ids)?;
-        for c in connections.iter() {
-            save_to_keyring(&format!("p-{}/conn-{}", pid, c.id), c)?;
+        for c in conns.iter() {
+            // Bound client-supplied metadata so the per-entry keyring size limit can't be exceeded.
+            save_to_keyring(&format!("p-{}/conn-{}", pid, c.id), &sanitize_connection(c))?;
         }
         Ok(())
     }
@@ -815,7 +885,7 @@ impl AppState {
         }
         save_to_keyring(&pk(&pid, KEY_UPV2_SESSIONS), &sess_ids)?;
         for s in sessions.iter() {
-            save_to_keyring(&format!("p-{}/upv2-sess-{}", pid, s.session_id), s)?;
+            save_to_keyring(&format!("p-{}/upv2-sess-{}", pid, s.session_id), &sanitize_upv2_session(s))?;
         }
         Ok(())
     }
@@ -866,17 +936,70 @@ impl AppState {
 }
 
 // --- Keyring Helpers ---
-// Windows Credential Manager has a ~2560-char UTF-16 limit per entry.
-// Collections (keypairs, seeds, connections) are stored as individual entries
-// with a lightweight index. Small values use simple single-entry storage.
+// Windows Credential Manager caps a single entry at 2560 UTF-16 code units. Any JSON value larger
+// than that (a long connection index, a connection/session with lots of metadata) is transparently
+// SPLIT across `{key}::chunk::{i}` entries, with `{key}` holding a small manifest. Reassembly is
+// automatic on load. Values that fit are stored as a single entry exactly as before, so existing
+// data keeps loading unchanged.
+
+/// Max UTF-16 code units per keyring entry, with headroom. NOTE: the platform cap is 2560
+/// *bytes* for the credential blob, and keyring stores the password as UTF-16 (2 bytes/unit) —
+/// i.e. the real limit is 1280 *code units*, even though the crate's error text misreports it as
+/// "2560 chars". 1000 leaves comfortable headroom.
+const KEYRING_CHUNK_LIMIT: usize = 1000;
+/// Sentinel prefix marking a manifest entry. Control chars can't appear in serde_json output.
+const KEYRING_CHUNK_SENTINEL: &str = "\u{1}DENOSCHUNKED\u{1}";
+
+fn utf16_len(s: &str) -> usize { s.encode_utf16().count() }
+
+/// Split a string into pieces each ≤ `max` UTF-16 units, never breaking a `char`.
+fn split_by_utf16(s: &str, max: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut cur_len = 0usize;
+    for ch in s.chars() {
+        let clen = ch.len_utf16();
+        if cur_len + clen > max && !cur.is_empty() {
+            out.push(std::mem::take(&mut cur));
+            cur_len = 0;
+        }
+        cur.push(ch);
+        cur_len += clen;
+    }
+    if !cur.is_empty() { out.push(cur); }
+    out
+}
+
+fn keyring_set_raw(key: &str, value: &str) -> Result<(), String> {
+    let entry = keyring::Entry::new(SERVICE_NAME, key)
+        .map_err(|e| format!("Keyring entry error: {}", e))?;
+    entry.set_password(value)
+        .map_err(|e| format!("Keyring store error [key='{}']: {}", key, e))
+}
+
+/// Delete any chunk entries left over from a previous (chunked) value at `key`. Best-effort.
+fn clear_keyring_chunks(key: &str) {
+    if let Ok(raw) = get_raw_from_keyring(key) {
+        if let Some(n) = raw.strip_prefix(KEYRING_CHUNK_SENTINEL).and_then(|s| s.parse::<usize>().ok()) {
+            for i in 0..n { let _ = delete_raw_from_keyring(&format!("{}::chunk::{}", key, i)); }
+        }
+    }
+}
 
 pub fn save_to_keyring<T: Serialize>(key: &str, value: &T) -> Result<(), String> {
     let json = serde_json::to_string(value)
         .map_err(|e| format!("Serialization failed: {}", e))?;
-    let entry = keyring::Entry::new(SERVICE_NAME, key)
-        .map_err(|e| format!("Keyring entry error: {}", e))?;
-    entry.set_password(&json)
-        .map_err(|e| format!("Keyring store error: {}", e))?;
+    // Remove chunks from any prior larger value before rewriting.
+    clear_keyring_chunks(key);
+    if utf16_len(&json) <= KEYRING_CHUNK_LIMIT {
+        return keyring_set_raw(key, &json);
+    }
+    // Too big for one entry — split and store a manifest under `key`.
+    let chunks = split_by_utf16(&json, KEYRING_CHUNK_LIMIT);
+    for (i, c) in chunks.iter().enumerate() {
+        keyring_set_raw(&format!("{}::chunk::{}", key, i), c)?;
+    }
+    keyring_set_raw(key, &format!("{}{}", KEYRING_CHUNK_SENTINEL, chunks.len()))?;
     Ok(())
 }
 
@@ -903,7 +1026,16 @@ pub fn delete_raw_from_keyring(key: &str) -> Result<(), String> {
 }
 
 fn load_from_keyring<T: for<'de> Deserialize<'de>>(key: &str) -> Option<T> {
-    let entry = keyring::Entry::new(SERVICE_NAME, key).ok()?;
-    let json = entry.get_password().ok()?;
+    let raw = get_raw_from_keyring(key).ok()?;
+    // Reassemble if this is a chunk manifest; otherwise the value is stored inline.
+    let json = if let Some(n) = raw.strip_prefix(KEYRING_CHUNK_SENTINEL).and_then(|s| s.parse::<usize>().ok()) {
+        let mut combined = String::with_capacity(n * KEYRING_CHUNK_LIMIT);
+        for i in 0..n {
+            combined.push_str(&get_raw_from_keyring(&format!("{}::chunk::{}", key, i)).ok()?);
+        }
+        combined
+    } else {
+        raw
+    };
     serde_json::from_str(&json).ok()
 }

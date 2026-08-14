@@ -1515,7 +1515,17 @@ async fn handle_nip46_event(
             let mut connections = state.connections.lock().unwrap();
             connections.push(connection);
         }
-        let _ = state.save_connections();
+        // Persist to the keyring on a background thread — the connection is already
+        // tracked in memory, and a slow synchronous keyring write here would delay
+        // the approval prompt / connect response by seconds, causing clients to time
+        // out before the user can approve.
+        {
+            let app_bg = app.clone();
+            std::thread::spawn(move || {
+                let state: tauri::State<'_, AppState> = app_bg.state();
+                let _ = state.save_connections();
+            });
+        }
         (new_id, name)
     } else {
         // No connection and not a connect request — silently ignore
@@ -1575,8 +1585,12 @@ async fn handle_nip46_event(
             .unwrap_or(("manual".to_string(), None))
     };
 
-    if is_safe_method || conn_policy == "auto_approve" || custom_rule.as_deref() == Some("approve") {
-        // Auto-respond: safe method OR connection has auto-approve enabled
+    // `connect` auto-responds too: it only establishes the session (actual signing
+    // still goes through the connection's policy below), and many NIP-46 clients
+    // have a short connect timeout that a human approval would blow past.
+    let auto_connect = request.method == "connect";
+    if is_safe_method || auto_connect || conn_policy == "auto_approve" || custom_rule.as_deref() == Some("approve") {
+        // Auto-respond: safe method / connect handshake OR connection has auto-approve enabled
         send_encrypted_response(signer_keys, client, &sender_pubkey, &response_json, use_nip44).await;
         let id_preview = if request.id.len() > 8 { &request.id[..8] } else { &request.id };
         let reason = if is_safe_method { "safe method" } else { "auto-approved" };
@@ -1708,11 +1722,19 @@ async fn send_encrypted_response(
 pub(crate) fn process_nip46_request(signer_keys: &Keys, request: &Nip46Request) -> Nip46Response {
     match request.method.as_str() {
         "connect" => {
-            // NIP-46 connect: params[0] = client pubkey, params[1] = optional secret
-            // Respond with "ack" to confirm the connection
+            // NIP-46 connect: params[0] = the signer pubkey the client wants,
+            // params[1] = optional secret (from the bunker:// URL we issued).
+            // The client verifies the connection by checking that the response
+            // `result` equals the secret it sent — so echo it back when present
+            // (matching the nostrconnect path). Fall back to "ack" if no secret.
+            // Clients that don't validate simply ignore the value.
+            let result = request.params.get(1)
+                .filter(|s| !s.is_empty())
+                .cloned()
+                .unwrap_or_else(|| "ack".to_string());
             Nip46Response {
                 id: request.id.clone(),
-                result: Some("ack".to_string()),
+                result: Some(result),
                 error: None,
             }
         }

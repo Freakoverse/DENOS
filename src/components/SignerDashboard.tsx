@@ -5,7 +5,7 @@ import { fetchNostrProfile } from '@/services/nostrProfile';
 import { blossomServers } from '@/services/blossomServers';
 import { invoke } from '@tauri-apps/api/core';
 import { useFeedback } from '@/components/ui/feedback';
-import { listen } from '@tauri-apps/api/event';
+import { listen, emit } from '@tauri-apps/api/event';
 import { cn } from '@/lib/utils';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -510,6 +510,12 @@ export default function SignerDashboard({ activePubkey, activeNpub }: SignerDash
         return () => { unlisten.then(fn => fn()); };
     }, []);
 
+    // Dismiss the in-app reconnect modal if it was resolved elsewhere (e.g. from the popup window).
+    useEffect(() => {
+        const unlisten = listen('reconnect-resolved', () => setReconnectPrompt(null));
+        return () => { unlisten.then(fn => fn()); };
+    }, []);
+
 
     useEffect(() => {
         invoke<SignerState>('get_signer_state').then(setSignerState).catch(() => { });
@@ -564,13 +570,22 @@ export default function SignerDashboard({ activePubkey, activeNpub }: SignerDash
         setShowBunkerQr(false);
     }, [activePubkey]);
 
-    // Auto-generate bunker URI
+    // Auto-generate bunker URI. get_active_keys can lag behind activePubkey right
+    // after unlock, so retry a few times instead of silently swallowing the error
+    // (which left the field permanently empty — no bunker string to copy).
     useEffect(() => {
-        if (activePubkey && !bunkerUri) {
+        if (!activePubkey || bunkerUri) return;
+        let cancelled = false;
+        const generate = (attempt: number) => {
             invoke<{ uri: string; secret: string }>('get_bunker_uri')
-                .then(result => setBunkerUri(result.uri))
-                .catch(() => { });
-        }
+                .then(result => { if (!cancelled) setBunkerUri(result.uri); })
+                .catch((e) => {
+                    console.warn(`[bunker] get_bunker_uri failed (attempt ${attempt + 1}):`, e);
+                    if (!cancelled && attempt < 5) setTimeout(() => generate(attempt + 1), 1000);
+                });
+        };
+        generate(0);
+        return () => { cancelled = true; };
     }, [activePubkey]);
 
     /* ── Handlers ── */
@@ -961,9 +976,9 @@ export default function SignerDashboard({ activePubkey, activeNpub }: SignerDash
                             </label>
                         )}
                         <DialogFooter>
-                            <Button variant="destructive" onClick={() => { invoke('resolve_reconnect', { action: 'reject', keepRules: false, autoReplace: null }); setReconnectPrompt(null); }}>Reject</Button>
-                            <Button variant="outline" onClick={() => { invoke('resolve_reconnect', { action: 'keep', keepRules: false, autoReplace: null }); setReconnectPrompt(null); }}>Keep Both</Button>
-                            <Button onClick={() => { invoke('resolve_reconnect', { action: 'replace', keepRules: reconnectKeepRules, autoReplace: reconnectAutoReplace || null }); setReconnectPrompt(null); }}>Replace</Button>
+                            <Button variant="destructive" onClick={() => { invoke('resolve_reconnect', { action: 'reject', keepRules: false, autoReplace: null }); emit('reconnect-resolved', {}); setReconnectPrompt(null); }}>Reject</Button>
+                            <Button variant="outline" onClick={() => { invoke('resolve_reconnect', { action: 'keep', keepRules: false, autoReplace: null }); emit('reconnect-resolved', {}); setReconnectPrompt(null); }}>Keep Both</Button>
+                            <Button onClick={() => { invoke('resolve_reconnect', { action: 'replace', keepRules: reconnectKeepRules, autoReplace: reconnectAutoReplace || null }); emit('reconnect-resolved', {}); setReconnectPrompt(null); }}>Replace</Button>
                         </DialogFooter>
                     </DialogContent>
                 </Dialog>
@@ -2062,13 +2077,13 @@ export default function SignerDashboard({ activePubkey, activeNpub }: SignerDash
                     )}
 
                     <DialogFooter>
-                        <Button variant="destructive" onClick={() => { invoke('resolve_reconnect', { action: 'reject', keepRules: false, autoReplace: null }); setReconnectPrompt(null); }}>
+                        <Button variant="destructive" onClick={() => { invoke('resolve_reconnect', { action: 'reject', keepRules: false, autoReplace: null }); emit('reconnect-resolved', {}); setReconnectPrompt(null); }}>
                             Reject
                         </Button>
-                        <Button variant="outline" onClick={() => { invoke('resolve_reconnect', { action: 'keep', keepRules: false, autoReplace: null }); setReconnectPrompt(null); }}>
+                        <Button variant="outline" onClick={() => { invoke('resolve_reconnect', { action: 'keep', keepRules: false, autoReplace: null }); emit('reconnect-resolved', {}); setReconnectPrompt(null); }}>
                             Keep Both
                         </Button>
-                        <Button onClick={() => { invoke('resolve_reconnect', { action: 'replace', keepRules: reconnectKeepRules, autoReplace: reconnectAutoReplace || null }); setReconnectPrompt(null); }}>
+                        <Button onClick={() => { invoke('resolve_reconnect', { action: 'replace', keepRules: reconnectKeepRules, autoReplace: reconnectAutoReplace || null }); emit('reconnect-resolved', {}); setReconnectPrompt(null); }}>
                             Replace
                         </Button>
                     </DialogFooter>
