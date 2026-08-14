@@ -62,55 +62,19 @@ import { Input } from '@/components/ui/input';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { useFeedback } from '@/components/ui/feedback';
 import { SatoshiIcon } from '@/components/SatoshiIcon';
-import { SilentWallet } from '@/components/SilentWallet';
-import { EcashWallet } from '@/components/EcashWallet';
-import { MultisigWallet } from '@/components/MultisigWallet';
 import { FollowsSelector } from '@/components/FollowsSelector';
 import { chainIcons } from '@/assets/icons/blockchain';
 import { Users } from 'lucide-react';
 
 type ChainId = 'bitcoin' | 'ethereum' | 'bnb' | 'polygon' | 'avalanche' | 'base' | 'zcash';
 
-type WalletTab = 'native' | 'ecash' | 'silent' | 'multi';
-
 interface WalletProps {
     activePubkey: string | null;
     sendPrefill?: { recipient: string; amount: number; feeRate?: number } | null;
     onPrefillConsumed?: () => void;
-    ecashRecipient?: string;
-    ecashAutoSend?: boolean;
-    onEcashPrefillConsumed?: () => void;
 }
 
-export function Wallet({ activePubkey, sendPrefill, onPrefillConsumed, ecashRecipient, ecashAutoSend, onEcashPrefillConsumed }: WalletProps) {
-    const [walletTab, setWalletTab] = useState<WalletTab>('native');
-
-    // Wallet tab toggles (controlled from Settings > Wallets)
-    const [silentEnabled, setSilentEnabled] = useState(
-        () => localStorage.getItem('denos-silent-payments-enabled') === 'true'
-    );
-    const [ecashEnabled, setEcashEnabled] = useState(
-        () => localStorage.getItem('denos-ecash-enabled') === 'true'
-    );
-    const [multisigEnabled, setMultisigEnabled] = useState(
-        () => localStorage.getItem('denos-multisig-enabled') === 'true'
-    );
-    useEffect(() => {
-        const handler = () => {
-            const silent = localStorage.getItem('denos-silent-payments-enabled') === 'true';
-            const ecash = localStorage.getItem('denos-ecash-enabled') === 'true';
-            const multi = localStorage.getItem('denos-multisig-enabled') === 'true';
-            setSilentEnabled(silent);
-            setEcashEnabled(ecash);
-            setMultisigEnabled(multi);
-            // If user disabled a tab while on it, go back to native
-            if ((!silent && walletTab === 'silent') || (!ecash && walletTab === 'ecash') || (!multi && walletTab === 'multi')) {
-                setWalletTab('native');
-            }
-        };
-        window.addEventListener('wallet-tabs-toggle', handler);
-        return () => window.removeEventListener('wallet-tabs-toggle', handler);
-    }, [walletTab]);
+export function Wallet({ activePubkey, sendPrefill, onPrefillConsumed }: WalletProps) {
     const [selectedChain, setSelectedChain] = useState<ChainId>('bitcoin');
     const [selectedAsset, setSelectedAsset] = useState<string>('native'); // 'native' | 'taproot' | 'usdt' | 'usdc' | etc.
     const [showStandardAddress, setShowStandardAddress] = useState(false);
@@ -451,7 +415,7 @@ export function Wallet({ activePubkey, sendPrefill, onPrefillConsumed, ecashReci
 
     // Handle prefill from IDs page
     useEffect(() => {
-        if (sendPrefill && privateKeyHex && walletTab === 'native') {
+        if (sendPrefill && privateKeyHex) {
             setSendTo(sendPrefill.recipient);
             setResolvedAddress(sendPrefill.recipient);
             setSendAmount(sendPrefill.amount.toString());
@@ -472,14 +436,7 @@ export function Wallet({ activePubkey, sendPrefill, onPrefillConsumed, ecashReci
             })();
             onPrefillConsumed?.();
         }
-    }, [sendPrefill, privateKeyHex, walletTab]);
-
-    // Handle ecash prefill
-    useEffect(() => {
-        if (ecashRecipient && ecashAutoSend) {
-            setWalletTab('ecash');
-        }
-    }, [ecashRecipient, ecashAutoSend]);
+    }, [sendPrefill, privateKeyHex]);
 
     // Fetch Zcash tx counterparty addresses when detail modal opens
     useEffect(() => {
@@ -519,77 +476,6 @@ export function Wallet({ activePubkey, sendPrefill, onPrefillConsumed, ecashReci
         );
     }
 
-    // Helper to render the tab bar
-    const renderTabs = () => {
-        const allTabs: WalletTab[] = ['native', 'ecash', 'silent', 'multi'];
-        const visibleTabs = allTabs.filter(t =>
-            (t === 'native') ||
-            (t === 'ecash' && ecashEnabled) ||
-            (t === 'silent' && silentEnabled) ||
-            (t === 'multi' && multisigEnabled)
-        );
-        if (visibleTabs.length <= 1) return null;
-        return (
-        <div className="flex bg-secondary border border-border rounded-xl p-1 gap-1 flex-wrap">
-            {visibleTabs.map(id => {
-                const label = id === 'native' ? 'Native' : id === 'ecash' ? 'eCash' : id === 'silent' ? 'Silent' : 'Multisig';
-                const isActive = walletTab === id;
-                return (
-                    <button
-                        key={id}
-                        className={cn(
-                            "flex-1 flex items-center justify-center py-2.5 px-2.5 rounded-lg text-sm transition-colors cursor-pointer",
-                            isActive
-                                ? "bg-primary text-primary-foreground font-semibold"
-                                : "font-medium text-muted-foreground"
-                        )}
-                        onClick={() => setWalletTab(id)}
-                    >
-                        {label}
-                    </button>
-                );
-            })}
-        </div>
-        );
-    };
-
-    // ── ECASH TAB ──
-    if (walletTab === 'ecash') {
-        return (
-            <div className="flex flex-col gap-4 h-full overflow-hidden">
-                {renderTabs()}
-                <EcashWallet
-                    activePubkey={activePubkey}
-                    initialRecipient={ecashRecipient || ''}
-                    autoOpenSend={ecashAutoSend || false}
-                    onSendComplete={() => { onEcashPrefillConsumed?.(); }}
-                />
-            </div>
-        );
-    }
-
-    // ── SILENT TAB ──
-    if (walletTab === 'silent') {
-        return (
-            <div className="flex flex-col gap-4 h-full overflow-hidden">
-                {renderTabs()}
-                <SilentWallet activePubkey={activePubkey} />
-            </div>
-        );
-    }
-
-    // ── MULTI TAB ──
-    if (walletTab === 'multi') {
-        return (
-            <div className="flex flex-col gap-4 h-full overflow-hidden">
-                {renderTabs()}
-                <div className="flex-1 min-h-0 bg-card/30 border border-white/5 rounded-2xl p-3 overflow-hidden">
-                    <MultisigWallet activePubkey={activePubkey} />
-                </div>
-            </div>
-        );
-    }
-
     // ── SUBSCRIPTIONS PAGE ──
     if (showSubscriptions) {
         return (
@@ -612,12 +498,9 @@ export function Wallet({ activePubkey, sendPrefill, onPrefillConsumed, ecashReci
         );
     }
 
-    // ── BITCOIN TAB ──
+    // ── NATIVE WALLET ──
     return (
         <div className="flex flex-col gap-4 h-full overflow-hidden">
-            {/* Tab toggle */}
-            {renderTabs()}
-
             {/* Public Wallet Warning */}
             {showNativeWarning && (
                 <div className="flex items-center gap-2.5 px-3 py-2.5 rounded-xl shrink-0" style={{ backgroundColor: '#F04444' }}>

@@ -74,7 +74,6 @@ function App() {
     const [showProfile, setShowProfile] = useState(false);
     const [showAccountSwitcher, setShowAccountSwitcher] = useState(false);
     const [sendPrefill, setSendPrefill] = useState<{ recipient: string; amount: number; feeRate?: number } | null>(null);
-    const [ecashPrefill, setEcashPrefill] = useState<{ recipient: string; autoSend: boolean } | null>(null);
     const [appState, setAppState] = useState<AppState>({
         keypairs: [],
         active_keypair: null,
@@ -336,9 +335,9 @@ function App() {
                 ) : (
                     <div key={navResetKey} className="animate-fade-in h-full">
                         {tab === 'dashboard' && <SignerDashboard activePubkey={appState.active_keypair} activeNpub={appState.keypairs.find(k => k.pubkey === appState.active_keypair)?.npub} />}
-                        {tab === 'wallet' && <Wallet activePubkey={appState.active_keypair} sendPrefill={sendPrefill} onPrefillConsumed={() => setSendPrefill(null)} ecashRecipient={ecashPrefill?.recipient} ecashAutoSend={ecashPrefill?.autoSend} onEcashPrefillConsumed={() => setEcashPrefill(null)} />}
+                        {tab === 'wallet' && <Wallet activePubkey={appState.active_keypair} sendPrefill={sendPrefill} onPrefillConsumed={() => setSendPrefill(null)} />}
                         {tab === 'ids' && <IdsView activePubkey={appState.active_keypair} activeNpub={appState.keypairs.find(k => k.pubkey === appState.active_keypair)?.npub} onNavigateToWallet={(recipient, feeRate, amount) => { setSendPrefill({ recipient, amount: amount || 546, feeRate }); setTab('wallet'); }} />}
-                        {tab === 'settings' && <Settings logs={logs} appState={appState} onLock={() => setIsLocked(true)} onNavigateToWallet={(recipient) => { setSendPrefill({ recipient, amount: 546, feeRate: undefined }); setTab('wallet'); }} onNavigateToEcashSend={(recipient) => { setEcashPrefill({ recipient, autoSend: true }); setTab('wallet'); }} />}
+                        {tab === 'settings' && <Settings logs={logs} appState={appState} onLock={() => setIsLocked(true)} onNavigateToWallet={(recipient) => { setSendPrefill({ recipient, amount: 546, feeRate: undefined }); setTab('wallet'); }} />}
                         {tab === 'commerce' && (
                             <div className="flex flex-col items-center justify-center text-center py-20 px-6 animate-fade-in">
                                 <div className="w-16 h-16 rounded-2xl bg-primary/10 flex items-center justify-center mb-5">

@@ -1,7 +1,7 @@
 {
     "name": "denos",
     "private": true,
-    "version": "0.3.0",
+    "version": "0.3.1",
     "type": "module",
     "scripts": {
         "dev": "vite",
@@ -11,14 +11,11 @@
     },
     "dependencies": {
         "@bitcoinerlab/secp256k1": "^1.2.0",
-        "@cashu/cashu-ts": "^2.5.3",
-        "@gandlaf21/bolt11-decode": "^3.1.1",
         "@noble/hashes": "^2.2.0",
         "@radix-ui/react-collapsible": "^1.1.12",
         "@radix-ui/react-dialog": "^1.1.15",
         "@radix-ui/react-slot": "^1.2.4",
         "@radix-ui/react-switch": "^1.2.6",
-        "@radix-ui/react-tooltip": "^1.2.8",
         "@tailwindcss/vite": "^4.1.18",
         "@tauri-apps/api": "^2",
         "@tauri-apps/plugin-opener": "^2.5.3",
@@ -29,7 +26,6 @@
         "class-variance-authority": "^0.7.1",
         "clsx": "^2.1.1",
         "ecpair": "^3.0.1",
-        "framer-motion": "^12.34.1",
         "js-sha3": "^0.9.3",
         "jsqr": "^1.4.0",
         "lucide-react": "^0.555.0",
@@ -38,8 +34,7 @@
         "react": "^19.2.0",
         "react-dom": "^19.2.0",
         "tailwind-merge": "^3.4.1",
-        "tailwindcss": "^4.1.18",
-        "zustand": "^5.0.9"
+        "tailwindcss": "^4.1.18"
     },
     "devDependencies": {
         "@tauri-apps/cli": "^2",

@@ -9,8 +9,8 @@ import { cn } from '@/lib/utils';
 import { Switch } from '@/components/ui/switch';
 import {
     Radio, X, Plus, Info, Terminal, ChevronRight, ArrowLeft, Shield, Eye, EyeOff, Users,
-    Copy, Check, RefreshCw, Heart, Bitcoin, Banknote, ChevronDown, Sun, Moon, Palette, Store, Network, Lock,
-    Play, GraduationCap, Cloud, Download, ExternalLink, Loader2, WalletMinimal, AlertTriangle, Pencil,
+    Copy, Check, RefreshCw, Heart, Bitcoin, ChevronDown, Sun, Moon, Palette, Store, Network, Lock,
+    Play, GraduationCap, Cloud, Download, ExternalLink, Loader2, Pencil,
 } from 'lucide-react';
 import { useFeedback } from '@/components/ui/feedback';
 import { KeypairManager } from '@/components/KeypairManager';
@@ -43,17 +43,16 @@ interface SignerState {
     login_attempts: any[];
 }
 
-type SubPage = 'accounts' | 'relays' | 'debug' | 'about' | 'security' | 'preferences' | 'merchant' | 'wallets' | 'currency-nodes' | 'tutorials' | 'blossom' | null;
+type SubPage = 'accounts' | 'relays' | 'debug' | 'about' | 'security' | 'preferences' | 'merchant' | 'currency-nodes' | 'tutorials' | 'blossom' | null;
 
 interface Props {
     logs: string[];
     appState: AppState;
     onNavigateToWallet?: (recipient: string) => void;
-    onNavigateToEcashSend?: (recipient: string) => void;
     onLock?: () => void;
 }
 
-export function Settings({ logs, appState, onNavigateToWallet, onNavigateToEcashSend, onLock }: Props) {
+export function Settings({ logs, appState, onNavigateToWallet, onLock }: Props) {
     const [signerState, setSignerState] = useState<SignerState | null>(null);
     const [newRelay, setNewRelay] = useState('');
     const [addingRelay, setAddingRelay] = useState(false);
@@ -382,7 +381,7 @@ export function Settings({ logs, appState, onNavigateToWallet, onNavigateToEcash
     }
 
     if (subPage === 'about') {
-        return <AboutPage onBack={() => setSubPage(null)} toast={toast} onNavigateToWallet={onNavigateToWallet} onNavigateToEcashSend={onNavigateToEcashSend} appState={appState} />;
+        return <AboutPage onBack={() => setSubPage(null)} toast={toast} onNavigateToWallet={onNavigateToWallet} appState={appState} />;
     }
 
     if (subPage === 'preferences') {
@@ -482,10 +481,6 @@ export function Settings({ logs, appState, onNavigateToWallet, onNavigateToEcash
         );
     }
 
-    if (subPage === 'wallets') {
-        return <WalletsSettings onBack={() => setSubPage(null)} />;
-    }
-
     /* ── Menu List ── */
     const menuItems: { id: SubPage; label: string; desc: string; icon: typeof Radio; badge?: string }[] = [
         { id: 'accounts', label: 'Accounts', desc: `${appState.keypairs.length} keypairs`, icon: Users },
@@ -508,7 +503,6 @@ export function Settings({ logs, appState, onNavigateToWallet, onNavigateToEcash
         },
         { id: 'currency-nodes', label: 'Network Currency Nodes', desc: 'Network node connections', icon: Network },
         { id: 'debug', label: 'Debug Console', desc: `${logs.length} log entries`, icon: Terminal },
-        { id: 'wallets', label: 'Wallets', desc: 'Silent payments & wallet features', icon: WalletMinimal },
         { id: 'merchant', label: 'Merchant', desc: 'Manage commercial settings', icon: Store },
         { id: 'blossom', label: 'Blossom Servers', desc: 'Media server fallbacks', icon: Cloud },
         { id: 'tutorials', label: 'Tutorials', desc: 'Learn how to use DENOS', icon: GraduationCap },
@@ -1528,11 +1522,10 @@ function BlossomServersPage({ onBack, toast }: { onBack: () => void; toast: (msg
 const DEV_NPUB = 'npub18ly7pqxzm4mmy8rd47cdt74ahc424y95xdtl9t7vek8777l5xqss3pttwf';
 
 // ── About Page Component ──
-function AboutPage({ onBack, toast, onNavigateToWallet, onNavigateToEcashSend, appState }: {
+function AboutPage({ onBack, toast, onNavigateToWallet, appState }: {
     onBack: () => void;
     toast: (msg: string, type?: 'error' | 'success' | 'info') => void;
     onNavigateToWallet?: (recipient: string) => void;
-    onNavigateToEcashSend?: (recipient: string) => void;
     appState: AppState;
 }) {
     const [expandedVersion, setExpandedVersion] = useState<string | null>(null);
@@ -1541,7 +1534,7 @@ function AboutPage({ onBack, toast, onNavigateToWallet, onNavigateToEcashSend, a
     const [showDnnId, setShowDnnId] = useState(false);
     const [copied, setCopied] = useState(false);
     const [showTipModal, setShowTipModal] = useState(false);
-    const [tipView, setTipView] = useState<'menu' | 'bitcoin' | 'ecash'>('menu');
+    const [tipView, setTipView] = useState<'menu' | 'bitcoin'>('menu');
     const [tipCopied, setTipCopied] = useState(false);
     // Update state
     const [checkingUpdate, setCheckingUpdate] = useState(false);
@@ -2634,12 +2627,6 @@ function AboutPage({ onBack, toast, onNavigateToWallet, onNavigateToEcashSend, a
                                         Send Bitcoin
                                     </button>
                                 )}
-                                {tipView === 'ecash' && (
-                                    <button onClick={() => setTipView('menu')} className="flex items-center gap-2 cursor-pointer hover:text-primary transition-colors">
-                                        <ArrowLeft className="w-4 h-4" />
-                                        Send eCash
-                                    </button>
-                                )}
                             </DialogTitle>
                         </DialogHeader>
 
@@ -2656,30 +2643,6 @@ function AboutPage({ onBack, toast, onNavigateToWallet, onNavigateToEcashSend, a
                                     <div>
                                         <p className="text-sm font-semibold">Send Bitcoin</p>
                                         <p className="text-xs text-muted-foreground">On-chain Bitcoin transaction</p>
-                                    </div>
-                                </button>
-                                <button
-                                    onClick={() => setTipView('ecash')}
-                                    className="w-full flex items-center gap-3 p-3.5 rounded-xl bg-secondary hover:bg-secondary/80 transition-colors cursor-pointer text-left"
-                                >
-                                    <div className="w-10 h-10 rounded-full bg-green-500/15 flex items-center justify-center shrink-0">
-                                        <Banknote className="w-5 h-5 text-green-400" />
-                                    </div>
-                                    <div>
-                                        <p className="text-sm font-semibold">Send eCash</p>
-                                        <p className="text-xs text-muted-foreground">Cashu eCash token</p>
-                                    </div>
-                                </button>
-                                <button
-                                    onClick={() => { setShowTipModal(false); toast('Silent payments coming soon', 'info'); }}
-                                    className="w-full flex items-center gap-3 p-3.5 rounded-xl bg-secondary hover:bg-secondary/80 transition-colors cursor-pointer text-left"
-                                >
-                                    <div className="w-10 h-10 rounded-full bg-purple-500/15 flex items-center justify-center shrink-0">
-                                        <EyeOff className="w-5 h-5 text-purple-400" />
-                                    </div>
-                                    <div>
-                                        <p className="text-sm font-semibold">Silently Pay</p>
-                                        <p className="text-xs text-muted-foreground">Private silent payment</p>
                                     </div>
                                 </button>
                             </div>
@@ -2716,36 +2679,6 @@ function AboutPage({ onBack, toast, onNavigateToWallet, onNavigateToEcashSend, a
                             </div>
                         )}
 
-                        {/* ── eCash QR View ── */}
-                        {tipView === 'ecash' && (
-                            <div className="flex flex-col items-center gap-4 pt-2">
-                                <div className="bg-white p-3 rounded-xl">
-                                    <QRCodeSVG value={DEV_NPUB} size={180} />
-                                </div>
-                                <div className="w-full space-y-1.5">
-                                    <label className="text-xs text-muted-foreground font-medium">Nostr Public Key (npub)</label>
-                                    <div className="flex items-center gap-1.5">
-                                        <div className="flex-1 bg-secondary/50 border border-border rounded-lg px-3 py-2 text-xs font-mono text-foreground break-all">
-                                            {DEV_NPUB}
-                                        </div>
-                                        <button
-                                            onClick={() => { navigator.clipboard.writeText(DEV_NPUB); setTipCopied(true); toast('npub copied', 'success'); setTimeout(() => setTipCopied(false), 2000); }}
-                                            className="p-2 shrink-0 bg-secondary hover:bg-secondary/80 rounded-lg transition-colors cursor-pointer"
-                                        >
-                                            {tipCopied ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
-                                        </button>
-                                    </div>
-                                </div>
-                                {onNavigateToEcashSend && (
-                                    <Button
-                                        className="w-full gap-2"
-                                        onClick={() => { setShowTipModal(false); setTipView('menu'); onNavigateToEcashSend(DEV_NPUB); }}
-                                    >
-                                        Send from DENOS
-                                    </Button>
-                                )}
-                            </div>
-                        )}
                     </DialogContent>
                 </Dialog>
             </div>
@@ -3030,217 +2963,3 @@ function CurrencyNodesSubPage({ onBack }: { onBack: () => void }) {
         </div>
     );
 }
-
-
-// ── Wallets Settings Sub-Page ──
-function WalletsSettings({ onBack }: { onBack: () => void }) {
-    const { toast } = useFeedback();
-    const [silentEnabled, setSilentEnabled] = useState(
-        () => localStorage.getItem('denos-silent-payments-enabled') === 'true'
-    );
-    const [ecashEnabled, setEcashEnabled] = useState(
-        () => localStorage.getItem('denos-ecash-enabled') === 'true'
-    );
-    const [multisigEnabled, setMultisigEnabled] = useState(
-        () => localStorage.getItem('denos-multisig-enabled') === 'true'
-    );
-    const [showWarning, setShowWarning] = useState(false);
-    const [showEcashWarning, setShowEcashWarning] = useState(false);
-
-    const handleToggle = (checked: boolean) => {
-        if (checked) {
-            setShowWarning(true);
-        } else {
-            setSilentEnabled(false);
-            localStorage.setItem('denos-silent-payments-enabled', 'false');
-            window.dispatchEvent(new Event('wallet-tabs-toggle'));
-            toast('Silent Payments disabled', 'info');
-        }
-    };
-
-    const confirmEnable = () => {
-        setSilentEnabled(true);
-        localStorage.setItem('denos-silent-payments-enabled', 'true');
-        window.dispatchEvent(new Event('wallet-tabs-toggle'));
-        setShowWarning(false);
-        toast('Silent Payments enabled', 'success');
-    };
-
-    const handleEcashToggle = (checked: boolean) => {
-        if (checked) {
-            setShowEcashWarning(true);
-        } else {
-            setEcashEnabled(false);
-            localStorage.setItem('denos-ecash-enabled', 'false');
-            window.dispatchEvent(new Event('wallet-tabs-toggle'));
-            toast('eCash disabled', 'info');
-        }
-    };
-
-    const confirmEnableEcash = () => {
-        setEcashEnabled(true);
-        localStorage.setItem('denos-ecash-enabled', 'true');
-        window.dispatchEvent(new Event('wallet-tabs-toggle'));
-        setShowEcashWarning(false);
-        toast('eCash enabled', 'success');
-    };
-
-    const handleMultisigToggle = (checked: boolean) => {
-        setMultisigEnabled(checked);
-        localStorage.setItem('denos-multisig-enabled', String(checked));
-        window.dispatchEvent(new Event('wallet-tabs-toggle'));
-        toast(checked ? 'Multisig enabled' : 'Multisig disabled', checked ? 'success' : 'info');
-    };
-
-    return (
-        <div className="flex flex-col h-[calc(100vh-115px)] animate-fade-in">
-            <div className="flex items-center gap-3 shrink-0 pb-3">
-                <button
-                    onClick={onBack}
-                    className="w-9 h-9 rounded-xl bg-secondary flex items-center justify-center shrink-0 cursor-pointer hover:bg-secondary/80 transition-colors"
-                >
-                    <ArrowLeft className="w-4.5 h-4.5 text-muted-foreground" />
-                </button>
-                <h2 className="text-base font-semibold">Wallets</h2>
-            </div>
-            <div className="flex-1 overflow-y-auto space-y-4 pb-[100px]">
-
-                <Card>
-                    <CardHeader>
-                        <CardTitle className="flex items-center gap-2">
-                            <WalletMinimal className="w-4.5 h-4.5" />
-                            Wallet Tabs
-                        </CardTitle>
-                    </CardHeader>
-                    <CardContent className="space-y-4">
-                        {/* eCash toggle */}
-                        <div className="flex items-center justify-between">
-                            <div>
-                                <p className="text-sm font-medium">eCash</p>
-                                <p className="text-xs text-muted-foreground">Cashu eCash wallet tab</p>
-                            </div>
-                            <Switch
-                                checked={ecashEnabled}
-                                onCheckedChange={handleEcashToggle}
-                            />
-                        </div>
-
-                        <div className="border-t border-border" />
-
-                        {/* Silent Payments toggle */}
-                        <div className="flex items-center justify-between">
-                            <div>
-                                <p className="text-sm font-medium">Silent Payments</p>
-                                <p className="text-xs text-muted-foreground">Nostr Silent Payments (NSP) — experimental</p>
-                            </div>
-                            <Switch
-                                checked={silentEnabled}
-                                onCheckedChange={handleToggle}
-                            />
-                        </div>
-
-                        <div className="border-t border-border" />
-
-                        {/* Multisig toggle */}
-                        <div className="flex items-center justify-between">
-                            <div>
-                                <p className="text-sm font-medium">Multisig</p>
-                                <p className="text-xs text-muted-foreground">Bitcoin Multisig wallet tab</p>
-                            </div>
-                            <Switch
-                                checked={multisigEnabled}
-                                onCheckedChange={handleMultisigToggle}
-                            />
-                        </div>
-                    </CardContent>
-                </Card>
-            </div>
-
-            {showEcashWarning && (
-                <div className="fixed inset-0 z-50 overflow-y-auto bg-black/60 backdrop-blur-sm animate-fade-in">
-                    <div className="flex min-h-full items-center justify-center px-4 py-20">
-                        <Card className="w-[380px] shadow-2xl border-destructive/30">
-                            <CardContent className="pt-6 space-y-4">
-                                <div className="flex flex-col items-center gap-3 text-center">
-                                    <div className="w-14 h-14 rounded-full bg-destructive/15 flex items-center justify-center">
-                                        <AlertTriangle className="w-7 h-7 text-destructive" />
-                                    </div>
-                                    <h3 className="text-lg font-bold text-destructive">Custodial & Experimental</h3>
-                                </div>
-                                <p className="text-sm text-muted-foreground leading-relaxed text-center">
-                                    eCash (Cashu) tokens are <span className="font-bold text-destructive">custodial</span>. Your funds are held by mint operators — you do not have direct ownership or control over them.
-                                </p>
-                                <p className="text-sm text-muted-foreground leading-relaxed text-center">
-                                    Mints can disappear, become insolvent, or refuse to honor your tokens at any time. The Cashu protocol is still experimental and may contain undiscovered bugs.
-                                </p>
-                                <p className="text-xs text-destructive font-semibold text-center">
-                                    Only use eCash with amounts you are willing to lose entirely.
-                                </p>
-                                <div className="flex gap-3 pt-2">
-                                    <Button
-                                        variant="outline"
-                                        className="flex-1"
-                                        onClick={() => setShowEcashWarning(false)}
-                                    >
-                                        Cancel
-                                    </Button>
-                                    <Button
-                                        variant="destructive"
-                                        className="flex-1"
-                                        onClick={confirmEnableEcash}
-                                    >
-                                        Enable
-                                    </Button>
-                                </div>
-                            </CardContent>
-                        </Card>
-                    </div>
-                </div>
-            )}
-
-            {showWarning && (
-                <div className="fixed inset-0 z-50 overflow-y-auto bg-black/60 backdrop-blur-sm animate-fade-in">
-                    <div className="flex min-h-full items-center justify-center px-4 py-20">
-                        <Card className="w-[380px] shadow-2xl border-destructive/30">
-                            <CardContent className="pt-6 space-y-4">
-                                <div className="flex flex-col items-center gap-3 text-center">
-                                    <div className="w-14 h-14 rounded-full bg-destructive/15 flex items-center justify-center">
-                                        <AlertTriangle className="w-7 h-7 text-destructive" />
-                                    </div>
-                                    <h3 className="text-lg font-bold text-destructive">Experimental Feature</h3>
-                                </div>
-                                <p className="text-sm text-muted-foreground leading-relaxed text-center">
-                                    Nostr Silent Payments is highly experimental and unreliable. If you choose to use it, assume there is a <span className="font-bold text-destructive">high chance you will lose funds permanently</span>.
-                                </p>
-                                <p className="text-sm text-muted-foreground leading-relaxed text-center">
-                                    Payment notifications may fail to deliver, addresses may become unrecoverable, and funds sent to silent payment addresses may be lost forever.
-                                </p>
-                                <p className="text-xs text-destructive font-semibold text-center">
-                                    Do not use this with funds you cannot afford to lose.
-                                </p>
-                                <div className="flex gap-3 pt-2">
-                                    <Button
-                                        variant="outline"
-                                        className="flex-1"
-                                        onClick={() => setShowWarning(false)}
-                                    >
-                                        Cancel
-                                    </Button>
-                                    <Button
-                                        variant="destructive"
-                                        className="flex-1"
-                                        onClick={confirmEnable}
-                                    >
-                                        Enable
-                                    </Button>
-                                </div>
-                            </CardContent>
-                        </Card>
-                    </div>
-                </div>
-            )}
-        </div>
-    );
-}
-
-
