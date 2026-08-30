@@ -1868,11 +1868,98 @@ pub(crate) fn process_nip46_request(signer_keys: &Keys, request: &Nip46Request) 
             error: None,
         },
 
+        // ── NIP-SKD: sub-key operations ──────────────────────────────────────────────
+        // Derive an application-scoped sub-key from the root key + a public `context` (and, for
+        // shared derivations, a trailing `peer` pubkey), then run the operation as that sub-key.
+        // The sub-key's private material is never returned — only the operation result. `peer`
+        // present ⇒ shared derivation; absent (or empty) ⇒ self. These flow through the normal
+        // per-connection policy gate just like sign_event / nip44 (they are not "safe" methods).
+        "skd_get_subkey_pubkey" => {
+            let p = &request.params;
+            if p.is_empty() {
+                return skd_err(&request.id, "Missing parameter (context)");
+            }
+            match skd_subkey_keys(signer_keys, &p[0], skd_peer(p, 1)) {
+                Ok(sub) => skd_ok(&request.id, sub.public_key().to_hex()),
+                Err(e) => skd_err(&request.id, &e),
+            }
+        }
+        "skd_sign_as_subkey" => {
+            let p = &request.params;
+            if p.len() < 2 {
+                return skd_err(&request.id, "Missing parameters (context, event)");
+            }
+            let r = skd_subkey_keys(signer_keys, &p[0], skd_peer(p, 2))
+                .and_then(|sub| sign_event_param(&sub, &p[1]));
+            skd_respond(&request.id, r)
+        }
+        "skd_nip44_encrypt_as_subkey" => {
+            let p = &request.params;
+            if p.len() < 3 {
+                return skd_err(&request.id, "Missing parameters (context, recipient, plaintext)");
+            }
+            let r = skd_subkey_keys(signer_keys, &p[0], skd_peer(p, 3))
+                .and_then(|sub| nip44_encrypt_param(&sub, &p[1], &p[2]));
+            skd_respond(&request.id, r)
+        }
+        "skd_nip44_decrypt_as_subkey" => {
+            let p = &request.params;
+            if p.len() < 3 {
+                return skd_err(&request.id, "Missing parameters (context, sender, ciphertext)");
+            }
+            let r = skd_subkey_keys(signer_keys, &p[0], skd_peer(p, 3))
+                .and_then(|sub| nip44_decrypt_param(&sub, &p[1], &p[2]));
+            skd_respond(&request.id, r)
+        }
+        "skd_nip04_encrypt_as_subkey" => {
+            let p = &request.params;
+            if p.len() < 3 {
+                return skd_err(&request.id, "Missing parameters (context, recipient, plaintext)");
+            }
+            let r = skd_subkey_keys(signer_keys, &p[0], skd_peer(p, 3))
+                .and_then(|sub| nip04_encrypt_param(&sub, &p[1], &p[2]));
+            skd_respond(&request.id, r)
+        }
+        "skd_nip04_decrypt_as_subkey" => {
+            let p = &request.params;
+            if p.len() < 3 {
+                return skd_err(&request.id, "Missing parameters (context, sender, ciphertext)");
+            }
+            let r = skd_subkey_keys(signer_keys, &p[0], skd_peer(p, 3))
+                .and_then(|sub| nip04_decrypt_param(&sub, &p[1], &p[2]));
+            skd_respond(&request.id, r)
+        }
+
         _ => Nip46Response {
             id: request.id.clone(),
             result: None,
             error: Some(format!("Unsupported method: {}", request.method)),
         },
+    }
+}
+
+// --- NIP-SKD helpers ---
+
+/// The trailing `peer` pubkey at index `i`, treated as absent when omitted or empty (self form).
+fn skd_peer(params: &[String], i: usize) -> Option<&str> {
+    params.get(i).map(String::as_str).filter(|s| !s.is_empty())
+}
+
+/// Derive the sub-key `Keys` from the signer's root key + context (+ optional peer).
+fn skd_subkey_keys(signer_keys: &Keys, context: &str, peer: Option<&str>) -> Result<Keys, String> {
+    crate::skd::derive_subkey_keys(&signer_keys.secret_key().to_secret_hex(), context, peer)
+}
+
+fn skd_ok(id: &str, result: String) -> Nip46Response {
+    Nip46Response { id: id.to_string(), result: Some(result), error: None }
+}
+fn skd_err(id: &str, error: &str) -> Nip46Response {
+    Nip46Response { id: id.to_string(), result: None, error: Some(error.to_string()) }
+}
+fn skd_respond(id: &str, r: Result<String, String>) -> Nip46Response {
+    match r {
+        Ok(v) => skd_ok(id, v),
+        Err(e) => skd_err(id, &e),
     }
 }
 

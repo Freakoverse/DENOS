@@ -525,7 +525,11 @@ async fn handle_message(
         // NIP-46 compatible methods — route through policy-aware handler
         "get_public_key" | "sign_event" | "ping"
         | "nip04_encrypt" | "nip04_decrypt"
-        | "nip44_encrypt" | "nip44_decrypt" => {
+        | "nip44_encrypt" | "nip44_decrypt"
+        // NIP-SKD sub-key operations
+        | "skd_get_subkey_pubkey" | "skd_sign_as_subkey"
+        | "skd_nip44_encrypt_as_subkey" | "skd_nip44_decrypt_as_subkey"
+        | "skd_nip04_encrypt_as_subkey" | "skd_nip04_decrypt_as_subkey" => {
             // Guard: reject if Local Signer is toggled off
             {
                 let state: tauri::State<'_, AppState> = app.state();

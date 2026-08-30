@@ -1,6 +1,7 @@
 mod keys;
 mod nip46;
 mod pc55;
+mod skd;
 mod state;
 mod updater;
 mod upv2;
