@@ -38,7 +38,9 @@ pub fn derive_subkey_scalar(
         return Err("NIP-SKD: root priv must be 32 bytes".to_string());
     }
 
-    // IKM: self = root_priv; shared = raw ECDH x-coordinate (peer reconstructed even-y).
+    // IKM: self = root_priv; shared = raw ECDH x-coordinate (peer reconstructed even-y). Treat an
+    // empty peer string as self, matching the reference impl (JS `peerPubHex ? … : root`).
+    let peer_pub_hex = peer_pub_hex.filter(|s| !s.is_empty());
     let ikm: Vec<u8> = match peer_pub_hex {
         None => root_priv.clone(),
         Some(peer_hex) => {
@@ -64,9 +66,11 @@ pub fn derive_subkey_scalar(
     // Wide reduction: interpret the 48-byte seed as a big-endian integer, reduce mod n. The
     // 128-bit margin over 256 bits makes `mod n` unbiased by construction (spec §1).
     let n = BigUint::parse_bytes(SECP256K1_N_HEX, 16).unwrap();
-    let reduced = BigUint::from_bytes_be(&seed) % &n;
+    let mut reduced = BigUint::from_bytes_be(&seed) % &n;
     if reduced.bits() == 0 {
-        return Err("NIP-SKD: derived scalar is zero (re-derive)".to_string());
+        // ~2^-384 chance the reduction is 0. Match the reference impl (skd.ts): map 0 → 1 so the
+        // derivation stays total and byte-for-byte identical, rather than failing.
+        reduced = BigUint::from(1u8);
     }
     let rb = reduced.to_bytes_be();
     let mut out = [0u8; 32];
