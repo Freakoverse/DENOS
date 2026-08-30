@@ -44,7 +44,21 @@ interface PendingRequest {
     kind: number | null;
     source: string;
     upv2_session_id: string | null;
+    context?: string | null;
 }
+
+// NIP-SKD helpers: friendly labels + the context-prefix ("first namespace segment") used for
+// per-connection "Always" grants (rule key `skd:<prefix>`, granting the whole `<prefix>:*` pool).
+const SKD_LABELS: Record<string, string> = {
+    skd_get_subkey_pubkey: 'derive a sub-key',
+    skd_sign_as_subkey: 'sign as a sub-key',
+    skd_nip44_encrypt_as_subkey: 'encrypt as a sub-key',
+    skd_nip44_decrypt_as_subkey: 'decrypt as a sub-key',
+    skd_nip04_encrypt_as_subkey: 'encrypt as a sub-key',
+    skd_nip04_decrypt_as_subkey: 'decrypt as a sub-key',
+};
+const skdLabel = (m: string) => SKD_LABELS[m] ?? (m.startsWith('skd_') ? 'use a sub-key' : m);
+const skdPrefix = (context?: string | null) => (context || '').split(':')[0];
 interface Conn { id: string; policy?: string }
 interface Upv2Session { session_id: string; policy: string }
 interface SignerStateLite {
@@ -189,7 +203,14 @@ export function SignerNotification() {
     }
 
     // ── Signing request ──
-    const ruleKey = req.method === 'sign_event' && req.kind != null ? `sign_event:${req.kind}` : req.method;
+    const isSkd = req.method.startsWith('skd_');
+    // For SKD, "Always" grants the whole context-prefix pool (skd:<prefix>); else per-kind/method.
+    const ruleKey = req.method === 'sign_event' && req.kind != null
+        ? `sign_event:${req.kind}`
+        : isSkd && req.context
+            ? `skd:${skdPrefix(req.context)}`
+            : req.method;
+    const alwaysScope = isSkd && req.context ? ` ${skdPrefix(req.context)}:*` : '';
     const npubShort = req.client_pubkey ? `${req.client_pubkey.slice(0, 10)}…${req.client_pubkey.slice(-4)}` : '';
     const remaining = Math.max(0, REQUEST_TTL - (now - req.created_at));
 
@@ -239,12 +260,16 @@ export function SignerNotification() {
                     <p className="text-sm leading-snug truncate">
                         <strong>{req.app_name}</strong>
                         <span className="text-muted-foreground"> · </span>
-                        <strong>{req.method}</strong>
+                        <strong>{isSkd ? skdLabel(req.method) : req.method}</strong>
                         {req.kind != null && <span className="text-muted-foreground"> (kind {req.kind})</span>}
                     </p>
-                    <p className="text-[11px] text-muted-foreground font-mono truncate">
-                        {npubShort}{active.length > 1 ? `  ·  +${active.length - 1} more` : ''}
-                    </p>
+                    {isSkd && req.context ? (
+                        <p className="text-[11px] text-primary/80 font-mono truncate" title={req.context}>↳ {req.context}</p>
+                    ) : (
+                        <p className="text-[11px] text-muted-foreground font-mono truncate">
+                            {npubShort}{active.length > 1 ? `  ·  +${active.length - 1} more` : ''}
+                        </p>
+                    )}
                 </div>
                 <span className="text-[11px] text-muted-foreground tabular-nums shrink-0">{remaining}s</span>
             </div>
@@ -263,11 +288,11 @@ export function SignerNotification() {
                 <div className="flex gap-2">
                     <button disabled={busy} onClick={rejectAlways}
                         className="flex-1 py-2 rounded-xl bg-secondary/60 text-xs font-medium text-muted-foreground hover:bg-secondary transition-colors cursor-pointer disabled:opacity-50">
-                        Always reject
+                        Always reject{alwaysScope}
                     </button>
                     <button disabled={busy} onClick={approveAlways}
                         className="flex-1 py-2 rounded-xl bg-secondary/60 text-xs font-medium text-muted-foreground hover:bg-secondary transition-colors cursor-pointer disabled:opacity-50">
-                        Always approve
+                        Always approve{alwaysScope}
                     </button>
                 </div>
                 <button disabled={busy} onClick={autoApproveAll}

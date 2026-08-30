@@ -796,6 +796,7 @@ async fn handle_sign_event(
             app_name: client_name.clone(),
             method: "sign_event".to_string(),
             params_preview,
+            context: None, // UPV2 has no NIP-SKD path
             raw_event_json: Some(event_json.clone()),
             event_id: String::new(),
             client_pubkey: sender_hex.to_string(),

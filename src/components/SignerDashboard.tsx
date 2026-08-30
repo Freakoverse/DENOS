@@ -58,7 +58,21 @@ interface PendingRequest {
     kind: number | null;
     source: string;
     upv2_session_id: string | null;
+    context?: string | null;
 }
+
+// NIP-SKD helpers: friendly label + the context-prefix (first namespace segment) used for
+// per-connection "Always" grants (rule key `skd:<prefix>` → the whole `<prefix>:*` pool).
+const SKD_LABELS: Record<string, string> = {
+    skd_get_subkey_pubkey: 'derive a sub-key',
+    skd_sign_as_subkey: 'sign as a sub-key',
+    skd_nip44_encrypt_as_subkey: 'encrypt as a sub-key',
+    skd_nip44_decrypt_as_subkey: 'decrypt as a sub-key',
+    skd_nip04_encrypt_as_subkey: 'encrypt as a sub-key',
+    skd_nip04_decrypt_as_subkey: 'decrypt as a sub-key',
+};
+const skdLabel = (m: string) => SKD_LABELS[m] ?? (m.startsWith('skd_') ? 'use a sub-key' : m);
+const skdPrefix = (context?: string | null) => (context || '').split(':')[0];
 
 interface RelayInfo {
     url: string;
@@ -634,6 +648,8 @@ export default function SignerDashboard({ activePubkey, activeNpub }: SignerDash
     const getPolicy = (conn: Connection): string => conn.policy || 'manual';
     const getRuleKey = (req: PendingRequest): string => {
         if (req.method === 'sign_event' && req.kind != null) return `sign_event:${req.kind}`;
+        // NIP-SKD: grant the whole context-prefix pool so DEN-Chat-style clients don't prompt-storm.
+        if (req.method.startsWith('skd_') && req.context) return `skd:${skdPrefix(req.context)}`;
         return req.method;
     };
     const approveAlways = async (req: PendingRequest) => {
@@ -1186,10 +1202,13 @@ export default function SignerDashboard({ activePubkey, activeNpub }: SignerDash
                                                 <div className="flex-1 min-w-0">
                                                     <p className="text-sm">
                                                         <strong>{req.app_name}</strong>
-                                                        <span className="text-muted-foreground"> requests </span>
-                                                        <strong>{req.method}</strong>
+                                                        <span className="text-muted-foreground"> {req.method.startsWith('skd_') ? 'wants to' : 'requests'} </span>
+                                                        <strong>{req.method.startsWith('skd_') ? skdLabel(req.method) : req.method}</strong>
                                                         {req.kind != null && <span className="text-muted-foreground"> (kind {req.kind})</span>}
                                                     </p>
+                                                    {req.method.startsWith('skd_') && req.context && (
+                                                        <p className="text-[11px] text-primary/80 font-mono truncate mt-0.5" title={req.context}>↳ {req.context}</p>
+                                                    )}
                                                     <div className="flex items-center gap-1.5 mt-1">
                                                         {req.source === 'upv2' && (
                                                             <Badge variant="warning" className="text-[10px] py-0">Password</Badge>
@@ -1241,7 +1260,7 @@ export default function SignerDashboard({ activePubkey, activeNpub }: SignerDash
                                                             className="flex-1 text-xs text-muted-foreground bg-secondary/60 hover:bg-secondary"
                                                             onClick={() => { rejectAlways(req); exitRequest(req.id); }}
                                                         >
-                                                            Always Reject
+                                                            Always Reject{req.method.startsWith('skd_') && req.context ? ` ${skdPrefix(req.context)}:*` : ''}
                                                         </Button>
                                                         <Button
                                                             size="sm"
@@ -1249,7 +1268,7 @@ export default function SignerDashboard({ activePubkey, activeNpub }: SignerDash
                                                             className="flex-1 text-xs text-muted-foreground bg-secondary/60 hover:bg-secondary"
                                                             onClick={() => { approveAlways(req); exitRequest(req.id); }}
                                                         >
-                                                            Always Approve
+                                                            Always Approve{req.method.startsWith('skd_') && req.context ? ` ${skdPrefix(req.context)}:*` : ''}
                                                         </Button>
                                                     </div>
                                                     <Button

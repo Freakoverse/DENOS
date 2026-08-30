@@ -665,11 +665,22 @@ async fn handle_nip46_method(
     // Safe metadata queries always auto-respond
     let is_safe_method = matches!(method, "ping" | "get_public_key" | "get_relays");
 
-    // Extract kind for sign_event requests
-    let event_kind: Option<u32> = if method == "sign_event" && !params.is_empty() {
-        serde_json::from_str::<serde_json::Value>(&params[0])
-            .ok()
+    // Event kind for sign_event (params[0]) and skd_sign_as_subkey (params[1]).
+    let event_kind: Option<u32> = {
+        let ev = if method == "sign_event" {
+            params.first()
+        } else if method == "skd_sign_as_subkey" {
+            params.get(1)
+        } else {
+            None
+        };
+        ev.and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok())
             .and_then(|v| v.get("kind").and_then(|k| k.as_u64()).map(|k| k as u32))
+    };
+
+    // NIP-SKD derivation context (params[0]) — for context-prefix rule matching + UI.
+    let skd_context: Option<&str> = if method.starts_with("skd_") {
+        params.first().map(String::as_str)
     } else {
         None
     };
@@ -679,29 +690,20 @@ async fn handle_nip46_method(
         let connections = state.connections.lock().unwrap();
         connections.iter().find(|c| c.id == conn_id)
             .map(|c| {
-                let policy = c.policy.clone();
                 let rule = if c.policy == "custom" {
-                    if method == "sign_event" {
-                        if let Some(kind) = event_kind {
-                            let kind_key = format!("sign_event:{}", kind);
-                            c.custom_rules.get(&kind_key).cloned()
-                                .or_else(|| c.custom_rules.get(method).cloned())
-                        } else {
-                            c.custom_rules.get(method).cloned()
-                        }
-                    } else {
-                        c.custom_rules.get(method).cloned()
-                    }
+                    crate::state::resolve_custom_rule(&c.custom_rules, method, event_kind, skd_context)
                 } else {
                     None
                 };
-                (policy, rule)
+                (c.policy.clone(), rule)
             })
             .unwrap_or(("manual".to_string(), None))
     };
 
     let raw_json = if method == "sign_event" && !params.is_empty() {
         Some(params[0].clone())
+    } else if method == "skd_sign_as_subkey" && params.len() > 1 {
+        Some(params[1].clone())
     } else { None };
 
     if is_safe_method || conn_policy == "auto_approve" || custom_rule.as_deref() == Some("approve") {
@@ -767,6 +769,7 @@ async fn handle_nip46_method(
             app_name: app_name.clone(),
             method: method.to_string(),
             params_preview,
+            context: skd_context.map(String::from),
             raw_event_json: raw_json,
             event_id: uuid::Uuid::new_v4().to_string(), // No Nostr event for local
             client_pubkey: pc55_client_key,

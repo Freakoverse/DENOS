@@ -161,7 +161,10 @@ pub struct PendingRequest {
     pub app_name: String,
     pub method: String,
     pub params_preview: String,
-    /// Full unsigned event JSON for sign_event requests (for UI inspection)
+    /// NIP-SKD only: the derivation `context` (params[0]) — for UI display and context-prefix rules.
+    #[serde(default)]
+    pub context: Option<String>,
+    /// Full unsigned event JSON for sign_event / skd_sign_as_subkey requests (for UI inspection)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_event_json: Option<String>,
     pub event_id: String,
@@ -185,6 +188,42 @@ pub struct PendingRequest {
     /// UPV2 only: client-provided nonce for request-response matching
     #[serde(default)]
     pub upv2_nonce: Option<String>,
+}
+
+/// Resolve the custom-rule action ("approve"/"reject"/None) for a request under a `custom` policy.
+/// Handles `sign_event` kind-specificity, NIP-SKD `skd:<context-prefix>` rules (longest matching
+/// prefix wins, so a specific grant overrides a broader one), and otherwise an exact method match.
+pub fn resolve_custom_rule(
+    rules: &std::collections::HashMap<String, String>,
+    method: &str,
+    event_kind: Option<u32>,
+    context: Option<&str>,
+) -> Option<String> {
+    if method == "sign_event" {
+        return match event_kind {
+            Some(kind) => rules
+                .get(&format!("sign_event:{}", kind))
+                .cloned()
+                .or_else(|| rules.get(method).cloned()),
+            None => rules.get(method).cloned(),
+        };
+    }
+    if method.starts_with("skd_") {
+        if let Some(ctx) = context {
+            let mut best: Option<(usize, String)> = None;
+            for (k, v) in rules {
+                if let Some(prefix) = k.strip_prefix("skd:") {
+                    let hit = ctx == prefix || ctx.starts_with(&format!("{}:", prefix));
+                    if hit && best.as_ref().map_or(true, |(l, _)| prefix.len() > *l) {
+                        best = Some((prefix.len(), v.clone()));
+                    }
+                }
+            }
+            return best.map(|(_, v)| v);
+        }
+        return None;
+    }
+    rules.get(method).cloned()
 }
 
 // --- NIP-UPV2 Structs ---
