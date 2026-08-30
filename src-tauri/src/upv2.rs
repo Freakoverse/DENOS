@@ -412,6 +412,9 @@ pub async fn handle_upv2_event(
         "nip04_encrypt" | "nip04_decrypt" | "nip44_encrypt" | "nip44_decrypt" => {
             handle_encrypt_decrypt(app, signer_keys, client, &sender_pubkey, &sender_hex, &session_id, &decrypted, &action, use_nip44).await;
         }
+        a if a.starts_with("skd_") => {
+            handle_skd(app, signer_keys, client, &sender_pubkey, &sender_hex, &session_id, &decrypted, &action, use_nip44).await;
+        }
         _ => { warn!("[UPV2] Unknown action: {}", action); }
     }
 
@@ -819,6 +822,196 @@ async fn handle_sign_event(
     }
 
     // Always emit state update so UI refreshes with pending requests
+    emit_signer_state(app, &state);
+}
+
+/// NIP-SKD over UPV2. Derives an application-scoped sub-key from the session's identity key and
+/// runs the op as that sub-key (never exposing its private material). Mirrors UPV2's own split:
+/// `skd_sign_as_subkey` goes through the manual/pending flow like sign_event; the lower-risk ops
+/// (get-pubkey / encrypt / decrypt) auto-execute like encrypt/decrypt. Gated by the shared
+/// resolve_custom_rule, so `skd:<context-prefix>` grants work over UPV2 too.
+///
+/// UPV2 SKD payload: `{ context, peerPub?, nonce?, and per method: event | (recipientPub,
+/// plaintext) | (senderPub, ciphertext) }`.
+async fn handle_skd(
+    app: &AppHandle,
+    signer_keys: &Keys,
+    client: &Client,
+    sender_pubkey: &PublicKey,
+    sender_hex: &str,
+    session_id: &str,
+    decrypted: &str,
+    method: &str,
+    use_nip44: bool,
+) {
+    let state: tauri::State<'_, AppState> = app.state();
+    let fp = fingerprint(sender_hex);
+
+    let session_info = {
+        let sessions = state.upv2_sessions.lock().unwrap();
+        sessions.iter().find(|s| s.login_pk == sender_hex).map(|s| {
+            (s.client_name.clone(), s.policy.clone(), s.custom_rules.clone())
+        })
+    };
+    let (client_name, session_policy, custom_rules) = match session_info {
+        Some(info) => info,
+        None => {
+            let err = serde_json::json!({ "error": "No active session" });
+            send_upv2_response(signer_keys, client, sender_pubkey, session_id, "error", &err.to_string(), None, use_nip44).await;
+            return;
+        }
+    };
+
+    let payload: serde_json::Value = match serde_json::from_str(decrypted) {
+        Ok(v) => v,
+        Err(e) => { warn!("[UPV2] Invalid {} payload: {}", method, e); return; }
+    };
+    let request_nonce = payload.get("nonce").and_then(|n| n.as_str()).map(|s| s.to_string());
+
+    let send_err = |msg: String| {
+        let err = serde_json::json!({ "error": msg });
+        (err.to_string(), request_nonce.clone())
+    };
+
+    let context = match payload.get("context").and_then(|v| v.as_str()) {
+        Some(c) if !c.is_empty() => c.to_string(),
+        _ => {
+            let (e, n) = send_err("Missing 'context' parameter".to_string());
+            send_upv2_response(signer_keys, client, sender_pubkey, session_id, "error", &e, n.as_deref(), use_nip44).await;
+            return;
+        }
+    };
+    let peer = payload.get("peerPub").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string());
+
+    // Op-specific args (owned): sign → event JSON; encrypt → (recipientPub, plaintext); decrypt →
+    // (senderPub, ciphertext); get-pubkey → none.
+    let (arg1, arg2): (Option<String>, Option<String>) = match method {
+        "skd_get_subkey_pubkey" => (None, None),
+        "skd_sign_as_subkey" => match payload.get("event") {
+            Some(ev) => (Some(ev.to_string()), None),
+            None => {
+                let (e, n) = send_err("Missing 'event' parameter".to_string());
+                send_upv2_response(signer_keys, client, sender_pubkey, session_id, "error", &e, n.as_deref(), use_nip44).await;
+                return;
+            }
+        },
+        "skd_nip44_encrypt_as_subkey" | "skd_nip04_encrypt_as_subkey" => {
+            match (payload.get("recipientPub").and_then(|v| v.as_str()), payload.get("plaintext").and_then(|v| v.as_str())) {
+                (Some(r), Some(p)) => (Some(r.to_string()), Some(p.to_string())),
+                _ => {
+                    let (e, n) = send_err("Missing 'recipientPub'/'plaintext'".to_string());
+                    send_upv2_response(signer_keys, client, sender_pubkey, session_id, "error", &e, n.as_deref(), use_nip44).await;
+                    return;
+                }
+            }
+        }
+        "skd_nip44_decrypt_as_subkey" | "skd_nip04_decrypt_as_subkey" => {
+            match (payload.get("senderPub").and_then(|v| v.as_str()), payload.get("ciphertext").and_then(|v| v.as_str())) {
+                (Some(s), Some(c)) => (Some(s.to_string()), Some(c.to_string())),
+                _ => {
+                    let (e, n) = send_err("Missing 'senderPub'/'ciphertext'".to_string());
+                    send_upv2_response(signer_keys, client, sender_pubkey, session_id, "error", &e, n.as_deref(), use_nip44).await;
+                    return;
+                }
+            }
+        }
+        _ => {
+            let (e, n) = send_err(format!("Unsupported SKD method: {}", method));
+            send_upv2_response(signer_keys, client, sender_pubkey, session_id, "error", &e, n.as_deref(), use_nip44).await;
+            return;
+        }
+    };
+
+    let event_kind: Option<u32> = if method == "skd_sign_as_subkey" {
+        payload.get("event").and_then(|v| v.get("kind")).and_then(|k| k.as_u64()).map(|k| k as u32)
+    } else { None };
+
+    // Gating — shared with NIP-46/PC55, so `skd:<context-prefix>` rules apply here too.
+    let custom_rule = if session_policy == "custom" {
+        crate::state::resolve_custom_rule(&custom_rules, method, event_kind, Some(&context))
+    } else { None };
+    let should_auto_reject = session_policy == "auto_reject" || custom_rule.as_deref() == Some("reject");
+    let should_auto_approve = session_policy == "auto_approve" || custom_rule.as_deref() == Some("approve");
+
+    if should_auto_reject {
+        let err = serde_json::json!({ "error": "Request auto-rejected by signer policy" });
+        send_upv2_response(signer_keys, client, sender_pubkey, session_id, "error", &err.to_string(), request_nonce.as_deref(), use_nip44).await;
+        info!("[UPV2] Auto-rejected {} from '{}' ({})", method, client_name, fp);
+        emit_log(app, &format!("[UPV2] ✗ Auto-rejected {} from '{}' ({}…)", method, client_name, fp));
+        return;
+    }
+
+    // Compute eagerly (needed for auto-approve and for pending).
+    let result = match crate::nip46::skd_operate(signer_keys, method, &context, peer.as_deref(), arg1.as_deref(), arg2.as_deref()) {
+        Ok(r) => r,
+        Err(e) => {
+            let err = serde_json::json!({ "error": e });
+            send_upv2_response(signer_keys, client, sender_pubkey, session_id, "error", &err.to_string(), request_nonce.as_deref(), use_nip44).await;
+            return;
+        }
+    };
+
+    {
+        let mut sessions = state.upv2_sessions.lock().unwrap();
+        if let Some(session) = sessions.iter_mut().find(|s| s.login_pk == sender_hex) {
+            session.last_active = now_secs();
+        }
+    }
+    let _ = state.save_upv2_sessions();
+
+    let is_sign = method == "skd_sign_as_subkey";
+
+    // Sign follows the manual/pending flow; the lower-risk ops auto-execute (UPV2's model).
+    if should_auto_approve || !is_sign {
+        if is_sign {
+            let response = serde_json::json!({ "event": serde_json::from_str::<serde_json::Value>(&result).unwrap_or_default() });
+            send_upv2_response(signer_keys, client, sender_pubkey, session_id, "signed_event", &response.to_string(), request_nonce.as_deref(), use_nip44).await;
+        } else {
+            let response = serde_json::json!({ "result": result });
+            send_upv2_response(signer_keys, client, sender_pubkey, session_id, method, &response.to_string(), request_nonce.as_deref(), use_nip44).await;
+        }
+        info!("[UPV2] ✓ {} for '{}' ({})", method, client_name, fp);
+        emit_log(app, &format!("[UPV2] ✓ {} for '{}' ({}…)", method, client_name, fp));
+        state.record_signing_history(SigningHistoryEntry {
+            id: format!("upv2-skd-{}-{}", session_id, now_secs()),
+            timestamp: now_secs(),
+            method: method.to_string(),
+            kind: event_kind,
+            app_name: client_name.clone(),
+            source: "upv2".to_string(),
+            outcome: "auto_approved".to_string(),
+            raw_event_json: if is_sign { arg1.clone() } else { None },
+        });
+    } else {
+        // Manual approval (skd_sign only): queue, mirroring sign_event. approve_request sends the
+        // stored { event } back with the "signed_event" action + this nonce.
+        let response_json = serde_json::json!({ "event": serde_json::from_str::<serde_json::Value>(&result).unwrap_or_default() }).to_string();
+        let pending = PendingRequest {
+            id: format!("upv2-{}-{}", session_id, now_secs()),
+            connection_id: session_id.to_string(),
+            app_name: client_name.clone(),
+            method: method.to_string(),
+            params_preview: format!("[UPV2] {} ({})", method, context),
+            context: Some(context.clone()),
+            raw_event_json: arg1.clone(),
+            event_id: String::new(),
+            client_pubkey: sender_hex.to_string(),
+            created_at: now_secs(),
+            kind: event_kind,
+            response_json: Some(response_json),
+            use_nip44,
+            source: "upv2".to_string(),
+            upv2_session_id: Some(session_id.to_string()),
+            upv2_nonce: request_nonce.clone(),
+        };
+        {
+            let mut pending_requests = state.pending_requests.lock().unwrap();
+            pending_requests.push(pending);
+        }
+        info!("[UPV2] Pending approval: {} from '{}' ({})", method, client_name, fp);
+        emit_log(app, &format!("[UPV2] ⏳ Pending {} from '{}' ({}…) — awaiting approval", method, client_name, fp));
+    }
+
     emit_signer_state(app, &state);
 }
 

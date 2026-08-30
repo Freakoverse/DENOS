@@ -1876,60 +1876,19 @@ pub(crate) fn process_nip46_request(signer_keys: &Keys, request: &Nip46Request) 
         // The sub-key's private material is never returned — only the operation result. `peer`
         // present ⇒ shared derivation; absent (or empty) ⇒ self. These flow through the normal
         // per-connection policy gate just like sign_event / nip44 (they are not "safe" methods).
-        "skd_get_subkey_pubkey" => {
+        m if m.starts_with("skd_") => {
             let p = &request.params;
             if p.is_empty() {
                 return skd_err(&request.id, "Missing parameter (context)");
             }
-            match skd_subkey_keys(signer_keys, &p[0], skd_peer(p, 1)) {
-                Ok(sub) => skd_ok(&request.id, sub.public_key().to_hex()),
-                Err(e) => skd_err(&request.id, &e),
-            }
-        }
-        "skd_sign_as_subkey" => {
-            let p = &request.params;
-            if p.len() < 2 {
-                return skd_err(&request.id, "Missing parameters (context, event)");
-            }
-            let r = skd_subkey_keys(signer_keys, &p[0], skd_peer(p, 2))
-                .and_then(|sub| sign_event_param(&sub, &p[1]));
-            skd_respond(&request.id, r)
-        }
-        "skd_nip44_encrypt_as_subkey" => {
-            let p = &request.params;
-            if p.len() < 3 {
-                return skd_err(&request.id, "Missing parameters (context, recipient, plaintext)");
-            }
-            let r = skd_subkey_keys(signer_keys, &p[0], skd_peer(p, 3))
-                .and_then(|sub| nip44_encrypt_param(&sub, &p[1], &p[2]));
-            skd_respond(&request.id, r)
-        }
-        "skd_nip44_decrypt_as_subkey" => {
-            let p = &request.params;
-            if p.len() < 3 {
-                return skd_err(&request.id, "Missing parameters (context, sender, ciphertext)");
-            }
-            let r = skd_subkey_keys(signer_keys, &p[0], skd_peer(p, 3))
-                .and_then(|sub| nip44_decrypt_param(&sub, &p[1], &p[2]));
-            skd_respond(&request.id, r)
-        }
-        "skd_nip04_encrypt_as_subkey" => {
-            let p = &request.params;
-            if p.len() < 3 {
-                return skd_err(&request.id, "Missing parameters (context, recipient, plaintext)");
-            }
-            let r = skd_subkey_keys(signer_keys, &p[0], skd_peer(p, 3))
-                .and_then(|sub| nip04_encrypt_param(&sub, &p[1], &p[2]));
-            skd_respond(&request.id, r)
-        }
-        "skd_nip04_decrypt_as_subkey" => {
-            let p = &request.params;
-            if p.len() < 3 {
-                return skd_err(&request.id, "Missing parameters (context, sender, ciphertext)");
-            }
-            let r = skd_subkey_keys(signer_keys, &p[0], skd_peer(p, 3))
-                .and_then(|sub| nip04_decrypt_param(&sub, &p[1], &p[2]));
-            skd_respond(&request.id, r)
+            // Positional layout: [context, ...op-args, peer?]. The peer index (and which op-args
+            // exist) depend on the method; peer present ⇒ shared, absent/empty ⇒ self derivation.
+            let (peer_idx, a1, a2): (usize, Option<&str>, Option<&str>) = match m {
+                "skd_get_subkey_pubkey" => (1, None, None),
+                "skd_sign_as_subkey" => (2, p.get(1).map(String::as_str), None),
+                _ => (3, p.get(1).map(String::as_str), p.get(2).map(String::as_str)),
+            };
+            skd_respond(&request.id, skd_operate(signer_keys, m, &p[0], skd_peer(p, peer_idx), a1, a2))
         }
 
         _ => Nip46Response {
@@ -1962,6 +1921,30 @@ fn skd_respond(id: &str, r: Result<String, String>) -> Nip46Response {
     match r {
         Ok(v) => skd_ok(id, v),
         Err(e) => skd_err(id, &e),
+    }
+}
+
+/// Derive the sub-key and perform the requested SKD operation, returning the result string.
+/// Shared by the NIP-46/PC55 router and the UPV2 handler. `arg1`/`arg2` are the op-specific
+/// params: sign → arg1 = event JSON; encrypt → (recipient, plaintext); decrypt → (sender,
+/// ciphertext); get-pubkey → none. Never exposes the sub-key private material.
+pub(crate) fn skd_operate(
+    signer_keys: &Keys,
+    method: &str,
+    context: &str,
+    peer: Option<&str>,
+    arg1: Option<&str>,
+    arg2: Option<&str>,
+) -> Result<String, String> {
+    let sub = skd_subkey_keys(signer_keys, context, peer)?;
+    match method {
+        "skd_get_subkey_pubkey" => Ok(sub.public_key().to_hex()),
+        "skd_sign_as_subkey" => sign_event_param(&sub, arg1.ok_or("NIP-SKD: missing event")?),
+        "skd_nip44_encrypt_as_subkey" => nip44_encrypt_param(&sub, arg1.ok_or("NIP-SKD: missing recipient")?, arg2.ok_or("NIP-SKD: missing plaintext")?),
+        "skd_nip44_decrypt_as_subkey" => nip44_decrypt_param(&sub, arg1.ok_or("NIP-SKD: missing sender")?, arg2.ok_or("NIP-SKD: missing ciphertext")?),
+        "skd_nip04_encrypt_as_subkey" => nip04_encrypt_param(&sub, arg1.ok_or("NIP-SKD: missing recipient")?, arg2.ok_or("NIP-SKD: missing plaintext")?),
+        "skd_nip04_decrypt_as_subkey" => nip04_decrypt_param(&sub, arg1.ok_or("NIP-SKD: missing sender")?, arg2.ok_or("NIP-SKD: missing ciphertext")?),
+        _ => Err(format!("Unsupported SKD method: {}", method)),
     }
 }
 
