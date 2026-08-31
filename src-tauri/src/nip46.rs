@@ -1544,9 +1544,13 @@ async fn handle_nip46_event(
     };
 
     // Determine if this should auto-respond or require approval
-    // Safe metadata queries always auto-respond
+    // Safe metadata queries always auto-respond. skd_get_subkey_pubkey returns only a
+    // DERIVED public key (no secret, no signature) — same sensitivity class as
+    // get_public_key — so it's safe to auto-respond, letting clients probe NIP-SKD
+    // support without a prompt. Sign/encrypt/decrypt-as-subkey stay policy-gated.
     let is_safe_method = matches!(request.method.as_str(),
         "ping" | "get_public_key" | "get_relays"
+        | "skd_get_subkey_pubkey"
     );
 
     // Event kind for sign_event (params[0]) and skd_sign_as_subkey (params[1]).
