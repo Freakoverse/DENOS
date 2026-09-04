@@ -1544,20 +1544,21 @@ async fn handle_nip46_event(
     };
 
     // Determine if this should auto-respond or require approval
-    // Safe metadata queries always auto-respond. skd_get_subkey_pubkey returns only a
-    // DERIVED public key (no secret, no signature) — same sensitivity class as
-    // get_public_key — so it's safe to auto-respond, letting clients probe NIP-SKD
-    // support without a prompt. Sign/encrypt/decrypt-as-subkey stay policy-gated.
+    // Safe metadata queries always auto-respond. The SKD pubkey reads return only a DERIVED
+    // public key (no secret, no signature) — same sensitivity class as get_public_key (§2.1) —
+    // so they're safe to auto-respond, letting clients probe NIP-SKD support without a prompt.
+    // (The v2 capability probe is skd_get_blinded_pubkey, so it MUST be here.) Sign and
+    // encrypt/decrypt-as-subkey stay policy-gated.
     let is_safe_method = matches!(request.method.as_str(),
         "ping" | "get_public_key" | "get_relays"
-        | "skd_get_subkey_pubkey"
+        | "skd_get_subkey_pubkey" | "skd_get_blinded_pubkey" | "skd_get_peer_blinded_pubkey"
     );
 
-    // Event kind for sign_event (params[0]) and skd_sign_as_subkey (params[1]).
+    // Event kind for sign_event (params[0]) and the SKD sign methods (params[1] = event).
     let event_kind: Option<u32> = {
         let ev = if request.method == "sign_event" {
             request.params.first()
-        } else if request.method == "skd_sign_as_subkey" {
+        } else if request.method == "skd_sign_as_subkey" || request.method == "skd_sign_as_blinded" {
             request.params.get(1)
         } else {
             None
@@ -1661,7 +1662,9 @@ async fn handle_nip46_event(
             context: skd_context.map(String::from),
             raw_event_json: if request.method == "sign_event" && !request.params.is_empty() {
                 Some(request.params[0].clone())
-            } else if request.method == "skd_sign_as_subkey" && request.params.len() > 1 {
+            } else if (request.method == "skd_sign_as_subkey" || request.method == "skd_sign_as_blinded")
+                && request.params.len() > 1
+            {
                 Some(request.params[1].clone())
             } else {
                 None
@@ -1875,21 +1878,29 @@ pub(crate) fn process_nip46_request(signer_keys: &Keys, request: &Nip46Request) 
         },
 
         // ── NIP-SKD: sub-key operations ──────────────────────────────────────────────
-        // Derive an application-scoped sub-key from the root key + a public `context` (and, for
-        // shared derivations, a trailing `peer` pubkey), then run the operation as that sub-key.
-        // The sub-key's private material is never returned — only the operation result. `peer`
-        // present ⇒ shared derivation; absent (or empty) ⇒ self. These flow through the normal
-        // per-connection policy gate just like sign_event / nip44 (they are not "safe" methods).
+        // Derive an application-scoped key from the root key + a public `context` (+ a `peer`
+        // pubkey for the shared/blinded forms), then run the operation as that key. The form is
+        // chosen by the method name: `*_as_subkey` (peer present ⇒ shared, absent ⇒ self) or
+        // `*_as_blinded` (root blinded toward peer; peer required). Private material is never
+        // returned — only the result. The pubkey reads are "safe" (auto, §2.1); the sign and
+        // encrypt/decrypt ops flow through the normal per-connection policy gate.
         m if m.starts_with("skd_") => {
             let p = &request.params;
             if p.is_empty() {
                 return skd_err(&request.id, "Missing parameter (context)");
             }
             // Positional layout: [context, ...op-args, peer?]. The peer index (and which op-args
-            // exist) depend on the method; peer present ⇒ shared, absent/empty ⇒ self derivation.
+            // exist) depend on the method. For self/shared methods peer is trailing+optional
+            // (present ⇒ shared, absent/empty ⇒ self); for blinded methods peer is required at the
+            // same index. The pubkey reads take no op-args; the sign methods take an event at [1];
+            // the rest take two op-args at [1],[2].
             let (peer_idx, a1, a2): (usize, Option<&str>, Option<&str>) = match m {
-                "skd_get_subkey_pubkey" => (1, None, None),
-                "skd_sign_as_subkey" => (2, p.get(1).map(String::as_str), None),
+                "skd_get_subkey_pubkey"
+                | "skd_get_blinded_pubkey"
+                | "skd_get_peer_blinded_pubkey" => (1, None, None),
+                "skd_sign_as_subkey" | "skd_sign_as_blinded" => {
+                    (2, p.get(1).map(String::as_str), None)
+                }
                 _ => (3, p.get(1).map(String::as_str), p.get(2).map(String::as_str)),
             };
             skd_respond(&request.id, skd_operate(signer_keys, m, &p[0], skd_peer(p, peer_idx), a1, a2))
@@ -1940,14 +1951,58 @@ pub(crate) fn skd_operate(
     arg1: Option<&str>,
     arg2: Option<&str>,
 ) -> Result<String, String> {
-    let sub = skd_subkey_keys(signer_keys, context, peer)?;
+    let root_hex = signer_keys.secret_key().to_secret_hex();
+
+    // Verifier-only op: a PEER's blinded pubkey (base = peer). Pubkey out, no private key here —
+    // the "verify a binding but can't impersonate" property. Handled before deriving any key.
+    if method == "skd_get_peer_blinded_pubkey" {
+        let peer = peer.ok_or("NIP-SKD: blinded derivation requires a peer")?;
+        return crate::skd::derive_blinded_pub_for_peer(&root_hex, context, peer);
+    }
+
+    // Blinded methods act as the caller's OWN blinded key (root + t); self/shared act as an
+    // independent sub-key. The form is chosen by the method name; blinded requires a peer.
+    let is_blinded = matches!(
+        method,
+        "skd_get_blinded_pubkey"
+            | "skd_sign_as_blinded"
+            | "skd_nip44_encrypt_as_blinded"
+            | "skd_nip44_decrypt_as_blinded"
+            | "skd_nip04_encrypt_as_blinded"
+            | "skd_nip04_decrypt_as_blinded"
+    );
+    let sub = if is_blinded {
+        let peer = peer.ok_or("NIP-SKD: blinded derivation requires a peer")?;
+        crate::skd::derive_blinded_keys(&root_hex, context, peer)?
+    } else {
+        skd_subkey_keys(signer_keys, context, peer)?
+    };
+
     match method {
-        "skd_get_subkey_pubkey" => Ok(sub.public_key().to_hex()),
-        "skd_sign_as_subkey" => sign_event_param(&sub, arg1.ok_or("NIP-SKD: missing event")?),
-        "skd_nip44_encrypt_as_subkey" => nip44_encrypt_param(&sub, arg1.ok_or("NIP-SKD: missing recipient")?, arg2.ok_or("NIP-SKD: missing plaintext")?),
-        "skd_nip44_decrypt_as_subkey" => nip44_decrypt_param(&sub, arg1.ok_or("NIP-SKD: missing sender")?, arg2.ok_or("NIP-SKD: missing ciphertext")?),
-        "skd_nip04_encrypt_as_subkey" => nip04_encrypt_param(&sub, arg1.ok_or("NIP-SKD: missing recipient")?, arg2.ok_or("NIP-SKD: missing plaintext")?),
-        "skd_nip04_decrypt_as_subkey" => nip04_decrypt_param(&sub, arg1.ok_or("NIP-SKD: missing sender")?, arg2.ok_or("NIP-SKD: missing ciphertext")?),
+        "skd_get_subkey_pubkey" | "skd_get_blinded_pubkey" => Ok(sub.public_key().to_hex()),
+        "skd_sign_as_subkey" | "skd_sign_as_blinded" => {
+            sign_event_param(&sub, arg1.ok_or("NIP-SKD: missing event")?)
+        }
+        "skd_nip44_encrypt_as_subkey" | "skd_nip44_encrypt_as_blinded" => nip44_encrypt_param(
+            &sub,
+            arg1.ok_or("NIP-SKD: missing recipient")?,
+            arg2.ok_or("NIP-SKD: missing plaintext")?,
+        ),
+        "skd_nip44_decrypt_as_subkey" | "skd_nip44_decrypt_as_blinded" => nip44_decrypt_param(
+            &sub,
+            arg1.ok_or("NIP-SKD: missing sender")?,
+            arg2.ok_or("NIP-SKD: missing ciphertext")?,
+        ),
+        "skd_nip04_encrypt_as_subkey" | "skd_nip04_encrypt_as_blinded" => nip04_encrypt_param(
+            &sub,
+            arg1.ok_or("NIP-SKD: missing recipient")?,
+            arg2.ok_or("NIP-SKD: missing plaintext")?,
+        ),
+        "skd_nip04_decrypt_as_subkey" | "skd_nip04_decrypt_as_blinded" => nip04_decrypt_param(
+            &sub,
+            arg1.ok_or("NIP-SKD: missing sender")?,
+            arg2.ok_or("NIP-SKD: missing ciphertext")?,
+        ),
         _ => Err(format!("Unsupported SKD method: {}", method)),
     }
 }

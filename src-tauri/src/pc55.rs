@@ -526,10 +526,14 @@ async fn handle_message(
         "get_public_key" | "sign_event" | "ping"
         | "nip04_encrypt" | "nip04_decrypt"
         | "nip44_encrypt" | "nip44_decrypt"
-        // NIP-SKD sub-key operations
+        // NIP-SKD sub-key operations (self/shared forms)
         | "skd_get_subkey_pubkey" | "skd_sign_as_subkey"
         | "skd_nip44_encrypt_as_subkey" | "skd_nip44_decrypt_as_subkey"
-        | "skd_nip04_encrypt_as_subkey" | "skd_nip04_decrypt_as_subkey" => {
+        | "skd_nip04_encrypt_as_subkey" | "skd_nip04_decrypt_as_subkey"
+        // NIP-SKD blinded form (owner-verifiable member pseudonyms)
+        | "skd_get_blinded_pubkey" | "skd_get_peer_blinded_pubkey" | "skd_sign_as_blinded"
+        | "skd_nip44_encrypt_as_blinded" | "skd_nip44_decrypt_as_blinded"
+        | "skd_nip04_encrypt_as_blinded" | "skd_nip04_decrypt_as_blinded" => {
             // Guard: reject if Local Signer is toggled off
             {
                 let state: tauri::State<'_, AppState> = app.state();
@@ -662,20 +666,21 @@ async fn handle_nip46_method(
         }
     };
 
-    // Safe metadata queries always auto-respond. skd_get_subkey_pubkey returns only a
-    // DERIVED public key (no secret, no signature) — same sensitivity class as
-    // get_public_key — so it's safe to auto-respond, letting clients probe NIP-SKD
-    // support without a prompt. Sign/encrypt/decrypt-as-subkey stay policy-gated.
+    // Safe metadata queries always auto-respond. The SKD pubkey reads return only a DERIVED
+    // public key (no secret, no signature) — same sensitivity class as get_public_key (§2.1) —
+    // so they're safe to auto-respond, letting clients probe NIP-SKD support without a prompt.
+    // (The v2 capability probe is skd_get_blinded_pubkey, so it MUST be here.) Sign and
+    // encrypt/decrypt-as-subkey stay policy-gated.
     let is_safe_method = matches!(method,
         "ping" | "get_public_key" | "get_relays"
-        | "skd_get_subkey_pubkey"
+        | "skd_get_subkey_pubkey" | "skd_get_blinded_pubkey" | "skd_get_peer_blinded_pubkey"
     );
 
-    // Event kind for sign_event (params[0]) and skd_sign_as_subkey (params[1]).
+    // Event kind for sign_event (params[0]) and the SKD sign methods (params[1] = event).
     let event_kind: Option<u32> = {
         let ev = if method == "sign_event" {
             params.first()
-        } else if method == "skd_sign_as_subkey" {
+        } else if method == "skd_sign_as_subkey" || method == "skd_sign_as_blinded" {
             params.get(1)
         } else {
             None
@@ -708,7 +713,7 @@ async fn handle_nip46_method(
 
     let raw_json = if method == "sign_event" && !params.is_empty() {
         Some(params[0].clone())
-    } else if method == "skd_sign_as_subkey" && params.len() > 1 {
+    } else if (method == "skd_sign_as_subkey" || method == "skd_sign_as_blinded") && params.len() > 1 {
         Some(params[1].clone())
     } else { None };
 

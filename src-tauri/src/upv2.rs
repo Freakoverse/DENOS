@@ -886,8 +886,11 @@ async fn handle_skd(
     // Op-specific args (owned): sign → event JSON; encrypt → (recipientPub, plaintext); decrypt →
     // (senderPub, ciphertext); get-pubkey → none.
     let (arg1, arg2): (Option<String>, Option<String>) = match method {
-        "skd_get_subkey_pubkey" => (None, None),
-        "skd_sign_as_subkey" => match payload.get("event") {
+        // Pubkey reads (self/shared + both blinded reads) — no op args.
+        "skd_get_subkey_pubkey" | "skd_get_blinded_pubkey" | "skd_get_peer_blinded_pubkey" => {
+            (None, None)
+        }
+        "skd_sign_as_subkey" | "skd_sign_as_blinded" => match payload.get("event") {
             Some(ev) => (Some(ev.to_string()), None),
             None => {
                 let (e, n) = send_err("Missing 'event' parameter".to_string());
@@ -895,7 +898,8 @@ async fn handle_skd(
                 return;
             }
         },
-        "skd_nip44_encrypt_as_subkey" | "skd_nip04_encrypt_as_subkey" => {
+        "skd_nip44_encrypt_as_subkey" | "skd_nip04_encrypt_as_subkey"
+        | "skd_nip44_encrypt_as_blinded" | "skd_nip04_encrypt_as_blinded" => {
             match (payload.get("recipientPub").and_then(|v| v.as_str()), payload.get("plaintext").and_then(|v| v.as_str())) {
                 (Some(r), Some(p)) => (Some(r.to_string()), Some(p.to_string())),
                 _ => {
@@ -905,7 +909,8 @@ async fn handle_skd(
                 }
             }
         }
-        "skd_nip44_decrypt_as_subkey" | "skd_nip04_decrypt_as_subkey" => {
+        "skd_nip44_decrypt_as_subkey" | "skd_nip04_decrypt_as_subkey"
+        | "skd_nip44_decrypt_as_blinded" | "skd_nip04_decrypt_as_blinded" => {
             match (payload.get("senderPub").and_then(|v| v.as_str()), payload.get("ciphertext").and_then(|v| v.as_str())) {
                 (Some(s), Some(c)) => (Some(s.to_string()), Some(c.to_string())),
                 _ => {
@@ -922,7 +927,7 @@ async fn handle_skd(
         }
     };
 
-    let event_kind: Option<u32> = if method == "skd_sign_as_subkey" {
+    let event_kind: Option<u32> = if method == "skd_sign_as_subkey" || method == "skd_sign_as_blinded" {
         payload.get("event").and_then(|v| v.get("kind")).and_then(|k| k.as_u64()).map(|k| k as u32)
     } else { None };
 
@@ -959,7 +964,7 @@ async fn handle_skd(
     }
     let _ = state.save_upv2_sessions();
 
-    let is_sign = method == "skd_sign_as_subkey";
+    let is_sign = method == "skd_sign_as_subkey" || method == "skd_sign_as_blinded";
 
     // Sign follows the manual/pending flow; the lower-risk ops auto-execute (UPV2's model).
     if should_auto_approve || !is_sign {

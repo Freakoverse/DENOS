@@ -56,6 +56,13 @@ const SKD_LABELS: Record<string, string> = {
     skd_nip44_decrypt_as_subkey: 'decrypt as a sub-key',
     skd_nip04_encrypt_as_subkey: 'encrypt as a sub-key',
     skd_nip04_decrypt_as_subkey: 'decrypt as a sub-key',
+    skd_get_blinded_pubkey: 'derive a blinded key',
+    skd_get_peer_blinded_pubkey: 'verify a blinded key',
+    skd_sign_as_blinded: 'sign as a blinded key',
+    skd_nip44_encrypt_as_blinded: 'encrypt as a blinded key',
+    skd_nip44_decrypt_as_blinded: 'decrypt as a blinded key',
+    skd_nip04_encrypt_as_blinded: 'encrypt as a blinded key',
+    skd_nip04_decrypt_as_blinded: 'decrypt as a blinded key',
 };
 const skdLabel = (m: string) => SKD_LABELS[m] ?? (m.startsWith('skd_') ? 'use a sub-key' : m);
 const skdPrefix = (context?: string | null) => (context || '').split(':')[0];
