@@ -825,14 +825,16 @@ async fn handle_sign_event(
     emit_signer_state(app, &state);
 }
 
-/// NIP-SKD over UPV2. Derives an application-scoped sub-key from the session's identity key and
-/// runs the op as that sub-key (never exposing its private material). Mirrors UPV2's own split:
-/// `skd_sign_as_subkey` goes through the manual/pending flow like sign_event; the lower-risk ops
-/// (get-pubkey / encrypt / decrypt) auto-execute like encrypt/decrypt. Gated by the shared
-/// resolve_custom_rule, so `skd:<context-prefix>` grants work over UPV2 too.
+/// NIP-SKD over UPV2. Derives an application-scoped key (self/shared/blinded, chosen by the method
+/// name) from the session's identity key and runs the op as that key (never exposing its private
+/// material). Mirrors UPV2's own split: the sign methods (`skd_sign_as_*`) go through the
+/// manual/pending flow like sign_event; the lower-risk ops (pubkey reads / encrypt / decrypt)
+/// auto-execute like encrypt/decrypt. Gated by the shared resolve_custom_rule, so
+/// `skd:<context-prefix>` grants work over UPV2 too.
 ///
-/// UPV2 SKD payload: `{ context, peerPub?, nonce?, and per method: event | (recipientPub,
-/// plaintext) | (senderPub, ciphertext) }`.
+/// UPV2 SKD payload: `{ context, peerPub?, nonce, and per method: event | (recipientPub,
+/// plaintext) | (senderPub, ciphertext) }`. `peerPub` is present for shared/blinded methods and
+/// absent for self methods.
 async fn handle_skd(
     app: &AppHandle,
     signer_keys: &Keys,
@@ -885,49 +887,45 @@ async fn handle_skd(
 
     // Op-specific args (owned): sign → event JSON; encrypt → (recipientPub, plaintext); decrypt →
     // (senderPub, ciphertext); get-pubkey → none.
-    let (arg1, arg2): (Option<String>, Option<String>) = match method {
-        // Pubkey reads (self/shared + both blinded reads) — no op args.
-        "skd_get_subkey_pubkey" | "skd_get_blinded_pubkey" | "skd_get_peer_blinded_pubkey" => {
-            (None, None)
-        }
-        "skd_sign_as_subkey" | "skd_sign_as_blinded" => match payload.get("event") {
+    // Op-specific args (owned), by category — the form (self/shared/blinded) is resolved in
+    // skd_operate from the method name. sign → event; encrypt → (recipientPub, plaintext);
+    // decrypt → (senderPub, ciphertext); pubkey reads → none.
+    let (arg1, arg2): (Option<String>, Option<String>) = if crate::nip46::skd_is_sign(method) {
+        match payload.get("event") {
             Some(ev) => (Some(ev.to_string()), None),
             None => {
                 let (e, n) = send_err("Missing 'event' parameter".to_string());
                 send_upv2_response(signer_keys, client, sender_pubkey, session_id, "error", &e, n.as_deref(), use_nip44).await;
                 return;
             }
-        },
-        "skd_nip44_encrypt_as_subkey" | "skd_nip04_encrypt_as_subkey"
-        | "skd_nip44_encrypt_as_blinded" | "skd_nip04_encrypt_as_blinded" => {
-            match (payload.get("recipientPub").and_then(|v| v.as_str()), payload.get("plaintext").and_then(|v| v.as_str())) {
-                (Some(r), Some(p)) => (Some(r.to_string()), Some(p.to_string())),
-                _ => {
-                    let (e, n) = send_err("Missing 'recipientPub'/'plaintext'".to_string());
-                    send_upv2_response(signer_keys, client, sender_pubkey, session_id, "error", &e, n.as_deref(), use_nip44).await;
-                    return;
-                }
+        }
+    } else if method.contains("_encrypt_as_") {
+        match (payload.get("recipientPub").and_then(|v| v.as_str()), payload.get("plaintext").and_then(|v| v.as_str())) {
+            (Some(r), Some(p)) => (Some(r.to_string()), Some(p.to_string())),
+            _ => {
+                let (e, n) = send_err("Missing 'recipientPub'/'plaintext'".to_string());
+                send_upv2_response(signer_keys, client, sender_pubkey, session_id, "error", &e, n.as_deref(), use_nip44).await;
+                return;
             }
         }
-        "skd_nip44_decrypt_as_subkey" | "skd_nip04_decrypt_as_subkey"
-        | "skd_nip44_decrypt_as_blinded" | "skd_nip04_decrypt_as_blinded" => {
-            match (payload.get("senderPub").and_then(|v| v.as_str()), payload.get("ciphertext").and_then(|v| v.as_str())) {
-                (Some(s), Some(c)) => (Some(s.to_string()), Some(c.to_string())),
-                _ => {
-                    let (e, n) = send_err("Missing 'senderPub'/'ciphertext'".to_string());
-                    send_upv2_response(signer_keys, client, sender_pubkey, session_id, "error", &e, n.as_deref(), use_nip44).await;
-                    return;
-                }
+    } else if method.contains("_decrypt_as_") {
+        match (payload.get("senderPub").and_then(|v| v.as_str()), payload.get("ciphertext").and_then(|v| v.as_str())) {
+            (Some(s), Some(c)) => (Some(s.to_string()), Some(c.to_string())),
+            _ => {
+                let (e, n) = send_err("Missing 'senderPub'/'ciphertext'".to_string());
+                send_upv2_response(signer_keys, client, sender_pubkey, session_id, "error", &e, n.as_deref(), use_nip44).await;
+                return;
             }
         }
-        _ => {
-            let (e, n) = send_err(format!("Unsupported SKD method: {}", method));
-            send_upv2_response(signer_keys, client, sender_pubkey, session_id, "error", &e, n.as_deref(), use_nip44).await;
-            return;
-        }
+    } else if crate::nip46::skd_is_pubkey_read(method) {
+        (None, None)
+    } else {
+        let (e, n) = send_err(format!("Unsupported SKD method: {}", method));
+        send_upv2_response(signer_keys, client, sender_pubkey, session_id, "error", &e, n.as_deref(), use_nip44).await;
+        return;
     };
 
-    let event_kind: Option<u32> = if method == "skd_sign_as_subkey" || method == "skd_sign_as_blinded" {
+    let event_kind: Option<u32> = if crate::nip46::skd_is_sign(method) {
         payload.get("event").and_then(|v| v.get("kind")).and_then(|k| k.as_u64()).map(|k| k as u32)
     } else { None };
 
@@ -964,7 +962,7 @@ async fn handle_skd(
     }
     let _ = state.save_upv2_sessions();
 
-    let is_sign = method == "skd_sign_as_subkey" || method == "skd_sign_as_blinded";
+    let is_sign = crate::nip46::skd_is_sign(method);
 
     // Sign follows the manual/pending flow; the lower-risk ops auto-execute (UPV2's model).
     if should_auto_approve || !is_sign {

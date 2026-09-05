@@ -164,7 +164,7 @@ pub struct PendingRequest {
     /// NIP-SKD only: the derivation `context` (params[0]) — for UI display and context-prefix rules.
     #[serde(default)]
     pub context: Option<String>,
-    /// Full unsigned event JSON for sign_event / skd_sign_as_subkey requests (for UI inspection)
+    /// Full unsigned event JSON for sign_event / skd_sign_as_* requests (for UI inspection)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_event_json: Option<String>,
     pub event_id: String,
