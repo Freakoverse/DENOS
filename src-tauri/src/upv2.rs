@@ -884,6 +884,10 @@ async fn handle_skd(
         }
     };
     let peer = payload.get("peerPub").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string());
+    // Composed verifier ops (§1.2) carry an extra viaContext (+ viaPeerPub for the blinded form),
+    // naming the caller's OWN sub-key used as the ECDH identity K. Absent for the other methods.
+    let via_context = payload.get("viaContext").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string());
+    let via_peer = payload.get("viaPeerPub").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string());
 
     // Op-specific args (owned): sign → event JSON; encrypt → (recipientPub, plaintext); decrypt →
     // (senderPub, ciphertext); get-pubkey → none.
@@ -944,8 +948,20 @@ async fn handle_skd(
         return;
     }
 
-    // Compute eagerly (needed for auto-approve and for pending).
-    let result = match crate::nip46::skd_operate(signer_keys, method, &context, peer.as_deref(), arg1.as_deref(), arg2.as_deref()) {
+    // Compute eagerly (needed for auto-approve and for pending). Composed verifier ops (§1.2) use
+    // skd_operate_via — viaContext (+ viaPeer) names the caller's own sub-key K; peerPub required.
+    let op_result = if crate::nip46::skd_is_composed_verify(method) {
+        match (via_context.as_deref(), peer.as_deref()) {
+            (Some(vc), Some(peer_str)) => {
+                crate::nip46::skd_operate_via(signer_keys, method, vc, via_peer.as_deref(), &context, peer_str)
+            }
+            (None, _) => Err("NIP-SKD: missing 'viaContext'".to_string()),
+            (_, None) => Err("NIP-SKD: missing 'peerPub'".to_string()),
+        }
+    } else {
+        crate::nip46::skd_operate(signer_keys, method, &context, peer.as_deref(), arg1.as_deref(), arg2.as_deref())
+    };
+    let result = match op_result {
         Ok(r) => r,
         Err(e) => {
             let err = serde_json::json!({ "error": e });

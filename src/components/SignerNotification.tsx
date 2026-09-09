@@ -64,6 +64,8 @@ const SKD_LABELS: Record<string, string> = {
     skd_nip04_decrypt_as_shared_subkey: 'decrypt as a shared sub-key',
     skd_get_blinded_pubkey: 'derive a blinded key',
     skd_get_peer_blinded_pubkey: 'verify a blinded key',
+    skd_get_peer_blinded_pubkey_via_self: 'verify a blinded key',
+    skd_get_peer_blinded_pubkey_via_blinded: 'verify a blinded key',
     skd_sign_as_blinded: 'sign as a blinded key',
     skd_nip44_encrypt_as_blinded: 'encrypt as a blinded key',
     skd_nip44_decrypt_as_blinded: 'decrypt as a blinded key',

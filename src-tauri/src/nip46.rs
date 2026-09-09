@@ -1882,6 +1882,33 @@ pub(crate) fn process_nip46_request(signer_keys: &Keys, request: &Nip46Request) 
         // required) — never inferred from peer presence, so a stray peer can't switch forms. Private
         // material is never returned — only the result. The pubkey reads are "safe" (auto, §2.1);
         // the sign and encrypt/decrypt ops flow through the normal per-connection policy gate.
+        m if skd_is_composed_verify(m) => {
+            // Composed verify (§1.2) — distinct positional layout, viaContext leads:
+            //   via_self:    [viaContext, context, peer]
+            //   via_blinded: [viaContext, viaPeer, context, peer]
+            let p = &request.params;
+            if m == "skd_get_peer_blinded_pubkey_via_self" {
+                match (p.first(), p.get(1), p.get(2)) {
+                    (Some(vc), Some(ctx), Some(peer)) => skd_respond(
+                        &request.id,
+                        skd_operate_via(signer_keys, m, vc, None, ctx, peer),
+                    ),
+                    _ => skd_err(&request.id, "NIP-SKD: via_self needs [viaContext, context, peer]"),
+                }
+            } else {
+                match (p.first(), p.get(1), p.get(2), p.get(3)) {
+                    (Some(vc), Some(vp), Some(ctx), Some(peer)) => skd_respond(
+                        &request.id,
+                        skd_operate_via(signer_keys, m, vc, Some(vp), ctx, peer),
+                    ),
+                    _ => skd_err(
+                        &request.id,
+                        "NIP-SKD: via_blinded needs [viaContext, viaPeer, context, peer]",
+                    ),
+                }
+            }
+        }
+
         m if m.starts_with("skd_") => {
             let p = &request.params;
             if p.is_empty() {
@@ -1938,6 +1965,18 @@ pub(crate) fn skd_is_pubkey_read(method: &str) -> bool {
             | "skd_get_shared_subkey_pubkey"
             | "skd_get_blinded_pubkey"
             | "skd_get_peer_blinded_pubkey"
+            | "skd_get_peer_blinded_pubkey_via_self"
+            | "skd_get_peer_blinded_pubkey_via_blinded"
+    )
+}
+
+/// True for the composed verifier ops (§1.2): the ECDH identity `K` is one of the caller's own
+/// sub-keys (self or blinded) rather than the root. Distinct positional layout (viaContext leads),
+/// so the dispatcher parses them separately from the uniform `[context, …, peer]` methods.
+pub(crate) fn skd_is_composed_verify(method: &str) -> bool {
+    matches!(
+        method,
+        "skd_get_peer_blinded_pubkey_via_self" | "skd_get_peer_blinded_pubkey_via_blinded"
     )
 }
 
@@ -2021,6 +2060,41 @@ pub(crate) fn skd_operate(
     } else {
         Err(format!("Unsupported SKD method: {}", method))
     }
+}
+
+/// Composed verifier ops (§1.2): re-derive a peer's blinded pubkey where the caller's ECDH identity
+/// `K` is one of the caller's OWN sub-keys (not the root). `K` is derived internally from the root
+/// and used only as the ECDH secret — it is NEVER returned (a self K controls its pseudonym; a
+/// blinded K is root-equivalent). The result is a public key only, and there is deliberately no op
+/// to *act as* the peer's key. Shared by the NIP-46/PC55 router and the UPV2 handler.
+///   ViaSelf    — K = self(root, via_context)
+///   ViaBlinded — K = blinded(root, via_context, via_peer)   (via_peer required)
+pub(crate) fn skd_operate_via(
+    signer_keys: &Keys,
+    method: &str,
+    via_context: &str,
+    via_peer: Option<&str>,
+    context: &str,
+    peer: &str,
+) -> Result<String, String> {
+    let root_hex = signer_keys.secret_key().to_secret_hex();
+    // Derive K (the verifier's own sub-key) internally; its private scalar never leaves the signer.
+    let k_hex = match method {
+        "skd_get_peer_blinded_pubkey_via_self" => {
+            crate::skd::derive_subkey_keys(&root_hex, via_context, None)?
+                .secret_key()
+                .to_secret_hex()
+        }
+        "skd_get_peer_blinded_pubkey_via_blinded" => {
+            let vp = via_peer.ok_or("NIP-SKD: via_blinded requires viaPeer")?;
+            crate::skd::derive_blinded_keys(&root_hex, via_context, vp)?
+                .secret_key()
+                .to_secret_hex()
+        }
+        _ => return Err(format!("Unsupported SKD method: {}", method)),
+    };
+    // Verify with K as the ECDH identity (base = peer). Pubkey only.
+    crate::skd::derive_blinded_pub_for_peer(&k_hex, context, peer)
 }
 
 // --- Crypto Helpers ---
@@ -2158,4 +2232,57 @@ pub async fn toggle_nip46_enabled(
 #[tauri::command]
 pub fn get_signing_history(state: State<'_, AppState>) -> Vec<SigningHistoryEntry> {
     state.signing_history.lock().unwrap().clone()
+}
+
+#[cfg(test)]
+mod skd_rpc_tests {
+    //! §8 vectors exercised end-to-end through the RPC dispatch helpers (not just skd.rs). The
+    //! composed verifier ops re-derive the caller's own sub-key K internally, then verify the peer.
+    use super::skd_operate_via;
+    use nostr_sdk::prelude::{Keys, SecretKey};
+
+    fn keys(priv_hex: &str) -> Keys {
+        Keys::new(SecretKey::from_hex(priv_hex).unwrap())
+    }
+
+    // ViaSelf: owner (root 1111…) re-derives member P from R_member_pub. K = owner pseudonym (self,
+    // owner-ctx). Reproduces the §8 owner-view P.
+    #[test]
+    fn via_self_reproduces_member_p() {
+        let owner = keys(&"11".repeat(32));
+        let got = skd_operate_via(
+            &owner,
+            "skd_get_peer_blinded_pubkey_via_self",
+            "nip-chat:v2:owner-pseudonym:abc-123",
+            None,
+            "nip-chat:v2:member-pseudonym:abc-123",
+            "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+        )
+        .unwrap();
+        assert_eq!(
+            got,
+            "059510a63a230047ffe6e978ade8ad31e4bfb59d414331d5b17b6d50038c51a1"
+        );
+    }
+
+    // ViaBlinded: facilitator (root 3333…) re-derives vouched user Pf. K = facilitator's member
+    // pseudonym (blinded toward O), viaPeer = O_pub, peer = R_f_pub (root 4444). Reproduces §8 Pf.
+    #[test]
+    fn via_blinded_reproduces_facilitated_pf() {
+        let facilitator = keys(&"33".repeat(32));
+        let r_f_pub = keys(&"44".repeat(32)).public_key().to_hex();
+        let got = skd_operate_via(
+            &facilitator,
+            "skd_get_peer_blinded_pubkey_via_blinded",
+            "nip-chat:v2:member-pseudonym:abc-123",
+            Some("94576ae28a4583c68e5641b10befe9a90c92680271dc839052937a8552fc0ae5"),
+            "nip-chat:v2:facilitated-pseudonym:abc-123",
+            &r_f_pub,
+        )
+        .unwrap();
+        assert_eq!(
+            got,
+            "31b1370ab9902ae59ee73d76bc5c7fb451d7bd52ec7c111a48f42d9ed2389a06"
+        );
+    }
 }
