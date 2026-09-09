@@ -293,6 +293,36 @@ mod tests {
         assert_eq!(verifier, expected);
     }
 
+    // §8 facilitated pseudonym Pf: NESTED blinded — Pf blinds the facilitated member's R_f toward
+    // the facilitator's own pseudonym P_fac (itself R_fac blinded toward O). Exercises a blinded
+    // derivation whose peer is another blinded key, plus the verifier side using a DERIVED (non-root)
+    // private key as the ECDH secret.
+    #[test]
+    fn vector_blinded_facilitated() {
+        const P_FAC_PUB: &str = "55b5f44d71211d5505f3a66115aad173e24a68f5510866269ed52cde4d398803";
+        const PF_PUB: &str = "31b1370ab9902ae59ee73d76bc5c7fb451d7bd52ec7c111a48f42d9ed2389a06";
+        const FAC_CTX: &str = "nip-chat:v2:facilitated-pseudonym:abc-123";
+
+        // Sanity: P_fac = R_fac(3333) blinded toward O_pub == the vector's stated P_fac_pub input.
+        let p_fac = derive_blinded_keys(&"33".repeat(32), MEMBER_CTX, O_PUB).unwrap();
+        assert_eq!(p_fac.public_key().to_hex(), P_FAC_PUB);
+
+        // Facilitated side (the op a DENOS signer runs for the vouched user): R_f(4444) blinded
+        // toward P_fac.
+        let pf = derive_blinded_keys(&"44".repeat(32), FAC_CTX, P_FAC_PUB).unwrap();
+        assert_eq!(pf.public_key().to_hex(), PF_PUB);
+
+        // Facilitator verify: getPeerBlindedPubkey with the facilitator's DERIVED P_fac private key,
+        // base = R_f_pub. ECDH symmetry ⇒ identical Pf, and Pf_priv is never obtained.
+        let r_f_pub = Keys::new(SecretKey::from_hex(&"44".repeat(32)).unwrap())
+            .public_key()
+            .to_hex();
+        let verify =
+            derive_blinded_pub_for_peer(&p_fac.secret_key().to_secret_hex(), FAC_CTX, &r_f_pub)
+                .unwrap();
+        assert_eq!(verify, PF_PUB);
+    }
+
     #[test]
     fn empty_context_rejected() {
         assert!(derive_subkey_scalar(&"11".repeat(32), "", None).is_err());
