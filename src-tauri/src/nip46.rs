@@ -317,17 +317,32 @@ pub async fn connect_nostrconnect(
     let event = EventBuilder::new(Kind::Custom(24133), encrypted)
         .tag(Tag::public_key(client_pk));
 
-    // Connect to the client's specified relays and publish
-    let client = Client::new(signer_keys.clone());
+    // Publish the ack on the app's relays — through the PERSISTENT signer client whenever the
+    // signer is running. Adding the app's relays to that client is the real fix: a newly added
+    // relay inherits the running loop's 24133/24134 subscription (nostr-sdk pool semantics), so
+    // DENOS keeps LISTENING there for every request the app sends afterwards. The previous
+    // throwaway client only carried the handshake and then disconnected, so any relay not already
+    // in DENOS's own list silently dropped all follow-up requests — which is why nostrconnect://
+    // only worked when the app happened to pick one of DENOS's relays, while bunker:// (which
+    // forces the app onto DENOS's relays) always did.
+    let shared = state.signer_client.lock().unwrap().clone();
+    let (client, owned) = match shared {
+        Some(c) => (c, false),
+        None => (Client::new(signer_keys.clone()), true), // signer not running: handshake only
+    };
     for relay_url in &info.relay_urls {
-        let _ = client.add_relay(relay_url).await;
+        if let Err(e) = client.add_relay(relay_url).await {
+            warn!("[nostrconnect] Failed to add relay {}: {}", relay_url, e);
+            continue;
+        }
+        // connect() alone returns before the socket is up; wait for it so the ack isn't
+        // published into a half-open connection (replaces the old fixed 500ms sleep).
+        if let Err(e) = client.try_connect_relay(relay_url, std::time::Duration::from_secs(5)).await {
+            warn!("[nostrconnect] Relay {} not ready: {}", relay_url, e);
+        }
     }
-    client.connect().await;
 
-    // Small delay to ensure relay connection is stable
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-
-    match client.send_event_builder(event).await {
+    match client.send_event_builder_to(info.relay_urls.clone(), event).await {
         Ok(output) => {
             info!("Sent nostrconnect response to {}: {:?}", &info.client_pubkey[..16], output);
             emit_log(&app, &format!("[INFO] Connected to app '{}' via nostrconnect",
@@ -339,7 +354,16 @@ pub async fn connect_nostrconnect(
         }
     }
 
-    client.disconnect().await;
+    if owned {
+        // Only tear down a throwaway; the shared client must stay up and subscribed.
+        client.disconnect().await;
+    } else {
+        // Reflect the newly-listening relays in the dashboard's connected-relay status.
+        let mut connected = state.connected_relays.lock().unwrap();
+        for url in &info.relay_urls {
+            connected.insert(url.clone());
+        }
+    }
     emit_signer_state(&app, &state);
 
     Ok(conn_id)
@@ -1274,6 +1298,28 @@ pub async fn run_signer_loop(
         client.add_relay(relay_url).await
             .map_err(|e| format!("Failed to add relay {}: {}", relay_url, e))?;
     }
+
+    // Also listen on every saved connection's relays. nostrconnect:// apps choose their own
+    // relays (recorded on the Connection at handshake); without this, those connections only
+    // work until the next signer restart. Collect under the lock, then add relays outside it —
+    // a std Mutex guard must never be held across an .await.
+    let extra_relays: Vec<String> = {
+        let state: tauri::State<'_, AppState> = app.state();
+        let connections = state.connections.lock().unwrap();
+        let mut seen: std::collections::HashSet<String> = relay_urls.iter()
+            .map(|u| u.trim_end_matches('/').to_string())
+            .collect();
+        connections.iter()
+            .flat_map(|c| c.relay_urls.iter())
+            .filter(|u| seen.insert(u.trim_end_matches('/').to_string()))
+            .cloned()
+            .collect()
+    };
+    for url in &extra_relays {
+        if let Err(e) = client.add_relay(url).await {
+            warn!("Failed to add connection relay {}: {}", url, e);
+        }
+    }
     client.connect().await;
 
     // Store client in AppState so approve/reject can reuse it
@@ -1285,11 +1331,11 @@ pub async fn run_signer_loop(
 
     let _ = app.emit("log-event", "[INFO] Connected to relays, subscribing...");
 
-    // Mark relays as connected
+    // Mark relays as connected (configured + saved-connection relays the loop listens on)
     {
         let state: tauri::State<'_, AppState> = app.state();
         let mut connected = state.connected_relays.lock().unwrap();
-        for url in &relay_urls {
+        for url in relay_urls.iter().chain(extra_relays.iter()) {
             connected.insert(url.clone());
         }
     }
