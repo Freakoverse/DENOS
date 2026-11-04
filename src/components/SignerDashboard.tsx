@@ -44,6 +44,7 @@ interface Connection {
     policy: string;
     custom_rules: Record<string, string>;
     auto_replace: boolean;
+    source?: string;
 }
 
 interface PendingRequest {
@@ -758,8 +759,9 @@ export default function SignerDashboard({ activePubkey, activeNpub }: SignerDash
 
                 {/* Connection type tabs */}
                 {(() => {
-                    const bunkerConns = signerState.connections.filter(c => !c.client_pubkey.startsWith('pc55:'));
-                    const localConns = signerState.connections.filter(c => c.client_pubkey.startsWith('pc55:'));
+                    // "Local" = connections over the loopback relay (NIP-LRS); "Bunker" = remote.
+                    const localConns = signerState.connections.filter(c => c.source === 'lrs');
+                    const bunkerConns = signerState.connections.filter(c => c.source !== 'lrs');
                     const passwordSessions = signerState.upv2_sessions;
                     type ConnTab = 'bunker' | 'password' | 'local';
                     const tabs: { id: ConnTab; label: string; count: number }[] = [
@@ -849,7 +851,7 @@ export default function SignerDashboard({ activePubkey, activeNpub }: SignerDash
                                     const policy = getPolicy(conn);
                                     const rules = conn.custom_rules || {};
                                     return (
-                                        <Card key={`pc55-${conn.id}`}>
+                                        <Card key={`local-${conn.id}`}>
                                             <CardContent className="pt-4 space-y-3">
                                                 <div className="flex justify-between items-start">
                                                     <div className="min-w-0 flex-1">

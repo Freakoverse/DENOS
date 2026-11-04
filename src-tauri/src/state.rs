@@ -63,6 +63,10 @@ pub struct Connection {
     /// If true, reconnections from a client with the same name auto-replace this connection
     #[serde(default)]
     pub auto_replace: bool,
+    /// Transport the connection was established over: "nip46" (remote bunker) or "lrs" (local
+    /// relay). Used to group connections in the UI; defaults to "nip46" for pre-existing entries.
+    #[serde(default = "default_source")]
+    pub source: String,
 }
 
 fn default_policy() -> String {

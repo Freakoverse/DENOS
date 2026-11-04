@@ -281,6 +281,7 @@ pub async fn connect_nostrconnect(
         custom_rules: HashMap::new(),
         signer_pubkey: signer_keys.public_key().to_hex(),
         auto_replace: false,
+        source: "nip46".to_string(),
     };
 
     // Check for existing connection/session with same name (cross-protocol)
@@ -1691,6 +1692,7 @@ async fn handle_nip46_event(
             custom_rules: HashMap::new(),
             signer_pubkey: signing_keys.public_key().to_hex(),
             auto_replace: false,
+            source: source.to_string(),
         };
         {
             let mut connections = state.connections.lock().unwrap();
