@@ -8,6 +8,7 @@ import { useFeedback } from '@/components/ui/feedback';
 import { listen, emit } from '@tauri-apps/api/event';
 import { cn } from '@/lib/utils';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
@@ -304,6 +305,7 @@ export default function SignerDashboard({ activePubkey, activeNpub }: SignerDash
         lrs_running: false, lrs_port: 7777,
     });
     const [lrsTransportPk, setLrsTransportPk] = useState<string | null>(null);
+    const [lrsManualOpen, setLrsManualOpen] = useState(false);
     const [bunkerUri, setBunkerUri] = useState('');
     const [nostrconnectInput, setNostrconnectInput] = useState('');
     const [connectMode, setConnectMode] = useState<'nostrconnect' | 'bunker'>('nostrconnect');
@@ -1520,32 +1522,43 @@ export default function SignerDashboard({ activePubkey, activeNpub }: SignerDash
                 </CardHeader>
                 {signerState.lrs_running && (
                     <CardContent className="pt-0">
-                        {/* Signer key fingerprint (how clients recognize this signer) + the copy-able
-                            fallback connection string, on one row. */}
-                        <div className="flex items-center justify-between gap-3">
-                            <div className="text-xs text-muted-foreground min-w-0 truncate">
-                                Signer key:{' '}
-                                <span className="font-mono">
-                                    {lrsTransportPk ? `${lrsTransportPk.slice(0, 16)}…${lrsTransportPk.slice(-4)}` : '—'}
-                                </span>
-                            </div>
-                            <Button
-                                variant="outline"
-                                size="sm"
-                                className="shrink-0"
-                                onClick={async () => {
-                                    try {
-                                        const res = await invoke<{ uri: string }>('get_lrs_bunker_uri');
-                                        navigator.clipboard.writeText(res.uri);
-                                        toast('Connection string copied', 'success');
-                                    } catch (e) {
-                                        toast('Error: ' + e);
-                                    }
-                                }}
-                            >
-                                Copy connection string
-                            </Button>
-                        </div>
+                        {/* Apps connect automatically; the copy-able string is a manual fallback,
+                            tucked behind a collapsed disclosure. */}
+                        <Collapsible open={lrsManualOpen} onOpenChange={setLrsManualOpen}>
+                            <CollapsibleTrigger className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors">
+                                <ChevronRight className={cn("w-3.5 h-3.5 transition-transform", lrsManualOpen && "rotate-90")} />
+                                Manual connection
+                            </CollapsibleTrigger>
+                            <CollapsibleContent>
+                                <div className="mt-2 text-xs text-muted-foreground">
+                                    Apps on this device connect automatically. Use this only if an app can’t find the signer on its own.
+                                </div>
+                                <div className="mt-2.5 flex items-center justify-between gap-3">
+                                    <div className="text-xs text-muted-foreground min-w-0 truncate">
+                                        Signer key:{' '}
+                                        <span className="font-mono">
+                                            {lrsTransportPk ? `${lrsTransportPk.slice(0, 16)}…${lrsTransportPk.slice(-4)}` : '—'}
+                                        </span>
+                                    </div>
+                                    <Button
+                                        variant="outline"
+                                        size="sm"
+                                        className="shrink-0"
+                                        onClick={async () => {
+                                            try {
+                                                const res = await invoke<{ uri: string }>('get_lrs_bunker_uri');
+                                                navigator.clipboard.writeText(res.uri);
+                                                toast('Connection string copied', 'success');
+                                            } catch (e) {
+                                                toast('Error: ' + e);
+                                            }
+                                        }}
+                                    >
+                                        Copy connection string
+                                    </Button>
+                                </div>
+                            </CollapsibleContent>
+                        </Collapsible>
                     </CardContent>
                 )}
             </Card>
