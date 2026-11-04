@@ -406,19 +406,7 @@ pub async fn approve_request(
     emit_log(&app, &format!("[INFO] Approved: {} from '{}'", request.method, request.app_name));
 
     if let Some(response_json) = &request.response_json {
-        if request.source == "pc55" {
-            // PC55: send response directly through the oneshot channel (no encryption, no relay)
-            let sender = {
-                let mut channels = state.pc55_response_channels.lock().unwrap();
-                channels.remove(&request.id)
-            };
-            if let Some(tx) = sender {
-                let _ = tx.send(response_json.clone());
-                info!("Sent PC55 approved response for: {}", request.method);
-            } else {
-                warn!("No PC55 response channel for request: {}", request.id);
-            }
-        } else if request.source == "lrs" {
+        if request.source == "lrs" {
             // NIP-LRS: encrypt the response with the TRANSPORT key (the identity the client
             // addressed) and publish kind 24133 over the loopback relay client.
             let transport_keys = keys::get_transport_keys(&state)?;
@@ -541,26 +529,7 @@ pub async fn reject_request(
     info!("Rejected request: {} ({}) [{}]", request.method, &request.id[..request.id.len().min(8)], request.source);
     emit_log(&app, &format!("[WARN] Rejected: {} from '{}'", request.method, request.app_name));
 
-    if request.source == "pc55" {
-        // PC55: send rejection directly through the oneshot channel
-        let rejection = Nip46Response {
-            id: request.id.clone(),
-            result: None,
-            error: Some("User rejected the request".to_string()),
-        };
-        let rejection_json = serde_json::to_string(&rejection)
-            .map_err(|e| format!("Serialize: {}", e))?;
-        let sender = {
-            let mut channels = state.pc55_response_channels.lock().unwrap();
-            channels.remove(&request.id)
-        };
-        if let Some(tx) = sender {
-            let _ = tx.send(rejection_json);
-            info!("Sent PC55 rejection for: {}", request.method);
-        } else {
-            warn!("No PC55 response channel for rejection: {}", request.id);
-        }
-    } else if request.source == "lrs" {
+    if request.source == "lrs" {
         // NIP-LRS: send the rejection encrypted with the TRANSPORT key over the loopback relay.
         let transport_keys = keys::get_transport_keys(&state)?;
         let client_pk = PublicKey::from_hex(&request.client_pubkey)

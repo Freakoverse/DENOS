@@ -307,16 +307,6 @@ pub struct RelayInfo {
     pub connected: bool,
 }
 
-/// NIP-PC55 local WebSocket connection
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Pc55Connection {
-    pub client_id: String,
-    pub app_name: String,
-    pub approved: bool,
-    pub connected_at: u64,
-}
-
-
 /// Full app state payload sent to frontend
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppStatePayload {
@@ -353,9 +343,6 @@ pub struct SignerStatePayload {
     pub upv2_login_key: Option<Upv2LoginKey>,
     pub upv2_sessions: Vec<Upv2Session>,
     pub login_attempts: Vec<LoginAttempt>,
-    // NIP-PC55
-    pub pc55_running: bool,
-    pub pc55_connections: Vec<Pc55Connection>,
     // NIP-LRS
     pub lrs_running: bool,
     pub lrs_port: u16,
@@ -394,12 +381,6 @@ pub struct AppState {
     pub signing_history: Mutex<Vec<SigningHistoryEntry>>,
     // NIP-65 user relay list — keyed by pubkey hex
     pub user_relay_urls: Mutex<HashMap<String, Vec<String>>>,
-    // NIP-PC55 local WebSocket signer
-    pub pc55_running: Mutex<bool>,
-    pub pc55_shutdown: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
-    pub pc55_connections: Mutex<Vec<Pc55Connection>>,
-    /// Channels for delivering approve/reject responses back to PC55 WebSocket handlers
-    pub pc55_response_channels: Mutex<HashMap<String, tokio::sync::oneshot::Sender<String>>>,
     // NIP-LRS local relay signer
     pub lrs_running: Mutex<bool>,
     pub lrs_shutdown: Mutex<Option<tokio::sync::broadcast::Sender<()>>>,
@@ -618,10 +599,6 @@ impl AppState {
             nip46_enabled: Mutex::new(true),
             signing_history: Mutex::new(Vec::new()),
             user_relay_urls: Mutex::new(HashMap::new()),
-            pc55_running: Mutex::new(false),
-            pc55_shutdown: Mutex::new(None),
-            pc55_connections: Mutex::new(Vec::new()),
-            pc55_response_channels: Mutex::new(HashMap::new()),
             lrs_running: Mutex::new(false),
             lrs_shutdown: Mutex::new(None),
             lrs_port: Mutex::new(crate::lrs::LRS_DEFAULT_PORT),
@@ -846,8 +823,6 @@ impl AppState {
                 }
             },
             login_attempts: self.login_attempts.lock().unwrap().clone(),
-            pc55_running: *self.pc55_running.lock().unwrap(),
-            pc55_connections: self.pc55_connections.lock().unwrap().clone(),
             lrs_running: *self.lrs_running.lock().unwrap(),
             lrs_port: *self.lrs_port.lock().unwrap(),
             lrs_discovery_enabled: *self.lrs_discovery_enabled.lock().unwrap(),

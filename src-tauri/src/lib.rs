@@ -1,7 +1,6 @@
 mod keys;
 mod lrs;
 mod nip46;
-mod pc55;
 mod skd;
 mod state;
 mod updater;
@@ -249,10 +248,6 @@ pub fn run() {
             upv2::set_upv2_custom_rule,
             upv2::remove_upv2_custom_rule,
             upv2::set_upv2_session_auto_replace,
-            // NIP-PC55 local signer
-            pc55::start_pc55_server,
-            pc55::stop_pc55_server,
-            pc55::get_pc55_state,
             // NIP-LRS local relay signer
             lrs::start_lrs_server,
             lrs::stop_lrs_server,

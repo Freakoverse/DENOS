@@ -124,13 +124,6 @@ interface LoginAttempt {
     dismissed: boolean;
 }
 
-interface Pc55Connection {
-    client_id: string;
-    app_name: string;
-    approved: boolean;
-    connected_at: number;
-}
-
 /** Countdown bar — uses ref + CSS transition to avoid React re-render interruptions */
 const CountdownBar = memo(({ createdAt }: { createdAt: number }) => {
     const barRef = useRef<HTMLDivElement>(null);
@@ -162,8 +155,6 @@ interface SignerState {
     upv2_login_key: Upv2LoginKey | null;
     upv2_sessions: Upv2Session[];
     login_attempts: LoginAttempt[];
-    pc55_running: boolean;
-    pc55_connections: Pc55Connection[];
     lrs_running: boolean;
     lrs_port: number;
     lrs_discovery_enabled: boolean;
@@ -311,7 +302,6 @@ export default function SignerDashboard({ activePubkey, activeNpub }: SignerDash
         running: false, connections: [], pending_requests: [], relays: [], user_relays: [],
         nip46_enabled: true,
         upv2_login_key: null, upv2_sessions: [], login_attempts: [],
-        pc55_running: false, pc55_connections: [],
         lrs_running: false, lrs_port: 7777, lrs_discovery_enabled: true,
     });
     const [lrsTransportPk, setLrsTransportPk] = useState<string | null>(null);
@@ -1153,7 +1143,7 @@ export default function SignerDashboard({ activePubkey, activeNpub }: SignerDash
                                                         entry.outcome === 'approved' ? 'Approved' : 'Rejected'}
                                             </Badge>
                                             <Badge variant="outline" className="text-[10px] px-1.5 py-0 shrink-0">
-                                                {entry.source === 'nip46' ? 'Bunker' : entry.source === 'pc55' ? 'Local' : 'Password'}
+                                                {entry.source === 'nip46' ? 'Bunker' : entry.source === 'lrs' ? 'Local' : 'Password'}
                                             </Badge>
                                             <span className="text-sm font-medium truncate">{entry.app_name}</span>
                                         </div>
