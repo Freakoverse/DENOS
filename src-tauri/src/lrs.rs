@@ -296,24 +296,48 @@ pub fn set_lrs_discovery_enabled(
 
 #[tauri::command]
 pub async fn start_lrs_server(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    // Claim the running slot synchronously, before any `.await`, so a concurrent call — e.g. React
+    // StrictMode firing the auto-start effect twice in dev — is rejected instead of starting a
+    // second relay on the same port. Any setup error below must release the slot.
     {
-        if *state.lrs_running.lock().unwrap() {
+        let mut running = state.lrs_running.lock().unwrap();
+        if *running {
             return Err("Local relay is already running".to_string());
         }
+        *running = true;
     }
 
     // Ensure the transport key exists before we advertise it.
-    let transport_keys = keys::get_transport_keys(&state)?;
+    let transport_keys = match keys::get_transport_keys(&state) {
+        Ok(k) => k,
+        Err(e) => {
+            *state.lrs_running.lock().unwrap() = false;
+            return Err(e);
+        }
+    };
     let transport_pubkey = transport_keys.public_key().to_hex();
 
     // The account we sign as. LRS needs an unlocked, selected account.
-    let account_keys = keys::get_active_keys(&state).map_err(|_| {
-        "No active account — unlock and select a key before starting the local relay".to_string()
-    })?;
+    let account_keys = match keys::get_active_keys(&state) {
+        Ok(k) => k,
+        Err(_) => {
+            *state.lrs_running.lock().unwrap() = false;
+            return Err(
+                "No active account — unlock and select a key before starting the local relay"
+                    .to_string(),
+            );
+        }
+    };
 
     // Choose a port: prefer the last-used one, then scan the failover window.
     let preferred = *state.lrs_port.lock().unwrap();
-    let (listener, port) = bind_with_failover(preferred).await?;
+    let (listener, port) = match bind_with_failover(preferred).await {
+        Ok(v) => v,
+        Err(e) => {
+            *state.lrs_running.lock().unwrap() = false;
+            return Err(e);
+        }
+    };
     {
         *state.lrs_port.lock().unwrap() = port;
     }
@@ -322,9 +346,6 @@ pub async fn start_lrs_server(app: AppHandle, state: State<'_, AppState>) -> Res
     let (shutdown_tx, _) = broadcast::channel::<()>(8);
     {
         *state.lrs_shutdown.lock().unwrap() = Some(shutdown_tx.clone());
-    }
-    {
-        *state.lrs_running.lock().unwrap() = true;
     }
 
     info!("[LRS] Listening on ws://127.0.0.1:{} (transport {}…)", port, &transport_pubkey[..transport_pubkey.len().min(8)]);
