@@ -331,6 +331,10 @@ pub async fn set_active_keypair(
         });
     }
 
+    // If the NIP-LRS local relay is running, restart it so it signs as the new account (its signer
+    // loop captured the previous account key at start).
+    crate::lrs::restart_for_account_change(&app).await;
+
     // Emit signer state so UPv2 login key updates for the new keypair
     let signer_payload = state.to_signer_payload();
     let _ = app.emit("signer-state", &signer_payload);

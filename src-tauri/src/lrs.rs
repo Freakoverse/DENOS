@@ -295,7 +295,16 @@ pub fn set_lrs_discovery_enabled(
 }
 
 #[tauri::command]
-pub async fn start_lrs_server(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+pub async fn start_lrs_server(app: AppHandle) -> Result<(), String> {
+    start_lrs_internal(&app).await
+}
+
+/// Start the relay + signer loop, reading state from `app`. Callable internally (e.g. on account
+/// switch) as well as from the Tauri command.
+pub async fn start_lrs_internal(app: &AppHandle) -> Result<(), String> {
+    let app = app.clone();
+    let state: State<'_, AppState> = app.state();
+
     // Claim the running slot synchronously, before any `.await`, so a concurrent call — e.g. React
     // StrictMode firing the auto-start effect twice in dev — is rejected instead of starting a
     // second relay on the same port. Any setup error below must release the slot.
@@ -389,7 +398,15 @@ pub async fn start_lrs_server(app: AppHandle, state: State<'_, AppState>) -> Res
 }
 
 #[tauri::command]
-pub async fn stop_lrs_server(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+pub async fn stop_lrs_server(app: AppHandle) -> Result<(), String> {
+    stop_lrs_internal(&app).await;
+    Ok(())
+}
+
+/// Stop the relay + signer loop. Callable internally as well as from the Tauri command.
+pub async fn stop_lrs_internal(app: &AppHandle) {
+    let app = app.clone();
+    let state: State<'_, AppState> = app.state();
     let tx = { state.lrs_shutdown.lock().unwrap().take() };
     if let Some(tx) = tx {
         let _ = tx.send(()); // wakes the accept loop and every live connection
@@ -398,7 +415,28 @@ pub async fn stop_lrs_server(app: AppHandle, state: State<'_, AppState>) -> Resu
     info!("[LRS] Stopped");
     emit_log(&app, "[INFO] Local Relay Signer stopped");
     emit_signer_state(&app, &state);
-    Ok(())
+}
+
+/// Restart the relay so its signer loop picks up the newly-active account. Called when the user
+/// switches the active keypair: the loop captures the account key at start, so without this it
+/// would keep signing as the previous account. No-op if the relay isn't running.
+pub async fn restart_for_account_change(app: &AppHandle) {
+    let app = app.clone();
+    let running = {
+        let state: State<'_, AppState> = app.state();
+        let r = *state.lrs_running.lock().unwrap();
+        r
+    };
+    if !running {
+        return;
+    }
+    info!("[LRS] Restarting for account switch");
+    stop_lrs_internal(&app).await;
+    // Let the old listener drop so we re-bind the same port rather than failing over.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    if let Err(e) = start_lrs_internal(&app).await {
+        warn!("[LRS] restart after account switch failed: {}", e);
+    }
 }
 
 // ───────────────────────────── Server internals ─────────────────────────────
