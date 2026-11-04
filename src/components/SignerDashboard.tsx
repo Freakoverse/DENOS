@@ -157,7 +157,6 @@ interface SignerState {
     login_attempts: LoginAttempt[];
     lrs_running: boolean;
     lrs_port: number;
-    lrs_discovery_enabled: boolean;
 }
 
 interface SigningHistoryEntry {
@@ -302,7 +301,7 @@ export default function SignerDashboard({ activePubkey, activeNpub }: SignerDash
         running: false, connections: [], pending_requests: [], relays: [], user_relays: [],
         nip46_enabled: true,
         upv2_login_key: null, upv2_sessions: [], login_attempts: [],
-        lrs_running: false, lrs_port: 7777, lrs_discovery_enabled: true,
+        lrs_running: false, lrs_port: 7777,
     });
     const [lrsTransportPk, setLrsTransportPk] = useState<string | null>(null);
     const [bunkerUri, setBunkerUri] = useState('');
@@ -1520,45 +1519,33 @@ export default function SignerDashboard({ activePubkey, activeNpub }: SignerDash
                     />
                 </CardHeader>
                 {signerState.lrs_running && (
-                    <CardContent className="pt-0 space-y-4">
-                        {/* One-click discovery (opt-in): off = reachable only via the copied string */}
-                        <div className="flex items-center justify-between gap-4">
-                            <div>
-                                <div className="text-sm font-medium">One-click discovery</div>
-                                <div className="text-xs text-muted-foreground mt-0.5">
-                                    Lets local apps find this signer with a click. Off = connect only with the string below.
-                                </div>
-                            </div>
-                            <Switch
-                                checked={signerState.lrs_discovery_enabled}
-                                onCheckedChange={(v) => invoke('set_lrs_discovery_enabled', { enabled: v }).catch((e) => toast('Error: ' + e))}
-                            />
-                        </div>
-
-                        {/* Transport identity fingerprint — how clients recognize this signer */}
-                        {lrsTransportPk && (
-                            <div className="text-xs text-muted-foreground">
+                    <CardContent className="pt-0">
+                        {/* Signer key fingerprint (how clients recognize this signer) + the copy-able
+                            fallback connection string, on one row. */}
+                        <div className="flex items-center justify-between gap-3">
+                            <div className="text-xs text-muted-foreground min-w-0 truncate">
                                 Signer key:{' '}
-                                <span className="font-mono">{lrsTransportPk.slice(0, 16)}…{lrsTransportPk.slice(-4)}</span>
+                                <span className="font-mono">
+                                    {lrsTransportPk ? `${lrsTransportPk.slice(0, 16)}…${lrsTransportPk.slice(-4)}` : '—'}
+                                </span>
                             </div>
-                        )}
-
-                        {/* Fallback connection string (always works, even without discovery) */}
-                        <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={async () => {
-                                try {
-                                    const res = await invoke<{ uri: string }>('get_lrs_bunker_uri');
-                                    navigator.clipboard.writeText(res.uri);
-                                    toast('Connection string copied', 'success');
-                                } catch (e) {
-                                    toast('Error: ' + e);
-                                }
-                            }}
-                        >
-                            Copy connection string
-                        </Button>
+                            <Button
+                                variant="outline"
+                                size="sm"
+                                className="shrink-0"
+                                onClick={async () => {
+                                    try {
+                                        const res = await invoke<{ uri: string }>('get_lrs_bunker_uri');
+                                        navigator.clipboard.writeText(res.uri);
+                                        toast('Connection string copied', 'success');
+                                    } catch (e) {
+                                        toast('Error: ' + e);
+                                    }
+                                }}
+                            >
+                                Copy connection string
+                            </Button>
+                        </div>
                     </CardContent>
                 )}
             </Card>

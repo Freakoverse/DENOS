@@ -346,7 +346,6 @@ pub struct SignerStatePayload {
     // NIP-LRS
     pub lrs_running: bool,
     pub lrs_port: u16,
-    pub lrs_discovery_enabled: bool,
 }
 
 /// Central app state
@@ -386,8 +385,6 @@ pub struct AppState {
     pub lrs_shutdown: Mutex<Option<tokio::sync::broadcast::Sender<()>>>,
     /// Port the relay is bound to (also the "last port" reconnect cache; persisted per profile)
     pub lrs_port: Mutex<u16>,
-    /// Whether the NIP-11 discovery marker is served (opt-in one-click discovery vs bunker-only)
-    pub lrs_discovery_enabled: Mutex<bool>,
     /// The loopback-relay client of the running LRS signer loop — shared so approve/reject can
     /// publish responses over the local relay (encrypted with the transport key).
     pub lrs_client: Mutex<Option<Client>>,
@@ -424,7 +421,6 @@ const KEY_NIP46_ENABLED: &str = "nip46-enabled";
 
 const KEY_USER_RELAYS: &str = "user-relays";
 const KEY_LRS_PORT: &str = "lrs-last-port";
-const KEY_LRS_DISCOVERY: &str = "lrs-discovery-enabled";
 
 /// Build a profile-scoped keyring key: `p-{profile_id}/{suffix}`
 fn pk(profile_id: &str, suffix: &str) -> String {
@@ -602,7 +598,6 @@ impl AppState {
             lrs_running: Mutex::new(false),
             lrs_shutdown: Mutex::new(None),
             lrs_port: Mutex::new(crate::lrs::LRS_DEFAULT_PORT),
-            lrs_discovery_enabled: Mutex::new(true),
             lrs_client: Mutex::new(None),
             profiles: Mutex::new(profiles),
             active_profile: Mutex::new(last_profile),
@@ -711,11 +706,9 @@ impl AppState {
         let user_relay_urls = load_from_keyring::<HashMap<String, Vec<String>>>(&k(KEY_USER_RELAYS))
             .unwrap_or_default();
 
-        // NIP-LRS: last-used port (reconnect cache) and whether one-click discovery is on.
+        // NIP-LRS: last-used port (reconnect cache).
         let lrs_port = load_from_keyring::<u16>(&k(KEY_LRS_PORT))
             .unwrap_or(crate::lrs::LRS_DEFAULT_PORT);
-        let lrs_discovery_enabled = load_from_keyring::<bool>(&k(KEY_LRS_DISCOVERY))
-            .unwrap_or(true);
 
         // Update all state fields
         *self.keypairs.lock().unwrap() = keypairs;
@@ -736,7 +729,6 @@ impl AppState {
         *self.signing_history.lock().unwrap() = Vec::new();
         *self.user_relay_urls.lock().unwrap() = user_relay_urls;
         *self.lrs_port.lock().unwrap() = lrs_port;
-        *self.lrs_discovery_enabled.lock().unwrap() = lrs_discovery_enabled;
         *self.active_profile.lock().unwrap() = Some(profile_id.to_string());
 
         // Persist last-used profile
@@ -825,7 +817,6 @@ impl AppState {
             login_attempts: self.login_attempts.lock().unwrap().clone(),
             lrs_running: *self.lrs_running.lock().unwrap(),
             lrs_port: *self.lrs_port.lock().unwrap(),
-            lrs_discovery_enabled: *self.lrs_discovery_enabled.lock().unwrap(),
         }
     }
 
@@ -972,11 +963,6 @@ impl AppState {
         save_to_keyring(&pk(&pid, KEY_LRS_PORT), &port)
     }
 
-    pub fn save_lrs_discovery_enabled(&self) -> Result<(), String> {
-        let pid = self.profile_id();
-        let enabled = *self.lrs_discovery_enabled.lock().unwrap();
-        save_to_keyring(&pk(&pid, KEY_LRS_DISCOVERY), &enabled)
-    }
 
     /// Record a signing outcome in memory, keeping the latest 100 entries.
     /// Not persisted to keyring — signing history is ephemeral (resets on restart).

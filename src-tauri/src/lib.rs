@@ -252,7 +252,6 @@ pub fn run() {
             lrs::start_lrs_server,
             lrs::stop_lrs_server,
             lrs::get_lrs_state,
-            lrs::set_lrs_discovery_enabled,
             nip46::get_lrs_bunker_uri,
             // Updater
             updater::check_for_update,

@@ -1283,7 +1283,7 @@ pub fn delete_profile(
         "upv2-login-key", "upv2-sessions", "login-attempts", "last-online-at",
         "lock-timeout", "active-keypair", "active-seed", "nip46-enabled",
         "signing-history", "user-relays",
-        "lrs-transport-sk", "lrs-last-port", "lrs-discovery-enabled",
+        "lrs-transport-sk", "lrs-last-port",
     ];
     for suffix in &suffixes {
         let _ = delete_raw_from_keyring(&format!("p-{}/{}", pid, suffix));

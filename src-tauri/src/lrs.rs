@@ -259,7 +259,6 @@ fn tag_matches(ev: &Value, letter: &str, wanted: &Value) -> bool {
 pub struct LrsStatePayload {
     pub running: bool,
     pub port: u16,
-    pub discovery_enabled: bool,
     pub transport_pubkey: Option<String>,
 }
 
@@ -275,23 +274,8 @@ pub fn get_lrs_state(state: State<'_, AppState>) -> LrsStatePayload {
     LrsStatePayload {
         running: *state.lrs_running.lock().unwrap(),
         port: *state.lrs_port.lock().unwrap(),
-        discovery_enabled: *state.lrs_discovery_enabled.lock().unwrap(),
         transport_pubkey,
     }
-}
-
-#[tauri::command]
-pub fn set_lrs_discovery_enabled(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    enabled: bool,
-) -> Result<(), String> {
-    *state.lrs_discovery_enabled.lock().unwrap() = enabled;
-    let _ = state.save_lrs_discovery_enabled();
-    info!("[LRS] discovery marker {}", if enabled { "enabled" } else { "disabled" });
-    emit_log(&app, &format!("[LRS] One-click discovery {}", if enabled { "enabled" } else { "disabled (bunker string only)" }));
-    emit_signer_state(&app, &state);
-    Ok(())
 }
 
 #[tauri::command]
@@ -537,11 +521,10 @@ async fn handle_conn(
         // borrowed `State` is dropped before the write `.await`.
         let body = {
             let s: State<'_, AppState> = app.state();
-            let discovery = *s.lrs_discovery_enabled.lock().unwrap();
             let transport_pubkey = keys::get_transport_keys(&s)
                 .ok()
                 .map(|k| k.public_key().to_hex());
-            info_doc(discovery, transport_pubkey.as_deref())
+            info_doc(transport_pubkey.as_deref())
         };
         return write_info_doc(&mut stream, &body).await;
     }
@@ -571,18 +554,17 @@ fn add_cors_headers(_req: &Request, mut response: Response) -> Result<Response, 
     Ok(response)
 }
 
-fn info_doc(discovery_enabled: bool, transport_pubkey: Option<&str>) -> String {
-    if discovery_enabled {
-        if let Some(pk) = transport_pubkey {
-            return json!({
-                "name": SIGNER_NAME,
-                "local_relay_signer": { "v": 1, "transport_pubkey": pk }
-            })
-            .to_string();
-        }
+fn info_doc(transport_pubkey: Option<&str>) -> String {
+    // The signer is discoverable whenever the relay is running: the info doc always carries the
+    // LRS marker so a NIP-46 client can find it with one click. (No transport key only in the
+    // unreachable pre-unlock case — fall back to a plain relay doc.)
+    if let Some(pk) = transport_pubkey {
+        return json!({
+            "name": SIGNER_NAME,
+            "local_relay_signer": { "v": 1, "transport_pubkey": pk }
+        })
+        .to_string();
     }
-    // Discovery off (or no transport key): a plain relay doc, indistinguishable from an ordinary
-    // relay — the signer stays reachable via its bunker:// string instead of scan discovery.
     json!({ "name": SIGNER_NAME }).to_string()
 }
 
