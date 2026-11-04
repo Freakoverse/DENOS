@@ -20,7 +20,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager, State};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc};
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
@@ -513,6 +513,16 @@ async fn handle_conn(
     let is_options = first_line.starts_with("OPTIONS");
     let is_upgrade = head.to_ascii_lowercase().contains("upgrade: websocket");
 
+    if is_options || !is_upgrade {
+        // Drain the request off the socket before responding. Closing a socket that still has
+        // unread bytes in its receive buffer makes the OS send a TCP RST instead of a clean FIN —
+        // which browsers surface as ERR_CONNECTION_RESET (a timing race, ~40% under a burst of
+        // probes). We only peeked for routing, so the request is still buffered; GET/OPTIONS have
+        // no body, so read to the end of the headers. (The WS path must NOT drain — the handshake
+        // reader needs those bytes.)
+        drain_http_request(&mut stream).await;
+    }
+
     if is_options {
         return write_preflight(&mut stream).await;
     }
@@ -584,7 +594,30 @@ async fn write_info_doc(stream: &mut TcpStream, body: &str) -> Result<(), String
         .await
         .map_err(|e| format!("write info: {}", e))?;
     let _ = stream.flush().await;
+    let _ = stream.shutdown().await; // clean FIN on the write half before the socket drops
     Ok(())
+}
+
+/// Read and discard an HTTP request's head (up to the blank line). GET/OPTIONS carry no body, so
+/// this empties the receive buffer; closing afterwards yields a clean FIN rather than an RST.
+async fn drain_http_request(stream: &mut TcpStream) {
+    let mut buf = [0u8; 1024];
+    let mut acc: Vec<u8> = Vec::new();
+    loop {
+        match stream.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(m) => {
+                acc.extend_from_slice(&buf[..m]);
+                if acc.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break; // end of headers
+                }
+                if acc.len() > 16384 {
+                    break; // cap — don't read an unbounded amount
+                }
+            }
+            Err(_) => break,
+        }
+    }
 }
 
 async fn write_preflight(stream: &mut TcpStream) -> Result<(), String> {
@@ -600,6 +633,7 @@ async fn write_preflight(stream: &mut TcpStream) -> Result<(), String> {
         .await
         .map_err(|e| format!("write preflight: {}", e))?;
     let _ = stream.flush().await;
+    let _ = stream.shutdown().await; // clean FIN on the write half before the socket drops
     Ok(())
 }
 
