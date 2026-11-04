@@ -1,4 +1,5 @@
 mod keys;
+mod lrs;
 mod nip46;
 mod pc55;
 mod skd;
@@ -252,6 +253,12 @@ pub fn run() {
             pc55::start_pc55_server,
             pc55::stop_pc55_server,
             pc55::get_pc55_state,
+            // NIP-LRS local relay signer
+            lrs::start_lrs_server,
+            lrs::stop_lrs_server,
+            lrs::get_lrs_state,
+            lrs::set_lrs_discovery_enabled,
+            nip46::get_lrs_bunker_uri,
             // Updater
             updater::check_for_update,
             updater::download_and_install_update,

@@ -392,6 +392,35 @@ pub fn get_active_keys(state: &AppState) -> Result<Keys, String> {
     Ok(Keys::new(secret_key))
 }
 
+/// Retrieve — generating and persisting on first use — the Local Relay Signer transport keypair
+/// for the active profile (NIP-LRS §2).
+///
+/// This is the signer's LRS identity: a random keypair, generated once and persisted, that clients
+/// encrypt their NIP-46 requests to and pin across sessions. It is deliberately **not** any account
+/// key — discovery advertises only this pubkey, so a process that merely probes the machine learns
+/// that a signer is present and sees a throwaway transport key, never *which* accounts it holds.
+/// It is regenerated only on reinstall/reset (clearing the profile); losing it is indistinguishable
+/// from a fresh install, by design, and the client simply re-pairs.
+///
+/// It is profile-scoped because the relay only runs for an unlocked profile, and each profile has
+/// its own account set — switching profiles re-advertises that profile's transport key.
+pub fn get_transport_keys(state: &AppState) -> Result<Keys, String> {
+    let key_name = ppk(state, "lrs-transport-sk");
+
+    if let Ok(sk_hex) = get_raw_from_keyring(&key_name) {
+        if let Ok(secret_key) = SecretKey::from_hex(&sk_hex) {
+            return Ok(Keys::new(secret_key));
+        }
+        // Stored value is unreadable — fall through and regenerate (equivalent to a reset).
+    }
+
+    let keys = Keys::generate();
+    let sk_hex = keys.secret_key().to_secret_hex();
+    save_raw_to_keyring(&key_name, &sk_hex)?;
+    info!("Generated LRS transport key for active profile");
+    Ok(keys)
+}
+
 // ─── Seed Management ────────────────────────────────────────────────────
 
 /// Generate a new BIP-39 seed, derive the first keypair (account 0), return mnemonic for backup
@@ -1250,6 +1279,7 @@ pub fn delete_profile(
         "upv2-login-key", "upv2-sessions", "login-attempts", "last-online-at",
         "lock-timeout", "active-keypair", "active-seed", "nip46-enabled",
         "signing-history", "user-relays",
+        "lrs-transport-sk", "lrs-last-port", "lrs-discovery-enabled",
     ];
     for suffix in &suffixes {
         let _ = delete_raw_from_keyring(&format!("p-{}/{}", pid, suffix));

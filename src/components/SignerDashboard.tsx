@@ -164,6 +164,9 @@ interface SignerState {
     login_attempts: LoginAttempt[];
     pc55_running: boolean;
     pc55_connections: Pc55Connection[];
+    lrs_running: boolean;
+    lrs_port: number;
+    lrs_discovery_enabled: boolean;
 }
 
 interface SigningHistoryEntry {
@@ -309,7 +312,9 @@ export default function SignerDashboard({ activePubkey, activeNpub }: SignerDash
         nip46_enabled: true,
         upv2_login_key: null, upv2_sessions: [], login_attempts: [],
         pc55_running: false, pc55_connections: [],
+        lrs_running: false, lrs_port: 7777, lrs_discovery_enabled: true,
     });
+    const [lrsTransportPk, setLrsTransportPk] = useState<string | null>(null);
     const [bunkerUri, setBunkerUri] = useState('');
     const [nostrconnectInput, setNostrconnectInput] = useState('');
     const [connectMode, setConnectMode] = useState<'nostrconnect' | 'bunker'>('nostrconnect');
@@ -373,12 +378,19 @@ export default function SignerDashboard({ activePubkey, activeNpub }: SignerDash
         dnnService.initialize().then(() => setDnnServiceReady(true));
     }, []);
 
-    // Auto-start PC55 local signer server on mount
+    // Auto-start the NIP-LRS local relay signer on mount (always-on by default; user can toggle off).
     useEffect(() => {
-        invoke('start_pc55_server').catch((e: unknown) => {
-            console.log('PC55 auto-start:', e);
+        invoke('start_lrs_server').catch((e: unknown) => {
+            console.log('LRS auto-start:', e);
         });
     }, []);
+
+    // Keep the transport-key fingerprint in sync with the relay's running state.
+    useEffect(() => {
+        invoke<{ transport_pubkey: string | null }>('get_lrs_state')
+            .then((s) => setLrsTransportPk(s.transport_pubkey ?? null))
+            .catch(() => {});
+    }, [signerState.lrs_running]);
 
     // Check for updates after a short delay (wait for signer to connect to relays)
     useEffect(() => {
@@ -1479,44 +1491,86 @@ export default function SignerDashboard({ activePubkey, activeNpub }: SignerDash
                 </DialogContent>
             </Dialog>
 
-            {/* ── NIP-PC55 Local Signer ── */}
+            {/* ── NIP-LRS Local Relay Signer ── */}
             <Card>
                 <CardHeader className="pb-5 flex flex-row items-center justify-between">
                     <CardTitle className="flex items-center gap-2">
                         <div className={cn(
                             "w-10 h-10 rounded-full flex items-center justify-center shrink-0",
-                            signerState.pc55_running ? "bg-green-500/15" : "bg-muted"
+                            signerState.lrs_running ? "bg-green-500/15" : "bg-muted"
                         )}>
                             <Radio className={cn(
                                 "w-5 h-5",
-                                signerState.pc55_running ? "text-green-500" : "text-muted-foreground"
+                                signerState.lrs_running ? "text-green-500" : "text-muted-foreground"
                             )} />
                         </div>
                         <div>
                             <div>Local Signer</div>
                             <div className="text-xs text-muted-foreground font-mono mt-0.5 font-normal">
-                                {signerState.pc55_running
-                                    ? `ws://localhost:7777 · ${signerState.pc55_connections.length} client${signerState.pc55_connections.length !== 1 ? 's' : ''}`
-                                    : 'NIP-PC55 · not running'
+                                {signerState.lrs_running
+                                    ? `ws://127.0.0.1:${signerState.lrs_port} · on this device`
+                                    : 'Local relay · not running'
                                 }
                             </div>
                         </div>
                     </CardTitle>
                     <Switch
-                        checked={signerState.pc55_running}
+                        checked={signerState.lrs_running}
                         onCheckedChange={async () => {
                             try {
-                                if (signerState.pc55_running) {
-                                    await invoke('stop_pc55_server');
+                                if (signerState.lrs_running) {
+                                    await invoke('stop_lrs_server');
                                 } else {
-                                    await invoke('start_pc55_server');
+                                    await invoke('start_lrs_server');
                                 }
                             } catch (e) {
-                                console.error('PC55 toggle error:', e);
+                                toast('Local relay error: ' + e);
                             }
                         }}
                     />
                 </CardHeader>
+                {signerState.lrs_running && (
+                    <CardContent className="pt-0 space-y-4">
+                        {/* One-click discovery (opt-in): off = reachable only via the copied string */}
+                        <div className="flex items-center justify-between gap-4">
+                            <div>
+                                <div className="text-sm font-medium">One-click discovery</div>
+                                <div className="text-xs text-muted-foreground mt-0.5">
+                                    Lets local apps find this signer with a click. Off = connect only with the string below.
+                                </div>
+                            </div>
+                            <Switch
+                                checked={signerState.lrs_discovery_enabled}
+                                onCheckedChange={(v) => invoke('set_lrs_discovery_enabled', { enabled: v }).catch((e) => toast('Error: ' + e))}
+                            />
+                        </div>
+
+                        {/* Transport identity fingerprint — how clients recognize this signer */}
+                        {lrsTransportPk && (
+                            <div className="text-xs text-muted-foreground">
+                                Signer key:{' '}
+                                <span className="font-mono">{lrsTransportPk.slice(0, 16)}…{lrsTransportPk.slice(-4)}</span>
+                            </div>
+                        )}
+
+                        {/* Fallback connection string (always works, even without discovery) */}
+                        <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={async () => {
+                                try {
+                                    const res = await invoke<{ uri: string }>('get_lrs_bunker_uri');
+                                    navigator.clipboard.writeText(res.uri);
+                                    toast('Connection string copied', 'success');
+                                } catch (e) {
+                                    toast('Error: ' + e);
+                                }
+                            }}
+                        >
+                            Copy connection string
+                        </Button>
+                    </CardContent>
+                )}
             </Card>
 
             {/* ── Bunker Connection ── */}

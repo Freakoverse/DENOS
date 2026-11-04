@@ -170,6 +170,25 @@ pub fn get_bunker_uri(
     Ok(BunkerUriResult { uri, secret })
 }
 
+/// NIP-LRS fallback connection string (spec §5.1 MUST): a `bunker://` whose identity is the random
+/// **transport key** and whose single relay is the loopback relay. This is the always-works path a
+/// user copies into a client when one-click scan discovery is off or unsupported — ordinary NIP-46,
+/// so any NIP-46 client connects with it.
+#[tauri::command]
+pub fn get_lrs_bunker_uri(state: State<'_, AppState>) -> Result<BunkerUriResult, String> {
+    let transport_keys = keys::get_transport_keys(&state)?;
+    let pubkey_hex = transport_keys.public_key().to_hex();
+    let port = *state.lrs_port.lock().unwrap();
+    let relay = format!("ws://127.0.0.1:{}", port);
+
+    // Random NIP-46 connection-verification secret (echoed back on approval).
+    let secret_keys = Keys::generate();
+    let secret = hex::encode(&secret_keys.secret_key().to_secret_bytes()[..8]);
+
+    let uri = format!("bunker://{}?relay={}&secret={}", pubkey_hex, relay, secret);
+    Ok(BunkerUriResult { uri, secret })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NostrConnectInfo {
     pub client_pubkey: String,
@@ -399,6 +418,30 @@ pub async fn approve_request(
             } else {
                 warn!("No PC55 response channel for request: {}", request.id);
             }
+        } else if request.source == "lrs" {
+            // NIP-LRS: encrypt the response with the TRANSPORT key (the identity the client
+            // addressed) and publish kind 24133 over the loopback relay client.
+            let transport_keys = keys::get_transport_keys(&state)?;
+            let client_pk = PublicKey::from_hex(&request.client_pubkey)
+                .map_err(|e| format!("Invalid pubkey: {}", e))?;
+            let lrs_client = state.lrs_client.lock().unwrap().clone();
+            if let Some(client) = lrs_client {
+                let encrypted = if request.use_nip44 {
+                    nip44::encrypt(transport_keys.secret_key(), &client_pk, response_json, nip44::Version::default())
+                        .map_err(|e| format!("NIP-44 encrypt: {}", e))?
+                } else {
+                    nip04::encrypt(transport_keys.secret_key(), &client_pk, response_json)
+                        .map_err(|e| format!("NIP-04 encrypt: {}", e))?
+                };
+                let response_event = EventBuilder::new(Kind::Custom(24133), encrypted)
+                    .tag(Tag::public_key(client_pk));
+                match client.send_event_builder(response_event).await {
+                    Ok(_) => info!("Sent LRS approved response for: {}", request.method),
+                    Err(e) => error!("Failed to send LRS approved response: {}", e),
+                }
+            } else {
+                warn!("No LRS client available to deliver approved response: {}", request.id);
+            }
         } else {
             let client_pk = PublicKey::from_hex(&request.client_pubkey)
                 .map_err(|e| format!("Invalid pubkey: {}", e))?;
@@ -516,6 +559,36 @@ pub async fn reject_request(
             info!("Sent PC55 rejection for: {}", request.method);
         } else {
             warn!("No PC55 response channel for rejection: {}", request.id);
+        }
+    } else if request.source == "lrs" {
+        // NIP-LRS: send the rejection encrypted with the TRANSPORT key over the loopback relay.
+        let transport_keys = keys::get_transport_keys(&state)?;
+        let client_pk = PublicKey::from_hex(&request.client_pubkey)
+            .map_err(|e| format!("Invalid pubkey: {}", e))?;
+        let rejection = Nip46Response {
+            id: request.id.clone(),
+            result: None,
+            error: Some("User rejected the request".to_string()),
+        };
+        let rejection_json = serde_json::to_string(&rejection)
+            .map_err(|e| format!("Serialize: {}", e))?;
+        let lrs_client = state.lrs_client.lock().unwrap().clone();
+        if let Some(client) = lrs_client {
+            let encrypted = if request.use_nip44 {
+                nip44::encrypt(transport_keys.secret_key(), &client_pk, &rejection_json, nip44::Version::default())
+                    .map_err(|e| format!("NIP-44 encrypt: {}", e))?
+            } else {
+                nip04::encrypt(transport_keys.secret_key(), &client_pk, &rejection_json)
+                    .map_err(|e| format!("NIP-04 encrypt: {}", e))?
+            };
+            let response_event = EventBuilder::new(Kind::Custom(24133), encrypted)
+                .tag(Tag::public_key(client_pk));
+            match client.send_event_builder(response_event).await {
+                Ok(_) => info!("Sent LRS rejection for: {}", request.method),
+                Err(e) => error!("Failed to send LRS rejection: {}", e),
+            }
+        } else {
+            warn!("No LRS client available to deliver rejection: {}", request.id);
         }
     } else {
         let client_pk = PublicKey::from_hex(&request.client_pubkey)
@@ -1437,9 +1510,13 @@ pub async fn run_signer_loop(
                         info!("Received event kind={} from={}", event.kind.as_u16(), &event.pubkey.to_hex()[..16]);
                         let _ = app.emit("log-event", format!("[EVENT] kind={} from={}…", event.kind.as_u16(), &event.pubkey.to_hex()[..16]));
                         if event.kind == Kind::Custom(24133) {
+                            // Remote NIP-46: the account key is both the envelope identity and the
+                            // signing identity.
                             handle_nip46_event(
                                 &app,
                                 &signer_keys,
+                                &signer_keys,
+                                "nip46",
                                 &client,
                                 &event,
                             ).await;
@@ -1475,9 +1552,98 @@ pub async fn run_signer_loop(
     Ok(())
 }
 
+/// NIP-LRS signer loop: attach to the in-process loopback relay using the random **transport key**
+/// as the NIP-46 identity, and sign as the active **account**. This "opens a loopback socket to
+/// itself" (allowed by the spec) and reuses the entire existing request pipeline via
+/// [`handle_nip46_event`] with the envelope/signing key split. Stops on the relay's shutdown
+/// broadcast.
+pub async fn run_lrs_signer_loop(
+    app: AppHandle,
+    transport_keys: Keys,
+    account_keys: Keys,
+    relay_url: String,
+    mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+) -> Result<(), String> {
+    let transport_pubkey = transport_keys.public_key();
+
+    let client = Client::new(transport_keys.clone());
+    client
+        .add_relay(&relay_url)
+        .await
+        .map_err(|e| format!("LRS add_relay {}: {}", relay_url, e))?;
+    client.connect().await;
+
+    // Share the client so approve/reject can publish responses over the local relay.
+    {
+        let state: tauri::State<'_, AppState> = app.state();
+        *state.lrs_client.lock().unwrap() = Some(client.clone());
+    }
+
+    // Subscribe to NIP-46 requests addressed to the transport key.
+    let filter = Filter::new()
+        .kind(Kind::Custom(24133))
+        .pubkey(transport_pubkey)
+        .since(Timestamp::now());
+    client
+        .subscribe(filter, None)
+        .await
+        .map_err(|e| format!("LRS subscribe failed: {}", e))?;
+
+    let _ = app.emit("log-event", "[INFO] Local Relay Signer attached — listening on loopback");
+
+    let mut notifications = client.notifications();
+    loop {
+        tokio::select! {
+            _ = shutdown_rx.recv() => {
+                info!("[LRS] Signer loop shutdown signal received");
+                break;
+            }
+            notification = notifications.recv() => {
+                match notification {
+                    Ok(RelayPoolNotification::Event { event, .. }) => {
+                        if event.kind == Kind::Custom(24133) {
+                            // Envelope = transport key; signing = account key; source = "lrs".
+                            handle_nip46_event(
+                                &app,
+                                &transport_keys,
+                                &account_keys,
+                                "lrs",
+                                &client,
+                                &event,
+                            ).await;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        error!("[LRS] notification error: {}", e);
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    }
+                }
+            }
+        }
+    }
+
+    {
+        let state: tauri::State<'_, AppState> = app.state();
+        *state.lrs_client.lock().unwrap() = None;
+    }
+    client.disconnect().await;
+    info!("[LRS] Signer loop ended");
+    Ok(())
+}
+
+/// Handle an incoming NIP-46 request event.
+///
+/// `envelope_keys` is the identity the request is encrypted to and responses are encrypted from —
+/// the account key for remote NIP-46, or the random **transport key** for NIP-LRS. `signing_keys`
+/// is the account the operation actually runs as (always the account). `source` tags the request
+/// ("nip46" / "lrs") so approve/reject route the response back over the right transport. `client`
+/// is the relay client used to publish responses (the remote pool, or the loopback LRS client).
 async fn handle_nip46_event(
     app: &AppHandle,
-    signer_keys: &Keys,
+    envelope_keys: &Keys,
+    signing_keys: &Keys,
+    source: &str,
     client: &Client,
     event: &Event,
 ) {
@@ -1500,10 +1666,10 @@ async fn handle_nip46_event(
     }
 
     // Try NIP-04 decrypt first, then NIP-44 — track which one worked
-    let (decrypted, use_nip44): (String, bool) = match nip04::decrypt(signer_keys.secret_key(), &sender_pubkey, &content) {
+    let (decrypted, use_nip44): (String, bool) = match nip04::decrypt(envelope_keys.secret_key(), &sender_pubkey, &content) {
         Ok(text) => (text, false),
         Err(_) => {
-            match nip44::decrypt(signer_keys.secret_key(), &sender_pubkey, &content) {
+            match nip44::decrypt(envelope_keys.secret_key(), &sender_pubkey, &content) {
                 Ok(text) => (text, true),
                 Err(e) => {
                     warn!("Failed to decrypt NIP-46 event: {}", e);
@@ -1554,7 +1720,7 @@ async fn handle_nip46_event(
             auto_approve_kinds: vec![],
             policy: "manual".to_string(),
             custom_rules: HashMap::new(),
-            signer_pubkey: signer_keys.public_key().to_hex(),
+            signer_pubkey: signing_keys.public_key().to_hex(),
             auto_replace: false,
         };
         {
@@ -1579,8 +1745,8 @@ async fn handle_nip46_event(
         return;
     };
 
-    // Process the request
-    let response = process_nip46_request(signer_keys, &request);
+    // Process the request — always as the ACCOUNT (signing) key, never the envelope key.
+    let response = process_nip46_request(signing_keys, &request);
     let response_json = match serde_json::to_string(&response) {
         Ok(j) => j,
         Err(e) => {
@@ -1634,13 +1800,19 @@ async fn handle_nip46_event(
             .unwrap_or(("manual".to_string(), None))
     };
 
-    // `connect` auto-responds too: it only establishes the session (actual signing
-    // still goes through the connection's policy below), and many NIP-46 clients
-    // have a short connect timeout that a human approval would blow past.
-    let auto_connect = request.method == "connect";
+    // `connect` auto-responds for remote NIP-46: it only establishes the session (actual signing
+    // still goes through the connection's policy below), and many NIP-46 clients have a short
+    // connect timeout that a human approval would blow past.
+    //
+    // For NIP-LRS it does NOT auto-respond: there is no pre-shared secret (no pasted string), so
+    // first contact MUST get explicit user approval before the connection is usable (spec §6.2),
+    // and gating `connect` is what keeps the account undisclosed until the user approves — a
+    // subsequent `get_public_key` only finds a connection (and so auto-responds the account) once
+    // that approval has created one.
+    let auto_connect = request.method == "connect" && source != "lrs";
     if is_safe_method || auto_connect || conn_policy == "auto_approve" || custom_rule.as_deref() == Some("approve") {
         // Auto-respond: safe method / connect handshake OR connection has auto-approve enabled
-        send_encrypted_response(signer_keys, client, &sender_pubkey, &response_json, use_nip44).await;
+        send_encrypted_response(envelope_keys, client, &sender_pubkey, &response_json, use_nip44).await;
         let id_preview = if request.id.len() > 8 { &request.id[..8] } else { &request.id };
         let reason = if is_safe_method { "safe method" } else { "auto-approved" };
         info!("Auto-responded to: {} ({}) via {} [{}]", request.method, id_preview, enc_label, reason);
@@ -1657,7 +1829,7 @@ async fn handle_nip46_event(
             method: request.method.clone(),
             kind: event_kind,
             app_name: app_name.clone(),
-            source: "nip46".to_string(),
+            source: source.to_string(),
             outcome: "auto_approved".to_string(),
             raw_event_json: raw_json,
         });
@@ -1669,7 +1841,7 @@ async fn handle_nip46_event(
             error: Some("Request auto-rejected by signer policy".to_string()),
         };
         if let Ok(rej_json) = serde_json::to_string(&rejection) {
-            send_encrypted_response(signer_keys, client, &sender_pubkey, &rej_json, use_nip44).await;
+            send_encrypted_response(envelope_keys, client, &sender_pubkey, &rej_json, use_nip44).await;
         }
         info!("Auto-rejected: {} from '{}' [policy]", request.method, app_name);
         let _ = app.emit("log-event", format!("[REJECT] auto-rejected {} from '{}'",
@@ -1685,7 +1857,7 @@ async fn handle_nip46_event(
             method: request.method.clone(),
             kind: event_kind,
             app_name: app_name.clone(),
-            source: "nip46".to_string(),
+            source: source.to_string(),
             outcome: "auto_rejected".to_string(),
             raw_event_json: raw_json,
         });
@@ -1718,7 +1890,7 @@ async fn handle_nip46_event(
             kind: event_kind,
             response_json: Some(response_json),
             use_nip44,
-            source: "nip46".to_string(),
+            source: source.to_string(),
             upv2_session_id: None,
             upv2_nonce: None,
         };
