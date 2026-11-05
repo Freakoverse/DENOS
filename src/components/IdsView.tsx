@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import {
     Plus, RefreshCw, CheckCircle, Clock, Loader2, AlertTriangle, Copy, User, AtSign,
-    ArrowRight, X,
+    ArrowRight, X, Wrench,
 } from 'lucide-react';
 import { dnnService, type DnnName, type PendingName, getMinimumDnnIdAmount } from '@/services/dnn';
 import { privateKeyToBitcoinAddress } from '@/services/bitcoin';
@@ -273,7 +273,13 @@ export function IdsView({ activePubkey, activeNpub, onNavigateToWallet }: IdsVie
     }
 
     return (
-        <div className="flex flex-col gap-4 h-full overflow-hidden">
+        <div className="relative flex flex-col gap-4 h-full overflow-hidden">
+            {/* Redesign overlay — ID page is being reworked; blocks interaction until then. */}
+            <div className="absolute inset-0 z-50 flex flex-col items-center justify-center gap-3 bg-background/80 backdrop-blur-sm text-center px-8">
+                <Wrench className="w-10 h-10 text-primary/70" />
+                <p className="text-base font-semibold text-foreground">Currently undergoing a redesign</p>
+                <p className="text-sm text-muted-foreground max-w-xs">The DNN IDs page is being reworked and will be back soon.</p>
+            </div>
             {/* Header */}
             <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
