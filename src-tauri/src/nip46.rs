@@ -24,6 +24,44 @@ fn pretty_origin(origin: &str) -> String {
     if host.is_empty() { origin.to_string() } else { host.to_string() }
 }
 
+/// Client display metadata a `connect` request may carry (NIP-LRS §6.1 / NIP-46 nostrconnect
+/// `metadata` convention): `{"name":"Jumble","url":"https://...","image":"..."}`.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ClientMetadata {
+    pub name: Option<String>,
+    pub url: Option<String>,
+    pub image: Option<String>,
+}
+
+/// Pull client metadata out of a `connect` request's params. We scan every param (rather than
+/// pin an index) for a JSON object that carries a non-empty `name`, so it coexists with the
+/// standard positional params `[signer_pubkey, secret, perms]` whatever order a client appends it.
+/// Field names mirror Amber's `BunkerMetadata` (name/url) so the same blob works against either
+/// signer. Returns None when no param looks like metadata.
+fn extract_client_metadata(params: &[String]) -> Option<ClientMetadata> {
+    for p in params {
+        let trimmed = p.trim_start();
+        if !trimmed.starts_with('{') {
+            continue;
+        }
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            let name = v.get("name").and_then(|x| x.as_str()).map(str::to_string)
+                .filter(|s| !s.is_empty());
+            if name.is_none() {
+                continue; // a JSON object with no name isn't client metadata
+            }
+            return Some(ClientMetadata {
+                name,
+                url: v.get("url").and_then(|x| x.as_str()).map(str::to_string)
+                    .filter(|s| !s.is_empty()),
+                image: v.get("image").and_then(|x| x.as_str()).map(str::to_string)
+                    .filter(|s| !s.is_empty()),
+            });
+        }
+    }
+    None
+}
+
 fn emit_signer_state(app: &AppHandle, state: &State<'_, AppState>) {
     let payload = state.to_signer_payload();
     if let Err(e) = app.emit("signer-state", &payload) {
@@ -1689,21 +1727,26 @@ async fn handle_nip46_event(
     } else if request.method == "connect" {
         // Only `connect` requests can establish new connections
         let new_id = uuid::Uuid::new_v4().to_string();
-        // Name an LRS connection after the web app's Origin when the relay captured one; otherwise
-        // (and for remote NIP-46) fall back to the client pubkey.
-        let (name, app_url) = if source == "lrs" {
-            match state.lrs_client_origins.lock().unwrap().get(&sender_hex).cloned() {
-                Some(origin) => (pretty_origin(&origin), Some(origin)),
-                None => (format!("App {}...", &sender_hex[..12]), None),
-            }
+        // Name precedence: a client-supplied `metadata.name` (best — a real app name like
+        // "Jumble") → the web app's Origin the relay captured (LRS only) → the client pubkey.
+        // `metadata` lets clients name themselves over discovery/bunker, where NIP-46 otherwise
+        // carries no app name (the nostrconnect:// metadata convention, which Amber also reads).
+        let meta = extract_client_metadata(&request.params);
+        let origin = if source == "lrs" {
+            state.lrs_client_origins.lock().unwrap().get(&sender_hex).cloned()
         } else {
-            (format!("App {}...", &sender_hex[..12]), None)
+            None
         };
+        let name = meta.as_ref().and_then(|m| m.name.clone())
+            .or_else(|| origin.as_deref().map(pretty_origin))
+            .unwrap_or_else(|| format!("App {}...", &sender_hex[..12]));
+        let app_url = meta.as_ref().and_then(|m| m.url.clone()).or(origin);
+        let app_icon = meta.as_ref().and_then(|m| m.image.clone());
         let connection = Connection {
             id: new_id.clone(),
             app_name: name.clone(),
             app_url,
-            app_icon: None,
+            app_icon,
             client_pubkey: sender_hex.clone(),
             relay_urls: state.relay_urls.lock().unwrap().clone(),
             created_at: now_secs(),
