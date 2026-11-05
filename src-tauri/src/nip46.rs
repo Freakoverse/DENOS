@@ -13,6 +13,17 @@ fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
+/// Turn an Origin ("https://jumble.social", "http://localhost:5173") into a short display label
+/// ("jumble.social", "localhost:5173") for naming a connection.
+fn pretty_origin(origin: &str) -> String {
+    let no_scheme = origin
+        .strip_prefix("https://")
+        .or_else(|| origin.strip_prefix("http://"))
+        .unwrap_or(origin);
+    let host = no_scheme.split('/').next().unwrap_or(no_scheme);
+    if host.is_empty() { origin.to_string() } else { host.to_string() }
+}
+
 fn emit_signer_state(app: &AppHandle, state: &State<'_, AppState>) {
     let payload = state.to_signer_payload();
     if let Err(e) = app.emit("signer-state", &payload) {
@@ -1670,17 +1681,28 @@ async fn handle_nip46_event(
         connections.iter().find(|c| c.client_pubkey == sender_hex)
             .map(|c| (c.id.clone(), c.app_name.clone()))
     };
+    // A recognized client key (existing connection) is a reconnect, not first contact.
+    let is_reconnect = existing_conn.is_some();
 
     let (conn_id, app_name) = if let Some((id, name)) = existing_conn {
         (id, name)
     } else if request.method == "connect" {
         // Only `connect` requests can establish new connections
         let new_id = uuid::Uuid::new_v4().to_string();
-        let name = format!("App {}...", &sender_hex[..12]);
+        // Name an LRS connection after the web app's Origin when the relay captured one; otherwise
+        // (and for remote NIP-46) fall back to the client pubkey.
+        let (name, app_url) = if source == "lrs" {
+            match state.lrs_client_origins.lock().unwrap().get(&sender_hex).cloned() {
+                Some(origin) => (pretty_origin(&origin), Some(origin)),
+                None => (format!("App {}...", &sender_hex[..12]), None),
+            }
+        } else {
+            (format!("App {}...", &sender_hex[..12]), None)
+        };
         let connection = Connection {
             id: new_id.clone(),
             app_name: name.clone(),
-            app_url: None,
+            app_url,
             app_icon: None,
             client_pubkey: sender_hex.clone(),
             relay_urls: state.relay_urls.lock().unwrap().clone(),
@@ -1775,12 +1797,12 @@ async fn handle_nip46_event(
     // still goes through the connection's policy below), and many NIP-46 clients have a short
     // connect timeout that a human approval would blow past.
     //
-    // For NIP-LRS it does NOT auto-respond: there is no pre-shared secret (no pasted string), so
-    // first contact MUST get explicit user approval before the connection is usable (spec §6.2),
-    // and gating `connect` is what keeps the account undisclosed until the user approves — a
-    // subsequent `get_public_key` only finds a connection (and so auto-responds the account) once
-    // that approval has created one.
-    let auto_connect = request.method == "connect" && source != "lrs";
+    // For NIP-LRS, FIRST contact does NOT auto-respond: there is no pre-shared secret (no pasted
+    // string), so it MUST get explicit user approval before the connection is usable (spec §6.2),
+    // and gating that first `connect` is what keeps the account undisclosed until approval. A
+    // RECONNECT with a recognized client key resumes silently (spec §6) — the user already approved
+    // this client, so re-prompting on every login would be noise.
+    let auto_connect = request.method == "connect" && (source != "lrs" || is_reconnect);
     if is_safe_method || auto_connect || conn_policy == "auto_approve" || custom_rule.as_deref() == Some("approve") {
         // Auto-respond: safe method / connect handshake OR connection has auto-approve enabled
         send_encrypted_response(envelope_keys, client, &sender_pubkey, &response_json, use_nip44).await;

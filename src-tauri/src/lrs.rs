@@ -539,6 +539,10 @@ async fn handle_conn(
         return write_info_doc(&mut stream, &body).await;
     }
 
+    // Capture the browser Origin (if any) from the handshake so the connection can be named after
+    // the web app. Parsed from the bytes we peeked for routing.
+    let origin = parse_origin(&head);
+
     // WebSocket upgrade: let tokio-tungstenite do the handshake, injecting CORS/PNA headers so
     // browser clients on public origins can reach loopback.
     let ws = tokio_tungstenite::accept_hdr_async(stream, add_cors_headers)
@@ -546,8 +550,26 @@ async fn handle_conn(
         .map_err(|e| format!("ws handshake: {}", e))?;
 
     let conn_id = core.new_conn_id();
-    relay_session(core, ws, conn_id, shutdown_rx).await;
+    relay_session(app, core, ws, conn_id, origin, shutdown_rx).await;
     Ok(())
+}
+
+/// Extract the `Origin` header value from a peeked HTTP request head, if present and meaningful.
+fn parse_origin(head: &str) -> Option<String> {
+    head.lines().find_map(|line| {
+        let mut parts = line.splitn(2, ':');
+        let name = parts.next()?.trim();
+        if name.eq_ignore_ascii_case("origin") {
+            let val = parts.next()?.trim();
+            if val.is_empty() || val == "null" {
+                None
+            } else {
+                Some(val.to_string())
+            }
+        } else {
+            None
+        }
+    })
 }
 
 /// Callback for `accept_hdr_async`: add the headers a browser needs to accept the 101 upgrade.
@@ -638,9 +660,11 @@ async fn write_preflight(stream: &mut TcpStream) -> Result<(), String> {
 }
 
 async fn relay_session(
+    app: AppHandle,
     core: Arc<RelayCore>,
     ws: tokio_tungstenite::WebSocketStream<TcpStream>,
     conn_id: u64,
+    origin: Option<String>,
     mut shutdown_rx: broadcast::Receiver<()>,
 ) {
     let (mut sink, mut stream) = ws.split();
@@ -663,7 +687,7 @@ async fn relay_session(
             }
             incoming = stream.next() => {
                 match incoming {
-                    Some(Ok(Message::Text(t))) => handle_client_text(&core, conn_id, &out_tx, t.as_str()),
+                    Some(Ok(Message::Text(t))) => handle_client_text(&app, &core, conn_id, &out_tx, origin.as_deref(), t.as_str()),
                     Some(Ok(Message::Ping(p))) => { let _ = out_tx.send(Message::Pong(p)); }
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Ok(_)) => { /* ignore binary/pong */ }
@@ -679,9 +703,11 @@ async fn relay_session(
 /// Handle one NIP-01 client frame. Responses to the requesting client go through its own channel
 /// (`own_tx`); an accepted EVENT is also broadcast to every other matching subscription.
 fn handle_client_text(
+    app: &AppHandle,
     core: &Arc<RelayCore>,
     conn_id: u64,
     own_tx: &mpsc::UnboundedSender<Message>,
+    origin: Option<&str>,
     raw: &str,
 ) {
     let parsed: Value = match serde_json::from_str(raw) {
@@ -717,6 +743,15 @@ fn handle_client_text(
             if !verified {
                 let _ = own_tx.send(text(json!(["OK", id, false, "invalid: bad signature"])));
                 return;
+            }
+
+            // Record this client's Origin (if any) so the signer loop can name the connection after
+            // the web app. The event author is the client's pubkey.
+            if let Some(o) = origin {
+                if let Some(pk) = ev.get("pubkey").and_then(|v| v.as_str()) {
+                    let state: State<'_, AppState> = app.state();
+                    state.lrs_client_origins.lock().unwrap().insert(pk.to_string(), o.to_string());
+                }
             }
 
             let is_new = core.events.lock().unwrap().add(id.clone(), ev.clone());

@@ -392,6 +392,10 @@ pub struct AppState {
     /// The loopback-relay client of the running LRS signer loop — shared so approve/reject can
     /// publish responses over the local relay (encrypted with the transport key).
     pub lrs_client: Mutex<Option<Client>>,
+    /// Maps a client pubkey (hex) → the Origin of the browser socket it connected from. The relay
+    /// records it from the WebSocket handshake; the signer loop reads it to name LRS connections
+    /// after the web app (e.g. "jumble.social") instead of a bare pubkey.
+    pub lrs_client_origins: Mutex<HashMap<String, String>>,
     // Multi-profile support
     pub profiles: Mutex<Vec<ProfileInfo>>,
     pub active_profile: Mutex<Option<String>>,
@@ -603,6 +607,7 @@ impl AppState {
             lrs_shutdown: Mutex::new(None),
             lrs_port: Mutex::new(crate::lrs::LRS_DEFAULT_PORT),
             lrs_client: Mutex::new(None),
+            lrs_client_origins: Mutex::new(HashMap::new()),
             profiles: Mutex::new(profiles),
             active_profile: Mutex::new(last_profile),
             upload_cancel: Arc::new(AtomicBool::new(false)),
