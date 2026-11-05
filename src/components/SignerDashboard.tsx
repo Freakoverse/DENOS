@@ -298,6 +298,30 @@ function BlossomVideo({ hash, ext, ...videoProps }: {
     return <video key={currentUrl} src={currentUrl} onError={handleError} {...videoProps} />;
 }
 
+/// A connection's avatar: the app's own icon (from connect metadata) when present and loadable,
+/// otherwise the generic Link2 glyph tinted per tab (primary for bunker, green for local).
+function ConnIcon({ src, tint }: { src: string | null; tint: 'primary' | 'green' }) {
+    const [broken, setBroken] = useState(false);
+    const ring = tint === 'green' ? 'bg-green-500/15' : 'bg-primary/15';
+    const glyph = tint === 'green' ? 'text-green-500' : 'text-primary';
+    if (src && !broken) {
+        return (
+            <img
+                src={src}
+                alt=""
+                loading="lazy"
+                onError={() => setBroken(true)}
+                className="w-8 h-8 rounded-full object-cover shrink-0 bg-muted"
+            />
+        );
+    }
+    return (
+        <div className={cn('w-8 h-8 rounded-full flex items-center justify-center shrink-0', ring)}>
+            <Link2 className={cn('w-4 h-4', glyph)} />
+        </div>
+    );
+}
+
 export default function SignerDashboard({ activePubkey, activeNpub }: SignerDashboardProps) {
     const [signerState, setSignerState] = useState<SignerState>({
         running: false, connections: [], pending_requests: [], relays: [], user_relays: [],
@@ -802,9 +826,7 @@ export default function SignerDashboard({ activePubkey, activeNpub }: SignerDash
                                                 <div className="flex justify-between items-start">
                                                     <div className="min-w-0 flex-1">
                                                         <div className="flex items-center gap-2">
-                                                            <div className="w-8 h-8 rounded-full bg-primary/15 flex items-center justify-center shrink-0">
-                                                                <Link2 className="w-4 h-4 text-primary" />
-                                                            </div>
+                                                            <ConnIcon src={conn.app_icon} tint="primary" />
                                                             <div>
                                                                 <span className="text-sm font-semibold">{conn.app_name}</span>
                                                             </div>
@@ -856,9 +878,7 @@ export default function SignerDashboard({ activePubkey, activeNpub }: SignerDash
                                                 <div className="flex justify-between items-start">
                                                     <div className="min-w-0 flex-1">
                                                         <div className="flex items-center gap-2">
-                                                            <div className="w-8 h-8 rounded-full bg-green-500/15 flex items-center justify-center shrink-0">
-                                                                <Link2 className="w-4 h-4 text-green-500" />
-                                                            </div>
+                                                            <ConnIcon src={conn.app_icon} tint="green" />
                                                             <div>
                                                                 <span className="text-sm font-semibold">{conn.app_name}</span>
                                                             </div>
