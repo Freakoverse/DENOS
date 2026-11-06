@@ -81,9 +81,9 @@ Then open the `.dmg` normally and drag **DENOS.app** to your Applications folder
 
 > **Note:** You'll need to re-sign after each DENOS update (repeat Step 2 only).
 
-### Browser Compatibility (Local Signer / NIP-PC55)
+### Browser Compatibility (Local Signer / NIP-LRS)
 
-The Local Signer (NIP-PC55) enables "Login with DENOS" on supported Nostr websites by running a WebSocket server on `ws://localhost:7777`. Some browsers block this connection from HTTPS pages due to mixed content security policies:
+The Local Signer (NIP-LRS — Local Relay Signer) enables "Login with DENOS" on supported Nostr websites by running a loopback Nostr relay on `ws://127.0.0.1` (first free port in 7777–7786). HTTPS pages reach it as a secure-context WebSocket — no `wss://` or certificate needed — gated by a Private Network Access preflight. Some browsers still restrict the connection:
 
 | Browser | Status |
 |---------|--------|
@@ -92,7 +92,7 @@ The Local Signer (NIP-PC55) enables "Login with DENOS" on supported Nostr websit
 | Brave | ⚠️ Blocked by Shields — see fix below |
 | Safari | ❌ Blocks `ws://localhost` — use Chrome or Firefox instead |
 
-> **Other browsers** with similar security shields or mixed content policies may also block the connection. If you don't see the "Login with DENOS" button on a supported site, your browser is likely blocking the local WebSocket.
+> **Other browsers** with similar security shields may also block the connection. If you don't see the "Login with DENOS" button on a supported site, your browser is likely blocking the local relay connection.
 
 **Brave fix:** Open the site where you want to use DENOS → click the **Brave Shields icon** (lion) in the address bar → **disable Shields** for that site. Reload the page and the "Login with DENOS" button should appear.
 
@@ -245,7 +245,7 @@ DENOS/
 - [x] **NIP-65** — Relay list metadata
 - [x] **NIP-78** — Arbitrary data to deliver updates to DENOS
 - [x] **NIP-87** — Cashu mint discovery via Nostr events
-- [x] **NIP-PC55** — Local signer protocol (alternative to NIP-46)
+- [x] **NIP-LRS** — Local Relay Signer: loopback relay carrying unmodified NIP-46 for same-machine clients (one-click local login)
 - [x] **NIP-UPV2** — Username & Password version 2 (alternative to NIP-46)
 - [x] **NIP-DN** — Decentralized short human readable and memorable IDs
 - [ ] **NIP-NSP** — Nostr Silent Payments to conveniently receive payments privately from various networks
