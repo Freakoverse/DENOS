@@ -23,8 +23,7 @@ DENOS is a tool for managing your Nostr identities, signing events, and pay or r
 
 - **Nostr Signer** — Manage keys, sign events, and connect to relays
 - **Identity Manager** — DNN-based decentralized identity management
-- **Bitcoin Wallet** — secp256k1 wallet with Silent Payments and multi-sig support
-- **eCash** — Cashu-based eCash wallet with a focus on nut zaps
+- **Wallet** — Native on-chain wallets for Bitcoin, EVM chains, and Zcash
 - **QR Scanner** — Built-in QR code scanner and generator
 - **Cross-Platform** — Windows, macOS, and Linux
 
@@ -209,7 +208,7 @@ Output:
 - **Backend:** Rust, Tauri v2
 - **Nostr:** nostr-tools, nostr-sdk
 - **Bitcoin:** bitcoinjs-lib, secp256k1
-- **eCash:** cashu-ts (Cashu protocol)
+- **Chains:** EVM and Zcash support
 - **State:** Zustand
 
 ## Project Structure
@@ -220,7 +219,7 @@ DENOS/
 │   ├── components/         # UI components
 │   ├── hooks/              # Custom React hooks
 │   ├── lib/                # Utilities
-│   └── services/           # Nostr, Bitcoin, eCash services
+│   └── services/           # Nostr, Bitcoin, EVM, Zcash services
 ├── src-tauri/              # Rust backend (Tauri)
 │   ├── src/                # Rust source code
 │   ├── icons/              # App icons (all platforms)
@@ -240,15 +239,11 @@ DENOS/
 - [x] **NIP-19** — bech32-encoded entities (npub, nsec, naddr)
 - [x] **NIP-44** — Versioned encryption (primary encryption method)
 - [x] **NIP-46** — Nostr Connect (remote signer protocol)
-- [x] **NIP-60** — Cashu wallet state backup (encrypted to self)
-- [x] **NIP-61** — Nut zaps (Cashu ecash zaps via Nostr, with P2PK locking)
 - [x] **NIP-65** — Relay list metadata
 - [x] **NIP-78** — Arbitrary data to deliver updates to DENOS
-- [x] **NIP-87** — Cashu mint discovery via Nostr events
 - [x] **NIP-LRS** — Local Relay Signer: loopback relay carrying unmodified NIP-46 for same-machine clients (one-click local login)
 - [x] **NIP-UPV2** — Username & Password version 2 (alternative to NIP-46)
 - [x] **NIP-DN** — Decentralized short human readable and memorable IDs
-- [ ] **NIP-NSP** — Nostr Silent Payments to conveniently receive payments privately from various networks
 - [ ] **NIP-POS** — Point of Sale system for merchants to sign off on sales and receive network or traditional state currency payments
 
 ### Other Protocols
