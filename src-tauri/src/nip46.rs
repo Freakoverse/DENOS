@@ -1621,21 +1621,41 @@ pub async fn run_lrs_signer_loop(
                 match notification {
                     Ok(RelayPoolNotification::Event { event, .. }) => {
                         if event.kind == Kind::Custom(24133) {
-                            // Envelope = transport key; signing = account key; source = "lrs".
-                            handle_nip46_event(
-                                &app,
-                                &transport_keys,
-                                &account_keys,
-                                "lrs",
-                                &client,
-                                &event,
-                            ).await;
+                            // Handle each request on its own task. `notifications()` is a BOUNDED
+                            // tokio broadcast channel, and the loopback relay delivers a whole
+                            // burst at once (an app auto-login fires get_public_key + an SKD probe
+                            // + many nip44_decrypt instantly, with no network spacing). If we
+                            // awaited each handler inline, this receiver would fall behind while a
+                            // handler ran and the channel would DROP the overflow
+                            // (RecvError::Lagged) — silently losing decrypt/sign requests, which a
+                            // client then sees as a timeout. Spawning lets recv() drain the channel
+                            // immediately and runs handlers concurrently. Envelope = transport key;
+                            // signing = account key; source = "lrs".
+                            let app = app.clone();
+                            let transport_keys = transport_keys.clone();
+                            let account_keys = account_keys.clone();
+                            let client = client.clone();
+                            tokio::spawn(async move {
+                                handle_nip46_event(
+                                    &app,
+                                    &transport_keys,
+                                    &account_keys,
+                                    "lrs",
+                                    &client,
+                                    &event,
+                                ).await;
+                            });
                         }
                     }
                     Ok(_) => {}
-                    Err(e) => {
-                        error!("[LRS] notification error: {}", e);
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        // The receiver fell behind and the channel dropped `n` events. Do NOT sleep
+                        // (that only lets more pile up and drop); just keep draining.
+                        warn!("[LRS] notification channel lagged — dropped {} event(s)", n);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        error!("[LRS] notification channel closed; stopping signer loop");
+                        break;
                     }
                 }
             }
