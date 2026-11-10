@@ -5,6 +5,7 @@ mod skd;
 mod state;
 mod updater;
 mod upv2;
+mod vault;
 #[cfg(windows)]
 mod wincred;
 
