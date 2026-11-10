@@ -7,7 +7,7 @@
 //! inputs. Three forms:
 //!   - self    : IKM = root_priv                                   → seed·G           (independent key)
 //!   - shared  : IKM = raw ECDH x-coord(root_priv, peer)           → seed·G           (both parties derive it)
-//!   - blinded : IKM = raw ECDH x-coord(root_priv, peer)           → root_pub + seed·G (peer verifies, can't sign)
+//!   - blinded : IKM = raw ECDH x-coord(root_priv, peer), base-bound → root_pub + seed·G (peer verifies, can't sign)
 //!
 //! The 48-byte HKDF output is wide-reduced mod n (unbiased) to a secp256k1 scalar. For self/shared
 //! it IS the sub-key private scalar; for blinded it is the tweak `t` added to the even-y-normalized
@@ -35,11 +35,30 @@ const SECP256K1_N_HEX: &[u8] = b"FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03
 
 /// Form-tagged HKDF `info`: `"nip-skd:" ‖ form ‖ 0x1F ‖ context` (§1). The `0x1F` unit separator is a
 /// single raw byte; the tag makes the form/context boundary unforgeable so no two forms share a seed.
+/// Used by the `self` and `shared` forms. The `blinded` form uses [`skd_info_blinded`] instead.
 fn skd_info(form: &str, context: &str) -> Vec<u8> {
     let mut v = Vec::with_capacity(8 + form.len() + 1 + context.len());
     v.extend_from_slice(b"nip-skd:");
     v.extend_from_slice(form.as_bytes());
     v.push(0x1F);
+    v.extend_from_slice(context.as_bytes());
+    v
+}
+
+/// Blinded-form HKDF `info`: `"nip-skd:blinded" ‖ 0x1F ‖ base(32 raw bytes) ‖ context` (§1).
+///
+/// `base` is the x-only pubkey of the key being blinded, folded in as **32 RAW bytes** (not hex
+/// text), BEFORE the context. It is fixed-width, so there is NO separator between it and the
+/// context. Binding the base is a privacy fix: without it the tweak depended only on
+/// `(ecdh_x, context)`, so a key and its reverse-direction blinding (A→B vs B→A) — which share one
+/// ECDH x-coordinate and one context — produced the SAME tweak and the SAME offset `t·G`, letting a
+/// passive observer link both masked keys to their roots once a conversation was answered
+/// (`M − S == M_reply − R`, all four points public). Folding `base` in breaks that symmetry.
+fn skd_info_blinded(base_xonly: &[u8; 32], context: &str) -> Vec<u8> {
+    let mut v = Vec::with_capacity(15 + 1 + 32 + context.len());
+    v.extend_from_slice(b"nip-skd:blinded");
+    v.push(0x1F);
+    v.extend_from_slice(base_xonly);
     v.extend_from_slice(context.as_bytes());
     v
 }
@@ -68,17 +87,11 @@ fn ecdh_x(root_priv: &[u8], peer_pub_hex: &str) -> Result<[u8; 32], String> {
     Ok(x)
 }
 
-/// HKDF-SHA256 (salt `"nip-skd-v1"`, form-tagged info, L = 48) → wide-reduce mod n with the `0 → 1`
-/// pin. The 128-bit margin over 256 bits makes `mod n` unbiased by construction (§1). Returns a
-/// scalar in `[1, n-1]`.
-fn derive_seed_scalar(ikm: &[u8], form: &str, context: &str) -> Result<[u8; 32], String> {
-    let hk = Hkdf::<Sha256>::new(Some(SKD_SALT), ikm);
-    let mut seed = [0u8; 48];
-    hk.expand(&skd_info(form, context), &mut seed)
-        .map_err(|_| "NIP-SKD: HKDF expand failed".to_string())?;
-
+/// Wide-reduce a 48-byte HKDF output mod n with the `0 → 1` pin. The 128-bit margin over 256 bits
+/// makes `mod n` unbiased by construction (§1). Returns a scalar in `[1, n-1]`.
+fn reduce_seed(seed: &[u8; 48]) -> [u8; 32] {
     let n = BigUint::parse_bytes(SECP256K1_N_HEX, 16).unwrap();
-    let mut reduced = BigUint::from_bytes_be(&seed) % &n;
+    let mut reduced = BigUint::from_bytes_be(seed) % &n;
     if reduced.bits() == 0 {
         // ~2^-384 chance. Pin 0 → 1 so the derivation stays total and byte-identical to the
         // reference (skd.ts). For blinded, this pin is a hard requirement: t = 0 would make
@@ -88,7 +101,28 @@ fn derive_seed_scalar(ikm: &[u8], form: &str, context: &str) -> Result<[u8; 32],
     let rb = reduced.to_bytes_be();
     let mut out = [0u8; 32];
     out[32 - rb.len()..].copy_from_slice(&rb);
-    Ok(out)
+    out
+}
+
+/// HKDF-SHA256 (salt `"nip-skd-v1"`, explicit `info`, L = 48) → wide-reduce mod n. Returns a scalar
+/// in `[1, n-1]`.
+fn derive_scalar(ikm: &[u8], info: &[u8]) -> Result<[u8; 32], String> {
+    let hk = Hkdf::<Sha256>::new(Some(SKD_SALT), ikm);
+    let mut seed = [0u8; 48];
+    hk.expand(info, &mut seed)
+        .map_err(|_| "NIP-SKD: HKDF expand failed".to_string())?;
+    Ok(reduce_seed(&seed))
+}
+
+/// Self/shared seed scalar: `reduce(HKDF(ikm, skd_info(form, context)))`.
+fn derive_seed_scalar(ikm: &[u8], form: &str, context: &str) -> Result<[u8; 32], String> {
+    derive_scalar(ikm, &skd_info(form, context))
+}
+
+/// Blinded tweak `t`: `reduce(HKDF(ecdh_x, skd_info_blinded(base, context)))`, with the x-only key
+/// being blinded (`base`) bound into the info — see [`skd_info_blinded`] for why.
+fn derive_blinded_tweak(ecdh_x: &[u8], base_xonly: &[u8; 32], context: &str) -> Result<[u8; 32], String> {
+    derive_scalar(ecdh_x, &skd_info_blinded(base_xonly, context))
 }
 
 /// Derive the self/shared sub-key private scalar: `reduce(HKDF(IKM, info(form, context)))`, where
@@ -125,7 +159,8 @@ pub fn derive_subkey_keys(
 
 /// Blinded derivation (§1), holder side — the caller's OWN blinded key toward `peer_pub`:
 /// `blinded_priv = root_priv_evenY + t`, `blinded_pub = xonly(lift_even_y(root_pub) + t·G)`,
-/// `t = reduce(HKDF(ecdh_x(root, peer), info("blinded", context)))`. Returns nostr `Keys` holding
+/// `t = reduce(HKDF(ecdh_x(root, peer), info_blinded(root_pub_xonly, context)))` — the base being
+/// blinded (here the caller's own root pubkey) is bound into the info. Returns nostr `Keys` holding
 /// `blinded_priv`; `keys.public_key()` is `blinded_pub`. A peer holding the other ECDH key can
 /// re-derive `blinded_pub` (via `derive_blinded_pub_for_peer`) but never `blinded_priv`.
 ///
@@ -143,14 +178,18 @@ pub fn derive_blinded_keys(
         return Err("NIP-SKD: blinded derivation requires a peer".to_string());
     }
     let root_priv = decode_root_priv(root_priv_hex)?;
-    let x = ecdh_x(&root_priv, peer_pub_hex)?;
-    let t = derive_seed_scalar(&x, "blinded", context)?; // in [1, n-1]
 
     let secp = Secp256k1::new();
     let root_sk =
         SecpSecretKey::from_slice(&root_priv).map_err(|e| format!("NIP-SKD: bad root priv: {e}"))?;
     let root_pk = SecpPublicKey::from_secret_key(&secp, &root_sk);
-    let (_xonly, parity) = root_pk.x_only_public_key();
+    let (root_xonly, parity) = root_pk.x_only_public_key();
+    // The key being blinded is the caller's own root pubkey; bind its x-only coordinate into the
+    // tweak so A→B and B→A no longer collide (see `skd_info_blinded`).
+    let base = root_xonly.serialize();
+
+    let x = ecdh_x(&root_priv, peer_pub_hex)?;
+    let t = derive_blinded_tweak(&x, &base, context)?; // in [1, n-1]
     // Normalize to the even-y representative (Taproot rule) so both sides agree.
     let sk_even = if parity == Parity::Odd { root_sk.negate() } else { root_sk };
 
@@ -187,8 +226,6 @@ pub fn derive_blinded_pub_for_peer(
         return Err("NIP-SKD: blinded derivation requires a peer".to_string());
     }
     let root_priv = decode_root_priv(root_priv_hex)?;
-    let x = ecdh_x(&root_priv, peer_base_xonly_hex)?;
-    let t = derive_seed_scalar(&x, "blinded", context)?;
 
     let secp = Secp256k1::new();
     let base_bytes =
@@ -196,6 +233,13 @@ pub fn derive_blinded_pub_for_peer(
     let base_xonly =
         XOnlyPublicKey::from_slice(&base_bytes).map_err(|e| format!("NIP-SKD: bad peer pub: {e}"))?;
     let base_even = SecpPublicKey::from_x_only_public_key(base_xonly, Parity::Even);
+    // The key being blinded here is the peer arg; bind its x-only coordinate into the tweak. On the
+    // holder side (`derive_blinded_keys`) this same key is the holder's root, so both sides fold in
+    // the identical 32 bytes and still derive the same `t`. (See `skd_info_blinded`.)
+    let base = base_xonly.serialize();
+
+    let x = ecdh_x(&root_priv, peer_base_xonly_hex)?;
+    let t = derive_blinded_tweak(&x, &base, context)?;
 
     let t_sk = SecpSecretKey::from_slice(&t).map_err(|e| format!("NIP-SKD: {e}"))?;
     let tg = SecpPublicKey::from_secret_key(&secp, &t_sk); // t·G
@@ -216,7 +260,7 @@ mod tests {
     }
 
     const O_PUB: &str = "94576ae28a4583c68e5641b10befe9a90c92680271dc839052937a8552fc0ae5";
-    const P_PUB: &str = "059510a63a230047ffe6e978ade8ad31e4bfb59d414331d5b17b6d50038c51a1";
+    const P_PUB: &str = "a02fa7340b804d26d55a6f4ae2efb4ad24c6d7a9c2568b7f30acf15a49adbca0";
     const R_MEMBER_PUB: &str = "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27";
     const MEMBER_CTX: &str = "nip-chat:v2:member-pseudonym:abc-123";
     const OWNER_CTX: &str = "nip-chat:v2:owner-pseudonym:abc-123";
@@ -272,7 +316,7 @@ mod tests {
     fn vector_blinded_odd_y() {
         let root06 = format!("{:0>64}", "6"); // 00..06
         let root06_pub = "fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556";
-        let expected = "75a5ff6d888b7065181e9f2108f2ebd7e3000236cd409d19cf4f56ac0224a919";
+        let expected = "e49ad6ea962a9dafe4c36b30eee07159b8690a967399c627368519c4963afdfb";
 
         // Sanity: root_pub of 00..06 is the odd-y key in the vector.
         // (Nostr Keys store the x-only even-y pubkey, so compare via secp compressed parity instead.)
@@ -299,8 +343,8 @@ mod tests {
     // private key as the ECDH secret.
     #[test]
     fn vector_blinded_facilitated() {
-        const P_FAC_PUB: &str = "55b5f44d71211d5505f3a66115aad173e24a68f5510866269ed52cde4d398803";
-        const PF_PUB: &str = "31b1370ab9902ae59ee73d76bc5c7fb451d7bd52ec7c111a48f42d9ed2389a06";
+        const P_FAC_PUB: &str = "96c8749a7596f1050e8245d81dee67d0c436ff10f46877abd07897a872043469";
+        const PF_PUB: &str = "0b99f9978ac657619d0025fb8b5e4a6fdde3ecccc2b27d474e3f79e2ef2b0392";
         const FAC_CTX: &str = "nip-chat:v2:facilitated-pseudonym:abc-123";
 
         // Sanity: P_fac = R_fac(3333) blinded toward O_pub == the vector's stated P_fac_pub input.
@@ -321,6 +365,27 @@ mod tests {
             derive_blinded_pub_for_peer(&p_fac.secret_key().to_secret_hex(), FAC_CTX, &r_f_pub)
                 .unwrap();
         assert_eq!(verify, PF_PUB);
+    }
+
+    // Cross-check of the base-bound blinded primitive with a different holder root: the NIP-MDM
+    // masked key M = S(root 1111) blinded toward R(pub of 2222), ctx "nip-mdm:v1:peer". Verifies
+    // both the holder op and the recipient's verifier op (base = S_pub) land on the same M.
+    #[test]
+    fn vector_blinded_mdm_peer() {
+        const MDM_CTX: &str = "nip-mdm:v1:peer";
+        const M_PUB: &str = "e4fa4013c03848c3bdf8452c170d38885f4d0d25efa1c3da756b43768c444baf";
+
+        // Holder: S (root 1111) blinds toward R_pub (pub of 2222 = R_MEMBER_PUB).
+        let m = derive_blinded_keys(&"11".repeat(32), MDM_CTX, R_MEMBER_PUB).unwrap();
+        assert_eq!(m.public_key().to_hex(), M_PUB);
+
+        // Recipient verify: base = S_pub (the key being blinded = holder's root pub), ECDH secret =
+        // r_priv (2222). ECDH symmetry ⇒ identical M, no private key obtained.
+        let s_pub = Keys::new(SecretKey::from_hex(&"11".repeat(32)).unwrap())
+            .public_key()
+            .to_hex();
+        let verify = derive_blinded_pub_for_peer(&"22".repeat(32), MDM_CTX, &s_pub).unwrap();
+        assert_eq!(verify, M_PUB);
     }
 
     #[test]

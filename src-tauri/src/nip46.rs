@@ -2535,7 +2535,7 @@ mod skd_rpc_tests {
         .unwrap();
         assert_eq!(
             got,
-            "059510a63a230047ffe6e978ade8ad31e4bfb59d414331d5b17b6d50038c51a1"
+            "a02fa7340b804d26d55a6f4ae2efb4ad24c6d7a9c2568b7f30acf15a49adbca0"
         );
     }
 
@@ -2556,7 +2556,7 @@ mod skd_rpc_tests {
         .unwrap();
         assert_eq!(
             got,
-            "31b1370ab9902ae59ee73d76bc5c7fb451d7bd52ec7c111a48f42d9ed2389a06"
+            "0b99f9978ac657619d0025fb8b5e4a6fdde3ecccc2b27d474e3f79e2ef2b0392"
         );
     }
 }
