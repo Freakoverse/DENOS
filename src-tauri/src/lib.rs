@@ -5,6 +5,8 @@ mod skd;
 mod state;
 mod updater;
 mod upv2;
+#[cfg(windows)]
+mod wincred;
 
 use state::AppState;
 use tauri::Manager;
@@ -94,6 +96,13 @@ fn place_notif(window: tauri::WebviewWindow, width: f64, height: f64) {
 pub fn run() {
     tracing_subscriber::fmt::init();
     info!("DENOS starting...");
+
+    // On Windows, drain any secrets the keyring crate wrote to the small, shared, roaming
+    // credential pool (CRED_PERSIST_ENTERPRISE) into the roomy local-machine pool, so writes keep
+    // working once that roaming pool is full. Best-effort; reads work regardless of pool. Runs
+    // before state load so the subsequent reads/writes all land on local storage.
+    #[cfg(windows)]
+    wincred::migrate_all_to_local();
 
     let app_state = AppState::new();
     let profiles_count = app_state.profiles.lock().unwrap().len();

@@ -403,7 +403,7 @@ pub struct AppState {
     pub upload_cancel: Arc<AtomicBool>,
 }
 
-const SERVICE_NAME: &str = "denos-signer";
+pub(crate) const SERVICE_NAME: &str = "denos-signer";
 
 // --- Global keys (not profile-scoped) ---
 const PROFILES_INDEX_KEY: &str = "denos-profiles";
@@ -1023,11 +1023,21 @@ fn split_by_utf16(s: &str, max: usize) -> Vec<String> {
     out
 }
 
+// On Windows the low-level entry read/write/delete go through the Win32 Credential API directly
+// (see `wincred.rs`) to use the local-machine pool instead of the keyring crate's roaming pool;
+// macOS and Linux keep using the keyring crate. The chunking/manifest logic below is unchanged.
 fn keyring_set_raw(key: &str, value: &str) -> Result<(), String> {
-    let entry = keyring::Entry::new(SERVICE_NAME, key)
-        .map_err(|e| format!("Keyring entry error: {}", e))?;
-    entry.set_password(value)
-        .map_err(|e| format!("Keyring store error [key='{}']: {}", key, e))
+    #[cfg(windows)]
+    {
+        crate::wincred::set_raw(key, value)
+    }
+    #[cfg(not(windows))]
+    {
+        let entry = keyring::Entry::new(SERVICE_NAME, key)
+            .map_err(|e| format!("Keyring entry error: {}", e))?;
+        entry.set_password(value)
+            .map_err(|e| format!("Keyring store error [key='{}']: {}", key, e))
+    }
 }
 
 /// Delete any chunk entries left over from a previous (chunked) value at `key`. Best-effort.
@@ -1057,25 +1067,35 @@ pub fn save_to_keyring<T: Serialize>(key: &str, value: &T) -> Result<(), String>
 }
 
 pub fn get_raw_from_keyring(key: &str) -> Result<String, String> {
-    let entry = keyring::Entry::new(SERVICE_NAME, key)
-        .map_err(|e| format!("Keyring entry error: {}", e))?;
-    entry.get_password()
-        .map_err(|e| format!("Keyring retrieve error: {}", e))
+    #[cfg(windows)]
+    {
+        crate::wincred::get_raw(key)
+    }
+    #[cfg(not(windows))]
+    {
+        let entry = keyring::Entry::new(SERVICE_NAME, key)
+            .map_err(|e| format!("Keyring entry error: {}", e))?;
+        entry.get_password()
+            .map_err(|e| format!("Keyring retrieve error: {}", e))
+    }
 }
 
 pub fn save_raw_to_keyring(key: &str, value: &str) -> Result<(), String> {
-    let entry = keyring::Entry::new(SERVICE_NAME, key)
-        .map_err(|e| format!("Keyring entry error: {}", e))?;
-    entry.set_password(value)
-        .map_err(|e| format!("Keyring store error: {}", e))?;
-    Ok(())
+    keyring_set_raw(key, value)
 }
 
 pub fn delete_raw_from_keyring(key: &str) -> Result<(), String> {
-    let entry = keyring::Entry::new(SERVICE_NAME, key)
-        .map_err(|e| format!("Keyring entry error: {}", e))?;
-    entry.delete_credential()
-        .map_err(|e| format!("Keyring delete error: {}", e))
+    #[cfg(windows)]
+    {
+        crate::wincred::delete_raw(key)
+    }
+    #[cfg(not(windows))]
+    {
+        let entry = keyring::Entry::new(SERVICE_NAME, key)
+            .map_err(|e| format!("Keyring entry error: {}", e))?;
+        entry.delete_credential()
+            .map_err(|e| format!("Keyring delete error: {}", e))
+    }
 }
 
 fn load_from_keyring<T: for<'de> Deserialize<'de>>(key: &str) -> Option<T> {
