@@ -11,6 +11,13 @@ pub struct ProfileInfo {
     pub id: String,
     pub name: String,
     pub pin_hash: String,
+    /// Base64 Argon2id salt used to derive this profile's at-rest encryption KEK from its PIN.
+    /// Empty on profiles created before encryption-at-rest; populated on first unlock. Not secret.
+    #[serde(default)]
+    pub kek_salt: String,
+    /// Argon2id cost parameters for the KEK derivation (per-profile so they can evolve).
+    #[serde(default)]
+    pub kdf: crate::vault::KdfParams,
 }
 
 /// Keypair metadata (public info only — private keys stay in OS keychain)
@@ -377,6 +384,9 @@ pub struct AppState {
     pub connected_relays: Mutex<HashSet<String>>,
     // PIN lock — now per-profile (kept in profiles index)
     pub pin_hash: Mutex<Option<String>>,
+    /// The active profile's at-rest encryption key, derived from its PIN at unlock and held only
+    /// while unlocked. Secrets (sk/seed) are sealed/opened with this. Zeroized on drop.
+    pub kek: Mutex<Option<crate::vault::Kek>>,
     pub lock_timeout_minutes: Mutex<u32>,
     // NIP-46 global toggle
     pub nip46_enabled: Mutex<bool>,
@@ -459,6 +469,8 @@ impl AppState {
                     id: profile_id.clone(),
                     name: "PIN Account 1".to_string(),
                     pin_hash: legacy_pin_hash,
+                    kek_salt: String::new(),
+                    kdf: crate::vault::KdfParams::default(),
                 };
 
                 // Migrate all key constants to profile-scoped versions
@@ -599,6 +611,7 @@ impl AppState {
             pending_reconnect: Mutex::new(None),
             connected_relays: Mutex::new(HashSet::new()),
             pin_hash: Mutex::new(None),
+            kek: Mutex::new(None),
             lock_timeout_minutes: Mutex::new(5),
             nip46_enabled: Mutex::new(true),
             signing_history: Mutex::new(Vec::new()),

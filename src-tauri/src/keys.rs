@@ -983,6 +983,45 @@ fn hash_pin(pin: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// Plaintext sealed under the KEK as a verification probe (its decryption proves the PIN).
+const KEK_PROBE_PLAINTEXT: &str = "denos-kek-v1";
+
+/// Derive this profile's at-rest encryption KEK from its PIN and install it in memory
+/// ([`AppState::kek`]). Generates the per-profile Argon2id salt on first use, and establishes or
+/// repairs the `kek-check` probe. Self-healing: the caller has already authenticated the PIN (via
+/// `pin_hash`), so a probe that no longer matches — e.g. after a PIN change, before per-secret
+/// re-wrapping exists — is rewritten with the current key rather than treated as an error. Must be
+/// called with a PIN already known correct.
+fn establish_kek(state: &State<'_, AppState>, profile_id: &str, pin: &str) -> Result<(), String> {
+    let (salt, params, created) = {
+        let mut profiles = state.profiles.lock().unwrap();
+        let p = profiles.iter_mut().find(|p| p.id == profile_id).ok_or("Profile not found")?;
+        let created = p.kek_salt.is_empty();
+        if created {
+            p.kek_salt = crate::vault::new_salt_b64();
+        }
+        (p.kek_salt.clone(), p.kdf, created)
+    };
+    if created {
+        state.save_profiles()?;
+    }
+
+    let kek = crate::vault::derive_kek(pin, &salt, &params)?;
+
+    let check_key = format!("p-{}/kek-check", profile_id);
+    let needs_write = match get_raw_from_keyring(&check_key) {
+        Ok(existing) => crate::vault::open(&kek, &existing, &check_key).is_err(),
+        Err(_) => true,
+    };
+    if needs_write {
+        let probe = crate::vault::seal(&kek, KEK_PROBE_PLAINTEXT, &check_key)?;
+        save_raw_to_keyring(&check_key, &probe)?;
+    }
+
+    *state.kek.lock().unwrap() = Some(kek);
+    Ok(())
+}
+
 /// Set PIN for the currently active profile
 #[tauri::command]
 pub fn set_pin(
@@ -1158,6 +1197,8 @@ pub fn create_profile(
         id: profile_id.clone(),
         name: name.clone(),
         pin_hash: hashed.clone(),
+        kek_salt: String::new(),
+        kdf: crate::vault::KdfParams::default(),
     };
 
     {
@@ -1168,6 +1209,10 @@ pub fn create_profile(
 
     // Load (activate) the new profile
     state.load_profile(&profile_id);
+    // Establish the at-rest encryption key for the new profile (non-fatal in this phase).
+    if let Err(e) = establish_kek(&state, &profile_id, &pin) {
+        tracing::warn!("KEK setup failed for new profile {}: {}", &profile_id[..8], e);
+    }
 
     info!("Created profile '{}' ({})", &name, &profile_id[..8]);
     app.emit("app-state", state.to_app_payload()).ok();
@@ -1200,6 +1245,11 @@ pub fn unlock_profile(
     if valid {
         // Load this profile's data
         state.load_profile(&profile_id);
+        // Derive the at-rest encryption key for this profile (non-fatal: secrets still read as
+        // plaintext until migrated, so a KEK-setup hiccup must never block a correct-PIN login).
+        if let Err(e) = establish_kek(&state, &profile_id, &pin) {
+            tracing::warn!("KEK setup failed for profile {}: {}", &profile_id[..8], e);
+        }
         info!("Unlocked profile {}", &profile_id[..8]);
         app.emit("app-state", state.to_app_payload()).ok();
     }
