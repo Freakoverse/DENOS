@@ -769,10 +769,6 @@ impl AppState {
             .expect("No active profile — load_profile() must be called first")
     }
 
-    pub fn keypair_count(&self) -> usize {
-        self.keypairs.lock().unwrap().len()
-    }
-
     pub fn to_app_payload(&self) -> AppStatePayload {
         let profiles = self.profiles.lock().unwrap();
         AppStatePayload {

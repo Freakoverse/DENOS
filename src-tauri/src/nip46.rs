@@ -2254,11 +2254,6 @@ pub(crate) fn skd_is_composed_verify(method: &str) -> bool {
     )
 }
 
-/// Derive the sub-key `Keys` from the signer's root key + context (+ optional peer).
-fn skd_subkey_keys(signer_keys: &Keys, context: &str, peer: Option<&str>) -> Result<Keys, String> {
-    crate::skd::derive_subkey_keys(&signer_keys.secret_key().to_secret_hex(), context, peer)
-}
-
 fn skd_ok(id: &str, result: String) -> Nip46Response {
     Nip46Response { id: id.to_string(), result: Some(result), error: None }
 }

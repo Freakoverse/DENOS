@@ -214,7 +214,6 @@ fn is_newer_version(current: &str, new: &str) -> bool {
 #[tauri::command]
 pub async fn download_and_install_update(
     app: tauri::AppHandle,
-    state: State<'_, AppState>,
     hash: String,
     ext: String,
     blossom_servers: Vec<String>,
