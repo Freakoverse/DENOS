@@ -1097,6 +1097,39 @@ pub fn save_raw_to_keyring(key: &str, value: &str) -> Result<(), String> {
     keyring_set_raw(key, value)
 }
 
+// --- Secret (encrypted-at-rest) helpers ---
+// Account secrets (private keys, seed words) go through these instead of save/get_raw. When the
+// active profile is unlocked (its KEK is loaded) they are sealed/opened as `denc1:` envelopes bound
+// to their storage slot (AAD = the keyring key). Without a KEK loaded they fall back to plaintext,
+// and a plaintext value read back is returned as-is — so existing installs keep working until their
+// secrets are migrated (re-encrypted) at unlock (see `migrate_profile_secrets`).
+
+/// Save a SECRET, encrypting it under the active profile's KEK when one is loaded. `key` is the full
+/// profile-scoped keyring key (also the GCM AAD).
+pub fn save_secret(state: &AppState, key: &str, plaintext: &str) -> Result<(), String> {
+    let guard = state.kek.lock().unwrap();
+    match guard.as_ref() {
+        Some(kek) => {
+            let env = crate::vault::seal(kek, plaintext, key)?;
+            save_raw_to_keyring(key, &env)
+        }
+        None => save_raw_to_keyring(key, plaintext),
+    }
+}
+
+/// Load a SECRET, transparently decrypting a `denc1:` envelope (needs the KEK) or returning a legacy
+/// plaintext value unchanged.
+pub fn load_secret(state: &AppState, key: &str) -> Result<String, String> {
+    let raw = get_raw_from_keyring(key)?;
+    if crate::vault::is_envelope(&raw) {
+        let guard = state.kek.lock().unwrap();
+        let kek = guard.as_ref().ok_or("Signer is locked — unlock to access this key")?;
+        crate::vault::open(kek, &raw, key)
+    } else {
+        Ok(raw)
+    }
+}
+
 pub fn delete_raw_from_keyring(key: &str) -> Result<(), String> {
     #[cfg(windows)]
     {

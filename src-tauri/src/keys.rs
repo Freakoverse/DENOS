@@ -50,7 +50,7 @@ pub fn generate_keypair(
         .map_err(|e| format!("Bech32 encoding failed: {}", e))?;
 
     // Store secret key in OS keychain (profile-scoped)
-    save_raw_to_keyring(&ppk(&state, &format!("sk-{}", pubkey_hex)), &sk_hex)?;
+    crate::state::save_secret(&state, &ppk(&state, &format!("sk-{}", pubkey_hex)), &sk_hex)?;
 
     let kp = KeypairInfo {
         pubkey: pubkey_hex.clone(),
@@ -106,7 +106,7 @@ pub fn import_nsec(
         }
     }
 
-    save_raw_to_keyring(&ppk(&state, &format!("sk-{}", pubkey_hex)), &sk_hex)?;
+    crate::state::save_secret(&state, &ppk(&state, &format!("sk-{}", pubkey_hex)), &sk_hex)?;
 
     let kp = KeypairInfo {
         pubkey: pubkey_hex.clone(),
@@ -168,7 +168,7 @@ pub fn import_seed(
         }
     }
 
-    save_raw_to_keyring(&ppk(&state, &format!("sk-{}", pubkey_hex)), &sk_hex)?;
+    crate::state::save_secret(&state, &ppk(&state, &format!("sk-{}", pubkey_hex)), &sk_hex)?;
 
     let kp = KeypairInfo {
         pubkey: pubkey_hex.clone(),
@@ -354,7 +354,7 @@ pub fn export_nsec(
         }
     }
 
-    let sk_hex = get_raw_from_keyring(&ppk(&state, &format!("sk-{}", pubkey)))?;
+    let sk_hex = crate::state::load_secret(&state, &ppk(&state, &format!("sk-{}", pubkey)))?;
     let secret_key = SecretKey::from_hex(&sk_hex)
         .map_err(|e| format!("Invalid stored key: {}", e))?;
     let nsec = secret_key.to_bech32()
@@ -375,7 +375,7 @@ pub fn export_private_key_hex(
         }
     }
 
-    get_raw_from_keyring(&ppk(&state, &format!("sk-{}", pubkey)))
+    crate::state::load_secret(&state, &ppk(&state, &format!("sk-{}", pubkey)))
 }
 
 #[tauri::command]
@@ -389,7 +389,7 @@ pub fn get_active_keys(state: &AppState) -> Result<Keys, String> {
         .clone()
         .ok_or("No active keypair")?;
 
-    let sk_hex = get_raw_from_keyring(&ppk(state, &format!("sk-{}", pubkey)))?;
+    let sk_hex = crate::state::load_secret(state, &ppk(state, &format!("sk-{}", pubkey)))?;
     let secret_key = SecretKey::from_hex(&sk_hex)
         .map_err(|e| format!("Invalid stored key: {}", e))?;
 
@@ -448,7 +448,7 @@ pub fn generate_seed(
     let seed_name = name.unwrap_or_else(|| "My Seed".to_string());
 
     // Store mnemonic in OS keyring
-    save_raw_to_keyring(&ppk(&state, &format!("seed-{}", seed_id)), &mnemonic_str)?;
+    crate::state::save_secret(&state, &ppk(&state, &format!("seed-{}", seed_id)), &mnemonic_str)?;
 
     // Derive first keypair (account index 0)
     let keys = Keys::from_mnemonic_with_account(mnemonic_str.as_str(), None::<&str>, Some(0))
@@ -462,7 +462,7 @@ pub fn generate_seed(
         .map_err(|e| format!("Bech32 error: {}", e))?;
 
     // Store secret key
-    save_raw_to_keyring(&ppk(&state, &format!("sk-{}", pubkey_hex)), &sk_hex)?;
+    crate::state::save_secret(&state, &ppk(&state, &format!("sk-{}", pubkey_hex)), &sk_hex)?;
 
     // Create keypair info
     let kp = KeypairInfo {
@@ -561,8 +561,8 @@ pub fn import_seed_phrase(
     let seed_name = name.unwrap_or_else(|| "Imported Seed".to_string());
 
     // Store mnemonic and secret key
-    save_raw_to_keyring(&ppk(&state, &format!("seed-{}", seed_id)), mnemonic.trim())?;
-    save_raw_to_keyring(&ppk(&state, &format!("sk-{}", pubkey_hex)), &sk_hex)?;
+    crate::state::save_secret(&state, &ppk(&state, &format!("seed-{}", seed_id)), mnemonic.trim())?;
+    crate::state::save_secret(&state, &ppk(&state, &format!("sk-{}", pubkey_hex)), &sk_hex)?;
 
     let kp = KeypairInfo {
         pubkey: pubkey_hex.clone(),
@@ -623,7 +623,7 @@ pub fn derive_next_keypair(
     };
 
     // Retrieve mnemonic from keyring
-    let mnemonic = get_raw_from_keyring(&ppk(&state, &format!("seed-{}", seed_id)))?;
+    let mnemonic = crate::state::load_secret(&state, &ppk(&state, &format!("seed-{}", seed_id)))?;
 
     // Find next account index
     let next_index = {
@@ -656,7 +656,7 @@ pub fn derive_next_keypair(
         }
     }
 
-    save_raw_to_keyring(&ppk(&state, &format!("sk-{}", pubkey_hex)), &sk_hex)?;
+    crate::state::save_secret(&state, &ppk(&state, &format!("sk-{}", pubkey_hex)), &sk_hex)?;
 
     let kp = KeypairInfo {
         pubkey: pubkey_hex.clone(),
@@ -704,7 +704,7 @@ pub fn derive_keypair_at_index(
     };
 
     // Retrieve mnemonic from keyring
-    let mnemonic = get_raw_from_keyring(&ppk(&state, &format!("seed-{}", seed_id)))?;
+    let mnemonic = crate::state::load_secret(&state, &ppk(&state, &format!("seed-{}", seed_id)))?;
 
     // Verify no keypair already exists at this index
     {
@@ -733,7 +733,7 @@ pub fn derive_keypair_at_index(
         }
     }
 
-    save_raw_to_keyring(&ppk(&state, &format!("sk-{}", pubkey_hex)), &sk_hex)?;
+    crate::state::save_secret(&state, &ppk(&state, &format!("sk-{}", pubkey_hex)), &sk_hex)?;
 
     let kp = KeypairInfo {
         pubkey: pubkey_hex.clone(),
@@ -923,7 +923,7 @@ pub fn export_seed_words(
         }
     }
 
-    get_raw_from_keyring(&ppk(&state, &format!("seed-{}", seed_id)))
+    crate::state::load_secret(&state, &ppk(&state, &format!("seed-{}", seed_id)))
 }
 
 /// Save eCash state (proofs, mints, history, pending) for a given pubkey.
@@ -983,17 +983,19 @@ fn hash_pin(pin: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-/// Plaintext sealed under the KEK as a verification probe (its decryption proves the PIN).
-const KEK_PROBE_PLAINTEXT: &str = "denos-kek-v1";
+/// The keyring key holding a profile's wrapped data key.
+fn dek_key(profile_id: &str) -> String {
+    format!("p-{}/dek", profile_id)
+}
 
-/// Derive this profile's at-rest encryption KEK from its PIN and install it in memory
-/// ([`AppState::kek`]). Generates the per-profile Argon2id salt on first use, and establishes or
-/// repairs the `kek-check` probe. Self-healing: the caller has already authenticated the PIN (via
-/// `pin_hash`), so a probe that no longer matches — e.g. after a PIN change, before per-secret
-/// re-wrapping exists — is rewritten with the current key rather than treated as an error. Must be
-/// called with a PIN already known correct.
-fn establish_kek(state: &State<'_, AppState>, profile_id: &str, pin: &str) -> Result<(), String> {
-    let (salt, params, created) = {
+/// Derive this profile's PIN-KEK (Argon2id), then unwrap — or on first use mint and store wrapped —
+/// the random **data key (DEK)** that actually encrypts its secrets, installing that data key in
+/// memory ([`AppState::kek`]). The wrapped DEK doubles as the PIN verifier: a wrong PIN derives a
+/// wrong KEK and the unwrap fails. A PIN change only re-wraps the DEK (see [`rewrap_dek_under_pin`]),
+/// never the secrets. Generates the per-profile salt on first use. Must be called with a PIN already
+/// known correct (the first-use mint path has nothing to verify against).
+fn establish_dek(state: &State<'_, AppState>, profile_id: &str, pin: &str) -> Result<(), String> {
+    let (salt, params, created_salt) = {
         let mut profiles = state.profiles.lock().unwrap();
         let p = profiles.iter_mut().find(|p| p.id == profile_id).ok_or("Profile not found")?;
         let created = p.kek_salt.is_empty();
@@ -1002,24 +1004,142 @@ fn establish_kek(state: &State<'_, AppState>, profile_id: &str, pin: &str) -> Re
         }
         (p.kek_salt.clone(), p.kdf, created)
     };
-    if created {
+    if created_salt {
         state.save_profiles()?;
     }
 
     let kek = crate::vault::derive_kek(pin, &salt, &params)?;
-
-    let check_key = format!("p-{}/kek-check", profile_id);
-    let needs_write = match get_raw_from_keyring(&check_key) {
-        Ok(existing) => crate::vault::open(&kek, &existing, &check_key).is_err(),
-        Err(_) => true,
+    let dk = dek_key(profile_id);
+    let dek = match get_raw_from_keyring(&dk) {
+        Ok(wrapped) => crate::vault::unwrap_key(&kek, &wrapped, &dk)?,
+        Err(_) => {
+            // First use: mint a random data key and store it wrapped under the PIN-KEK.
+            let dek = crate::vault::new_key();
+            let wrapped = crate::vault::wrap_key(&kek, &dek, &dk)?;
+            save_raw_to_keyring(&dk, &wrapped)?;
+            dek
+        }
     };
-    if needs_write {
-        let probe = crate::vault::seal(&kek, KEK_PROBE_PLAINTEXT, &check_key)?;
-        save_raw_to_keyring(&check_key, &probe)?;
+    *state.kek.lock().unwrap() = Some(dek);
+    Ok(())
+}
+
+/// Re-wrap the active profile's in-memory data key under a new PIN (fresh salt). The encrypted
+/// secrets are untouched — only the small wrapped-DEK blob and the salt change — so a PIN change is
+/// atomic and can never strand a key. The profile must be unlocked (DEK in memory); a profile that
+/// has never been encrypted is bootstrapped with the new PIN and its plaintext secrets migrated.
+fn rewrap_dek_under_pin(state: &State<'_, AppState>, profile_id: &str, new_pin: &str) -> Result<(), String> {
+    if state.kek.lock().unwrap().is_none() {
+        // No data key loaded. Only safe when the profile has never been encrypted; otherwise refuse
+        // rather than mint a new DEK that would orphan the existing encrypted secrets.
+        if get_raw_from_keyring(&dek_key(profile_id)).is_ok() {
+            return Err("Unlock the profile before changing its PIN".to_string());
+        }
+        establish_dek(state, profile_id, new_pin)?;
+        migrate_profile_secrets(state);
+        return Ok(());
     }
 
-    *state.kek.lock().unwrap() = Some(kek);
+    let params = {
+        let profiles = state.profiles.lock().unwrap();
+        profiles.iter().find(|p| p.id == profile_id).map(|p| p.kdf).unwrap_or_default()
+    };
+    let new_salt = crate::vault::new_salt_b64();
+    let new_kek = crate::vault::derive_kek(new_pin, &new_salt, &params)?;
+    let dk = dek_key(profile_id);
+    {
+        let guard = state.kek.lock().unwrap();
+        let dek = guard.as_ref().ok_or("Profile is locked")?;
+        let wrapped = crate::vault::wrap_key(&new_kek, dek, &dk)?;
+        save_raw_to_keyring(&dk, &wrapped)?;
+    }
+    {
+        let mut profiles = state.profiles.lock().unwrap();
+        if let Some(p) = profiles.iter_mut().find(|p| p.id == profile_id) {
+            p.kek_salt = new_salt;
+        }
+    }
+    state.save_profiles()?;
+    // Encrypt any still-plaintext secrets under the data key too.
+    migrate_profile_secrets(state);
     Ok(())
+}
+
+/// Decrypt all of the active profile's secrets back to plaintext at rest and tear down its
+/// encryption (used by remove-PIN, which leaves no key to protect the DEK). Requires the DEK in
+/// memory. Best-effort per secret; clears the DEK, wrapped-DEK blob and salt at the end.
+fn decrypt_profile_and_disable(state: &State<'_, AppState>, profile_id: &str) -> Result<(), String> {
+    if state.kek.lock().unwrap().is_none() {
+        return Ok(()); // nothing encrypted
+    }
+    let mut secret_keys: Vec<String> = Vec::new();
+    {
+        let kps = state.keypairs.lock().unwrap();
+        for kp in kps.iter() {
+            secret_keys.push(ppk(state, &format!("sk-{}", kp.pubkey)));
+        }
+    }
+    {
+        let seeds = state.seeds.lock().unwrap();
+        for s in seeds.iter() {
+            secret_keys.push(ppk(state, &format!("seed-{}", s.id)));
+        }
+    }
+    for key in &secret_keys {
+        if let Ok(raw) = get_raw_from_keyring(key) {
+            if crate::vault::is_envelope(&raw) {
+                let plain = crate::state::load_secret(state, key)?; // decrypt with in-memory DEK
+                save_raw_to_keyring(key, &plain)?; // write back as plaintext
+            }
+        }
+    }
+    *state.kek.lock().unwrap() = None;
+    let _ = delete_raw_from_keyring(&dek_key(profile_id));
+    {
+        let mut profiles = state.profiles.lock().unwrap();
+        if let Some(p) = profiles.iter_mut().find(|p| p.id == profile_id) {
+            p.kek_salt = String::new();
+        }
+    }
+    state.save_profiles()?;
+    Ok(())
+}
+
+/// Re-encrypt any still-plaintext secrets of the just-unlocked profile under its now-loaded KEK.
+/// Idempotent (already-encrypted entries are skipped) and best-effort (a failure on one secret never
+/// blocks login — it stays plaintext and is retried next unlock). Call only after the KEK is set and
+/// `load_profile` has populated the in-memory keypair/seed lists.
+fn migrate_profile_secrets(state: &State<'_, AppState>) {
+    if state.kek.lock().unwrap().is_none() {
+        return; // KEK setup failed earlier — leave secrets as plaintext.
+    }
+    let mut secret_keys: Vec<String> = Vec::new();
+    {
+        let kps = state.keypairs.lock().unwrap();
+        for kp in kps.iter() {
+            secret_keys.push(ppk(state, &format!("sk-{}", kp.pubkey)));
+        }
+    }
+    {
+        let seeds = state.seeds.lock().unwrap();
+        for s in seeds.iter() {
+            secret_keys.push(ppk(state, &format!("seed-{}", s.id)));
+        }
+    }
+
+    let mut migrated = 0u32;
+    for key in secret_keys {
+        if let Ok(raw) = get_raw_from_keyring(&key) {
+            if !crate::vault::is_envelope(&raw) {
+                if crate::state::save_secret(state, &key, &raw).is_ok() {
+                    migrated += 1;
+                }
+            }
+        }
+    }
+    if migrated > 0 {
+        info!("Encrypted {} plaintext secret(s) at rest for the unlocked profile", migrated);
+    }
 }
 
 /// Set PIN for the currently active profile
@@ -1034,6 +1154,11 @@ pub fn set_pin(
     }
     let hashed = hash_pin(&pin);
     let profile_id = state.profile_id();
+
+    // Protect the profile's data key under this PIN (bootstraps encryption + migrates plaintext
+    // secrets if not set up yet; re-wraps the in-memory data key otherwise). Before updating
+    // pin_hash so a failure leaves the prior state intact.
+    rewrap_dek_under_pin(&state, &profile_id, &pin)?;
 
     // Update the profile's pin_hash in the profiles index
     {
@@ -1096,6 +1221,14 @@ pub fn change_pin(
     }
     let hashed = hash_pin(&new_pin);
 
+    // Re-wrap the profile's data key under the new PIN (atomic — the secrets are untouched). Load
+    // the data key with the current PIN first if it isn't already in memory. Done before updating
+    // pin_hash so a failure leaves the old PIN intact.
+    if state.kek.lock().unwrap().is_none() {
+        establish_dek(&state, &profile_id, &current_pin)?;
+    }
+    rewrap_dek_under_pin(&state, &profile_id, &new_pin)?;
+
     // Update profile
     {
         let mut profiles = state.profiles.lock().unwrap();
@@ -1128,6 +1261,13 @@ pub fn remove_pin(
             return Err("PIN is incorrect".to_string());
         }
     }
+
+    // Decrypt the profile's secrets back to plaintext and tear down encryption — with no PIN there
+    // is no key to protect the data key. Load the data key with the current PIN first if needed.
+    if state.kek.lock().unwrap().is_none() && get_raw_from_keyring(&dek_key(&profile_id)).is_ok() {
+        establish_dek(&state, &profile_id, &pin)?;
+    }
+    decrypt_profile_and_disable(&state, &profile_id)?;
 
     // Clear PIN from profile (NOTE: profiles should always have a PIN,
     // but we support clearing for edge cases)
@@ -1210,8 +1350,8 @@ pub fn create_profile(
     // Load (activate) the new profile
     state.load_profile(&profile_id);
     // Establish the at-rest encryption key for the new profile (non-fatal in this phase).
-    if let Err(e) = establish_kek(&state, &profile_id, &pin) {
-        tracing::warn!("KEK setup failed for new profile {}: {}", &profile_id[..8], e);
+    if let Err(e) = establish_dek(&state, &profile_id, &pin) {
+        tracing::warn!("Encryption setup failed for new profile {}: {}", &profile_id[..8], e);
     }
 
     info!("Created profile '{}' ({})", &name, &profile_id[..8]);
@@ -1247,9 +1387,11 @@ pub fn unlock_profile(
         state.load_profile(&profile_id);
         // Derive the at-rest encryption key for this profile (non-fatal: secrets still read as
         // plaintext until migrated, so a KEK-setup hiccup must never block a correct-PIN login).
-        if let Err(e) = establish_kek(&state, &profile_id, &pin) {
-            tracing::warn!("KEK setup failed for profile {}: {}", &profile_id[..8], e);
+        if let Err(e) = establish_dek(&state, &profile_id, &pin) {
+            tracing::warn!("Encryption setup failed for profile {}: {}", &profile_id[..8], e);
         }
+        // Encrypt any legacy plaintext secrets now that the data key is loaded.
+        migrate_profile_secrets(&state);
         info!("Unlocked profile {}", &profile_id[..8]);
         app.emit("app-state", state.to_app_payload()).ok();
     }
