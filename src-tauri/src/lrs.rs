@@ -758,6 +758,11 @@ fn handle_client_text(
             let _ = own_tx.send(text(json!(["OK", id, true, ""])));
             if is_new {
                 core.broadcast(&ev);
+            } else {
+                // Duplicate event id: acked but NOT re-broadcast. For a request-pipe this means a
+                // re-sent REQUEST is silently not re-delivered to the signer (→ the client waits out
+                // its timeout). Logged so we can tell this apart from a response-delivery loss.
+                warn!("[LRS] duplicate event {} — acked, NOT re-broadcast", id);
             }
         }
         Some("REQ") => {

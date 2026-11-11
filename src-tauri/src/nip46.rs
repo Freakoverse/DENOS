@@ -1734,7 +1734,7 @@ async fn handle_nip46_event(
     };
 
     let enc_label = if use_nip44 { "NIP-44" } else { "NIP-04" };
-    info!("NIP-46 request: {} from {} ({})", request.method, &sender_pubkey.to_hex()[..16], enc_label);
+    info!("NIP-46 request: {} ({}) from {} ({})", request.method, request.id, &sender_pubkey.to_hex()[..16], enc_label);
     let _ = app.emit("log-event", format!("[INFO] NIP-46 request: {} from {}... ({})",
         request.method, &sender_pubkey.to_hex()[..16], enc_label));
 
@@ -1897,7 +1897,9 @@ async fn handle_nip46_event(
     if is_safe_method || auto_connect || conn_policy == "auto_approve" || custom_rule.as_deref() == Some("approve") {
         // Auto-respond: safe method / connect handshake OR connection has auto-approve enabled
         let delivery = send_encrypted_response(envelope_keys, client, &sender_pubkey, &response_json, use_nip44).await;
-        let id_preview = if request.id.len() > 8 { &request.id[..8] } else { &request.id };
+        // Full request id (not truncated) so it can be matched 1:1 against the client's own
+        // per-request log when tracing a specific timeout.
+        let id_preview = request.id.as_str();
         let reason = if is_safe_method { "safe method" } else { "auto-approved" };
         match &delivery {
             Ok(()) => {
