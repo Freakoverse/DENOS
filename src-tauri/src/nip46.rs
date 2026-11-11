@@ -1830,7 +1830,9 @@ async fn handle_nip46_event(
             error: Some("Not connected — send a connect request first".to_string()),
         };
         if let Ok(j) = serde_json::to_string(&err) {
-            send_encrypted_response(envelope_keys, client, &sender_pubkey, &j, use_nip44).await;
+            if let Err(e) = send_encrypted_response(envelope_keys, client, &sender_pubkey, &j, use_nip44).await {
+                warn!("Not-connected error to {} NOT DELIVERED: {}", request.method, e);
+            }
         }
         return;
     };
@@ -1902,12 +1904,23 @@ async fn handle_nip46_event(
     let auto_connect = request.method == "connect" && (source != "lrs" || is_reconnect);
     if is_safe_method || auto_connect || conn_policy == "auto_approve" || custom_rule.as_deref() == Some("approve") {
         // Auto-respond: safe method / connect handshake OR connection has auto-approve enabled
-        send_encrypted_response(envelope_keys, client, &sender_pubkey, &response_json, use_nip44).await;
+        let delivery = send_encrypted_response(envelope_keys, client, &sender_pubkey, &response_json, use_nip44).await;
         let id_preview = if request.id.len() > 8 { &request.id[..8] } else { &request.id };
         let reason = if is_safe_method { "safe method" } else { "auto-approved" };
-        info!("Auto-responded to: {} ({}) via {} [{}]", request.method, id_preview, enc_label, reason);
-        let _ = app.emit("log-event", format!("[INFO] {} — {} ({})",
-            reason, request.method, id_preview));
+        match &delivery {
+            Ok(()) => {
+                info!("Auto-responded to: {} ({}) via {} [{}]", request.method, id_preview, enc_label, reason);
+                let _ = app.emit("log-event", format!("[INFO] {} — {} ({})",
+                    reason, request.method, id_preview));
+            }
+            Err(e) => {
+                // Delivery failed — do NOT log it as answered. This is the one case that otherwise
+                // looks identical to a drop on the client (no reply → ~20s timeout → circuit trips).
+                error!("Auto-response to {} ({}) NOT DELIVERED: {}", request.method, id_preview, e);
+                let _ = app.emit("log-event", format!("[ERROR] response to {} ({}) not delivered: {}",
+                    request.method, id_preview, e));
+            }
+        }
 
         // Record in signing history
         let raw_json = if request.method == "sign_event" && !request.params.is_empty() {
@@ -1931,7 +1944,9 @@ async fn handle_nip46_event(
             error: Some("Request auto-rejected by signer policy".to_string()),
         };
         if let Ok(rej_json) = serde_json::to_string(&rejection) {
-            send_encrypted_response(envelope_keys, client, &sender_pubkey, &rej_json, use_nip44).await;
+            if let Err(e) = send_encrypted_response(envelope_keys, client, &sender_pubkey, &rej_json, use_nip44).await {
+                warn!("Auto-reject response to {} NOT DELIVERED: {}", request.method, e);
+            }
         }
         info!("Auto-rejected: {} from '{}' [policy]", request.method, app_name);
         let _ = app.emit("log-event", format!("[REJECT] auto-rejected {} from '{}'",
@@ -1999,38 +2014,42 @@ async fn handle_nip46_event(
     emit_signer_state(app, &state);
 }
 
-/// Helper: encrypt and send a NIP-46 response
+/// Encrypt and publish a NIP-46 response. Returns `Err` if the response could NOT be delivered
+/// (encrypt failed, or the relay publish failed even after a retry) — callers MUST surface that
+/// instead of logging success, because a swallowed failure looks to the client exactly like a
+/// dropped request: no reply, then a ~20s timeout. The publish is retried once, since a transient
+/// relay hiccup under load is the common failure and a lost response is costly (it trips the
+/// client's decrypt circuit breaker).
 async fn send_encrypted_response(
     signer_keys: &Keys,
     client: &Client,
     recipient: &PublicKey,
     response_json: &str,
     use_nip44: bool,
-) {
+) -> Result<(), String> {
     let encrypted = if use_nip44 {
-        match nip44::encrypt(signer_keys.secret_key(), recipient, response_json, nip44::Version::default()) {
-            Ok(e) => e,
-            Err(err) => {
-                error!("NIP-44 encrypt failed: {}", err);
-                return;
-            }
-        }
+        nip44::encrypt(signer_keys.secret_key(), recipient, response_json, nip44::Version::default())
+            .map_err(|err| format!("NIP-44 encrypt failed: {}", err))?
     } else {
-        match nip04::encrypt(signer_keys.secret_key(), recipient, response_json) {
-            Ok(e) => e,
-            Err(err) => {
-                error!("NIP-04 encrypt failed: {}", err);
-                return;
-            }
-        }
+        nip04::encrypt(signer_keys.secret_key(), recipient, response_json)
+            .map_err(|err| format!("NIP-04 encrypt failed: {}", err))?
     };
 
-    let response_event = EventBuilder::new(Kind::Custom(24133), encrypted)
-        .tag(Tag::public_key(*recipient));
-
-    if let Err(e) = client.send_event_builder(response_event).await {
-        error!("Failed to publish NIP-46 response: {}", e);
+    let mut last_err = String::new();
+    for attempt in 1..=2 {
+        let response_event = EventBuilder::new(Kind::Custom(24133), encrypted.clone())
+            .tag(Tag::public_key(*recipient));
+        match client.send_event_builder(response_event).await {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                last_err = format!("publish failed: {}", e);
+                if attempt == 1 {
+                    warn!("NIP-46 response publish attempt {} failed, retrying: {}", attempt, e);
+                }
+            }
+        }
     }
+    Err(last_err)
 }
 
 pub(crate) fn process_nip46_request(signer_keys: &Keys, request: &Nip46Request) -> Nip46Response {
