@@ -695,6 +695,7 @@ async fn relay_session(
     let (mut sink, mut stream) = ws.split();
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Message>();
     core.register(conn_id, out_tx.clone());
+    info!("[LRS] conn {} opened{}", conn_id, origin.as_deref().map(|o| format!(" (origin {})", o)).unwrap_or_default());
 
     loop {
         tokio::select! {
@@ -705,7 +706,24 @@ async fn relay_session(
             outbound = out_rx.recv() => {
                 match outbound {
                     Some(msg) => {
+                        // Diagnostic: confirm ACTUAL ws transmission of a NIP-46 response (kind
+                        // 24133) to THIS connection, with its event id. Distinguishes "relay sent it
+                        // on the live conn" from "enqueued to a stale conn" / "never sent".
+                        let resp_id = match &msg {
+                            Message::Text(t) if t.contains("\"kind\":24133") => {
+                                serde_json::from_str::<Value>(t).ok().and_then(|v| {
+                                    v.get(2)
+                                        .and_then(|e| e.get("id"))
+                                        .and_then(|i| i.as_str())
+                                        .map(|s| s[..s.len().min(12)].to_string())
+                                })
+                            }
+                            _ => None,
+                        };
                         if sink.send(msg).await.is_err() { break; }
+                        if let Some(id) = resp_id {
+                            info!("[LRS] conn {} -> ws: delivered kind24133 {}", conn_id, id);
+                        }
                     }
                     None => break,
                 }
@@ -723,6 +741,7 @@ async fn relay_session(
     }
 
     core.unregister(conn_id);
+    info!("[LRS] conn {} closed", conn_id);
 }
 
 /// Handle one NIP-01 client frame. Responses to the requesting client go through its own channel
