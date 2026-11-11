@@ -1610,6 +1610,16 @@ pub async fn run_lrs_signer_loop(
 
     let _ = app.emit("log-event", "[INFO] Local Relay Signer attached — listening on loopback");
 
+    // Per-client serialization: one async lock keyed by the requesting client's pubkey. A single
+    // client's requests run one-at-a-time in arrival order (so a `connect` commits before its
+    // dependent requests, and a client's own burst can't race on shared state), while DIFFERENT
+    // clients still run concurrently. This removes the intra-client race the spawn-per-request
+    // model otherwise exposes over zero-latency loopback. The map only ever holds one entry per
+    // distinct client key (a handful on a desktop), so it is not pruned.
+    let client_locks: std::sync::Arc<
+        std::sync::Mutex<HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+    > = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
+
     let mut notifications = client.notifications();
     loop {
         tokio::select! {
@@ -1629,13 +1639,25 @@ pub async fn run_lrs_signer_loop(
                             // handler ran and the channel would DROP the overflow
                             // (RecvError::Lagged) — silently losing decrypt/sign requests, which a
                             // client then sees as a timeout. Spawning lets recv() drain the channel
-                            // immediately and runs handlers concurrently. Envelope = transport key;
-                            // signing = account key; source = "lrs".
+                            // immediately; a per-client async lock (below) then serializes each
+                            // client's own requests without blocking this receiver or other
+                            // clients. Envelope = transport key; signing = account key; source = "lrs".
                             let app = app.clone();
                             let transport_keys = transport_keys.clone();
                             let account_keys = account_keys.clone();
                             let client = client.clone();
+                            // Get (or create) this client's lock before spawning; cheap and sync.
+                            let per_client = {
+                                let mut locks = client_locks.lock().unwrap();
+                                locks
+                                    .entry(event.pubkey.to_hex())
+                                    .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+                                    .clone()
+                            };
                             tokio::spawn(async move {
+                                // Serialize within this client; recv() has already returned, so the
+                                // notification channel keeps draining regardless of how long we wait.
+                                let _guard = per_client.lock().await;
                                 handle_nip46_event(
                                     &app,
                                     &transport_keys,
@@ -1796,8 +1818,20 @@ async fn handle_nip46_event(
         }
         (new_id, name)
     } else {
-        // No connection and not a connect request — silently ignore
-        warn!("Ignoring {} from unknown client {}", request.method, &sender_hex[..16]);
+        // No connection and not a `connect`. With per-client serialization a client's `connect`
+        // commits before its dependent requests, so reaching here means a genuinely unconnected
+        // client. Reply with an error instead of dropping silently: a silent drop makes the client
+        // wait out its full timeout (~20s) before it can react, whereas a fast error lets it
+        // reconnect/retry immediately.
+        warn!("Rejecting {} from unconnected client {}", request.method, &sender_hex[..16]);
+        let err = Nip46Response {
+            id: request.id.clone(),
+            result: None,
+            error: Some("Not connected — send a connect request first".to_string()),
+        };
+        if let Ok(j) = serde_json::to_string(&err) {
+            send_encrypted_response(envelope_keys, client, &sender_pubkey, &j, use_nip44).await;
+        }
         return;
     };
 
