@@ -1610,16 +1610,6 @@ pub async fn run_lrs_signer_loop(
 
     let _ = app.emit("log-event", "[INFO] Local Relay Signer attached — listening on loopback");
 
-    // Per-client serialization: one async lock keyed by the requesting client's pubkey. A single
-    // client's requests run one-at-a-time in arrival order (so a `connect` commits before its
-    // dependent requests, and a client's own burst can't race on shared state), while DIFFERENT
-    // clients still run concurrently. This removes the intra-client race the spawn-per-request
-    // model otherwise exposes over zero-latency loopback. The map only ever holds one entry per
-    // distinct client key (a handful on a desktop), so it is not pruned.
-    let client_locks: std::sync::Arc<
-        std::sync::Mutex<HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
-    > = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
-
     let mut notifications = client.notifications();
     loop {
         tokio::select! {
@@ -1631,33 +1621,27 @@ pub async fn run_lrs_signer_loop(
                 match notification {
                     Ok(RelayPoolNotification::Event { event, .. }) => {
                         if event.kind == Kind::Custom(24133) {
-                            // Handle each request on its own task. `notifications()` is a BOUNDED
-                            // tokio broadcast channel, and the loopback relay delivers a whole
-                            // burst at once (an app auto-login fires get_public_key + an SKD probe
-                            // + many nip44_decrypt instantly, with no network spacing). If we
-                            // awaited each handler inline, this receiver would fall behind while a
-                            // handler ran and the channel would DROP the overflow
-                            // (RecvError::Lagged) — silently losing decrypt/sign requests, which a
-                            // client then sees as a timeout. Spawning lets recv() drain the channel
-                            // immediately; a per-client async lock (below) then serializes each
-                            // client's own requests without blocking this receiver or other
-                            // clients. Envelope = transport key; signing = account key; source = "lrs".
+                            // Handle each request on its own task, CONCURRENTLY. `notifications()`
+                            // is a BOUNDED tokio broadcast channel and the loopback relay delivers a
+                            // whole burst at once (login fires get_public_key + an SKD probe + many
+                            // decrypts with no network spacing); awaiting a handler inline would let
+                            // this receiver fall behind and the channel would DROP the overflow
+                            // (RecvError::Lagged). Spawning lets recv() drain immediately.
+                            //
+                            // Handlers are NOT serialized per client. An earlier per-client async
+                            // lock caused head-of-line blocking: it was held across the response
+                            // publish (send_event_builder + retry), so one slow relay-OK round-trip
+                            // stalled every later request from that client, turning a single ~20s
+                            // publish stall into consecutive 20s non-replies that tripped the
+                            // client's circuit breaker. The race it guarded (a dependent request
+                            // beating its own `connect`) does not occur: clients await the `connect`
+                            // response before issuing dependent ops. Envelope = transport key;
+                            // signing = account key; source = "lrs".
                             let app = app.clone();
                             let transport_keys = transport_keys.clone();
                             let account_keys = account_keys.clone();
                             let client = client.clone();
-                            // Get (or create) this client's lock before spawning; cheap and sync.
-                            let per_client = {
-                                let mut locks = client_locks.lock().unwrap();
-                                locks
-                                    .entry(event.pubkey.to_hex())
-                                    .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
-                                    .clone()
-                            };
                             tokio::spawn(async move {
-                                // Serialize within this client; recv() has already returned, so the
-                                // notification channel keeps draining regardless of how long we wait.
-                                let _guard = per_client.lock().await;
                                 handle_nip46_event(
                                     &app,
                                     &transport_keys,
@@ -2022,12 +2006,19 @@ async fn handle_nip46_event(
     emit_signer_state(app, &state);
 }
 
-/// Encrypt and publish a NIP-46 response. Returns `Err` if the response could NOT be delivered
-/// (encrypt failed, or the relay publish failed even after a retry) — callers MUST surface that
-/// instead of logging success, because a swallowed failure looks to the client exactly like a
-/// dropped request: no reply, then a ~20s timeout. The publish is retried once, since a transient
-/// relay hiccup under load is the common failure and a lost response is costly (it trips the
-/// client's decrypt circuit breaker).
+/// Time to wait for the relay's `OK` on a published response before giving up on the ack. The
+/// loopback relay broadcasts the response to the subscribed client the instant it RECEIVES the
+/// event (see `lrs::handle_client_text`), independently of this `OK` round-trip — so a slow/absent
+/// `OK` under burst means "ack delayed", NOT "not delivered". Bounding the wait keeps a stalled ack
+/// from hanging the handler for the client's full ~20s request timeout.
+const PUBLISH_OK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Encrypt and publish a NIP-46 response. Returns `Err` only if the response could not be ENCRYPTED
+/// or the relay actively REFUSED the publish after a retry. A slow/absent `OK` (ack) is treated as
+/// delivered-unconfirmed (`Ok`), because the loopback relay has already broadcast the event to the
+/// client by then; hanging on the ack is what made one slow publish look like a dropped request
+/// (no reply → the client's ~20s timeout → decrypt circuit breaker). Callers surface a real `Err`
+/// instead of logging success.
 async fn send_encrypted_response(
     signer_keys: &Keys,
     client: &Client,
@@ -2047,13 +2038,24 @@ async fn send_encrypted_response(
     for attempt in 1..=2 {
         let response_event = EventBuilder::new(Kind::Custom(24133), encrypted.clone())
             .tag(Tag::public_key(*recipient));
-        match client.send_event_builder(response_event).await {
-            Ok(_) => return Ok(()),
-            Err(e) => {
+        match tokio::time::timeout(PUBLISH_OK_TIMEOUT, client.send_event_builder(response_event)).await {
+            Ok(Ok(_)) => return Ok(()),
+            Ok(Err(e)) => {
+                // The relay actively refused the publish — retry once (a transient hiccup is common).
                 last_err = format!("publish failed: {}", e);
                 if attempt == 1 {
                     warn!("NIP-46 response publish attempt {} failed, retrying: {}", attempt, e);
                 }
+            }
+            Err(_elapsed) => {
+                // Ack not received in time. The event was handed to the relay and broadcast to the
+                // client on receipt, so the response was (almost certainly) delivered — do NOT hang
+                // and do NOT re-send (a duplicate response event under load would only add noise).
+                warn!(
+                    "NIP-46 response ack not received within {}s (delivered via broadcast); not retrying",
+                    PUBLISH_OK_TIMEOUT.as_secs()
+                );
+                return Ok(());
             }
         }
     }
