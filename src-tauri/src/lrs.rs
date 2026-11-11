@@ -155,13 +155,38 @@ impl RelayCore {
     /// Deliver a new event to every connection whose any subscription matches it.
     fn broadcast(&self, ev: &Value) {
         let conns = self.conns.lock().unwrap();
+        let mut delivered = 0usize;
         for c in conns.values() {
             for (sub_id, filters) in &c.subs {
                 if filters.iter().any(|f| event_matches(f, ev)) {
                     let _ = c.tx.send(text(json!(["EVENT", sub_id, ev])));
+                    delivered += 1;
                     break; // one copy per connection, even if several subs match
                 }
             }
+        }
+        // Diagnostic: a NIP-46 event (kind 24133) that matched NO live subscription is an
+        // undeliverable reply — the recipient had no open subscription at this instant (a
+        // subscription close/reopen race), so it is only recoverable via buffer replay. This is the
+        // signature to look for when a client reports a request answered [ok] by the signer but
+        // never received.
+        if delivered == 0 && ev.get("kind").and_then(|v| v.as_u64()) == Some(24133) {
+            let id = ev.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+            let p = ev
+                .get("tags")
+                .and_then(|t| t.as_array())
+                .and_then(|tags| {
+                    tags.iter().find_map(|t| {
+                        let a = t.as_array()?;
+                        if a.first()?.as_str()? == "p" { a.get(1)?.as_str() } else { None }
+                    })
+                })
+                .unwrap_or("?");
+            warn!(
+                "[LRS] kind24133 event {} (->p={}) matched NO open subscription — not delivered live (buffered only)",
+                id,
+                &p.get(..p.len().min(16)).unwrap_or(p)
+            );
         }
     }
 }
@@ -780,10 +805,12 @@ fn handle_client_text(
                 let _ = own_tx.send(text(json!(["EVENT", sub_id, ev])));
             }
             let _ = own_tx.send(text(json!(["EOSE", sub_id])));
+            info!("[LRS] conn {} REQ sub {} ({} filter(s))", conn_id, sub_id, filters.len());
             core.set_sub(conn_id, sub_id, filters);
         }
         Some("CLOSE") => {
             if let Some(sub_id) = arr.get(1).and_then(|v| v.as_str()) {
+                info!("[LRS] conn {} CLOSE sub {}", conn_id, sub_id);
                 core.remove_sub(conn_id, sub_id);
             }
         }
