@@ -1839,6 +1839,14 @@ async fn handle_nip46_event(
 
     // Process the request — always as the ACCOUNT (signing) key, never the envelope key.
     let response = process_nip46_request(signing_keys, &request);
+    // Whether the operation itself SUCCEEDED or produced an error response. A nip04_decrypt that
+    // fails DENOS-side still sends a reply (an error), which would otherwise log identically to a
+    // success — so surface it: an "ok" here with the client still failing points downstream
+    // (relay→client delivery or the client), an "ERR" points at the decrypt itself.
+    let result_status = match &response.error {
+        Some(e) => format!("ERR: {}", e),
+        None => "ok".to_string(),
+    };
     let response_json = match serde_json::to_string(&response) {
         Ok(j) => j,
         Err(e) => {
@@ -1909,9 +1917,9 @@ async fn handle_nip46_event(
         let reason = if is_safe_method { "safe method" } else { "auto-approved" };
         match &delivery {
             Ok(()) => {
-                info!("Auto-responded to: {} ({}) via {} [{}]", request.method, id_preview, enc_label, reason);
-                let _ = app.emit("log-event", format!("[INFO] {} — {} ({})",
-                    reason, request.method, id_preview));
+                info!("Auto-responded to: {} ({}) [{}] via {} [{}]", request.method, id_preview, result_status, enc_label, reason);
+                let _ = app.emit("log-event", format!("[INFO] {} — {} ({}) [{}]",
+                    reason, request.method, id_preview, result_status));
             }
             Err(e) => {
                 // Delivery failed — do NOT log it as answered. This is the one case that otherwise
