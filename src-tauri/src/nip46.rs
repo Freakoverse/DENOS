@@ -1734,7 +1734,7 @@ async fn handle_nip46_event(
     };
 
     let enc_label = if use_nip44 { "NIP-44" } else { "NIP-04" };
-    info!("NIP-46 request: {} ({}) from {} ({})", request.method, request.id, &sender_pubkey.to_hex()[..16], enc_label);
+    info!("NIP-46 request: {} from {} ({})", request.method, &sender_pubkey.to_hex()[..16], enc_label);
     let _ = app.emit("log-event", format!("[INFO] NIP-46 request: {} from {}... ({})",
         request.method, &sender_pubkey.to_hex()[..16], enc_label));
 
@@ -1802,11 +1802,11 @@ async fn handle_nip46_event(
         }
         (new_id, name)
     } else {
-        // No connection and not a `connect`. With per-client serialization a client's `connect`
-        // commits before its dependent requests, so reaching here means a genuinely unconnected
-        // client. Reply with an error instead of dropping silently: a silent drop makes the client
-        // wait out its full timeout (~20s) before it can react, whereas a fast error lets it
-        // reconnect/retry immediately.
+        // No connection and not a `connect`. Clients await their `connect` response before issuing
+        // dependent requests, so reaching here means a genuinely unconnected client. Reply with an
+        // error instead of dropping silently: a silent drop makes the client wait out its full
+        // timeout (~20s) before it can react, whereas a fast error lets it reconnect/retry
+        // immediately.
         warn!("Rejecting {} from unconnected client {}", request.method, &sender_hex[..16]);
         let err = Nip46Response {
             id: request.id.clone(),
@@ -1823,14 +1823,6 @@ async fn handle_nip46_event(
 
     // Process the request — always as the ACCOUNT (signing) key, never the envelope key.
     let response = process_nip46_request(signing_keys, &request);
-    // Whether the operation itself SUCCEEDED or produced an error response. A nip04_decrypt that
-    // fails DENOS-side still sends a reply (an error), which would otherwise log identically to a
-    // success — so surface it: an "ok" here with the client still failing points downstream
-    // (relay→client delivery or the client), an "ERR" points at the decrypt itself.
-    let result_status = match &response.error {
-        Some(e) => format!("ERR: {}", e),
-        None => "ok".to_string(),
-    };
     let response_json = match serde_json::to_string(&response) {
         Ok(j) => j,
         Err(e) => {
@@ -1897,15 +1889,13 @@ async fn handle_nip46_event(
     if is_safe_method || auto_connect || conn_policy == "auto_approve" || custom_rule.as_deref() == Some("approve") {
         // Auto-respond: safe method / connect handshake OR connection has auto-approve enabled
         let delivery = send_encrypted_response(envelope_keys, client, &sender_pubkey, &response_json, use_nip44).await;
-        // Full request id (not truncated) so it can be matched 1:1 against the client's own
-        // per-request log when tracing a specific timeout.
-        let id_preview = request.id.as_str();
+        let id_preview = if request.id.len() > 8 { &request.id[..8] } else { &request.id };
         let reason = if is_safe_method { "safe method" } else { "auto-approved" };
         match &delivery {
             Ok(()) => {
-                info!("Auto-responded to: {} ({}) [{}] via {} [{}]", request.method, id_preview, result_status, enc_label, reason);
-                let _ = app.emit("log-event", format!("[INFO] {} — {} ({}) [{}]",
-                    reason, request.method, id_preview, result_status));
+                info!("Auto-responded to: {} ({}) via {} [{}]", request.method, id_preview, enc_label, reason);
+                let _ = app.emit("log-event", format!("[INFO] {} — {} ({})",
+                    reason, request.method, id_preview));
             }
             Err(e) => {
                 // Delivery failed — do NOT log it as answered. This is the one case that otherwise
