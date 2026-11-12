@@ -74,6 +74,14 @@ pub struct Connection {
     /// relay). Used to group connections in the UI; defaults to "nip46" for pre-existing entries.
     #[serde(default = "default_source")]
     pub source: String,
+    /// For a bunker:// connection (source "nip46", client-initiated inbound `connect`): the
+    /// verification `secret` the client presented — i.e. the `secret` from the `bunker://…?secret=…`
+    /// string DENOS issued and the user pasted into that client. Lets the UI reproduce the original
+    /// bunker string (pubkey + relays + this secret) so the user can re-copy it to reconnect a
+    /// client. Absent for nostrconnect:// (DENOS-initiated) and LRS connections — its presence is
+    /// what marks a connection as a true bunker:// one.
+    #[serde(default)]
+    pub bunker_secret: Option<String>,
 }
 
 fn default_policy() -> String {

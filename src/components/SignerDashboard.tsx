@@ -45,6 +45,10 @@ interface Connection {
     custom_rules: Record<string, string>;
     auto_replace: boolean;
     source?: string;
+    signer_pubkey?: string;
+    // Present only for true bunker:// connections — the secret from the original bunker string.
+    // Its presence is what makes the "copy bunker string" button show.
+    bunker_secret?: string | null;
 }
 
 interface PendingRequest {
@@ -841,9 +845,31 @@ export default function SignerDashboard({ activePubkey, activeNpub }: SignerDash
                                                             </div>
                                                         )}
                                                     </div>
-                                                    <Button variant="ghost" size="xs" className="text-destructive hover:text-destructive" onClick={() => setDisconnectConfirm({ name: conn.app_name, onConfirm: () => { deleteConnection(conn.id); setDisconnectConfirm(null); } })}>
-                                                        <Unlink className="w-4 h-4" />
-                                                    </Button>
+                                                    <div className="flex items-center gap-1 shrink-0">
+                                                        {conn.bunker_secret && conn.signer_pubkey && (
+                                                            <Button
+                                                                variant="ghost"
+                                                                size="xs"
+                                                                title="Copy this app's bunker:// connection string (to reconnect it later)"
+                                                                onClick={() => {
+                                                                    // Reproduce the original bunker:// string DENOS issued for this
+                                                                    // connection: pubkey + its relays + the secret the client used.
+                                                                    const params = (conn.relay_urls || []).map(r => `relay=${r}`);
+                                                                    if (conn.bunker_secret) params.push(`secret=${conn.bunker_secret}`);
+                                                                    const uri = params.length
+                                                                        ? `bunker://${conn.signer_pubkey}?${params.join('&')}`
+                                                                        : `bunker://${conn.signer_pubkey}`;
+                                                                    navigator.clipboard.writeText(uri);
+                                                                    toast('Bunker string copied', 'success');
+                                                                }}
+                                                            >
+                                                                <Copy className="w-4 h-4" />
+                                                            </Button>
+                                                        )}
+                                                        <Button variant="ghost" size="xs" className="text-destructive hover:text-destructive" onClick={() => setDisconnectConfirm({ name: conn.app_name, onConfirm: () => { deleteConnection(conn.id); setDisconnectConfirm(null); } })}>
+                                                            <Unlink className="w-4 h-4" />
+                                                        </Button>
+                                                    </div>
                                                 </div>
                                                 <div className="border-t border-border flex flex-wrap">
                                                     <PolicySelector current={policy} onChange={(p) => setConnectionPolicy(conn.id, p)} />

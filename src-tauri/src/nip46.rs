@@ -331,6 +331,8 @@ pub async fn connect_nostrconnect(
         signer_pubkey: signer_keys.public_key().to_hex(),
         auto_replace: false,
         source: "nip46".to_string(),
+        // nostrconnect:// is DENOS-initiated — there is no DENOS-issued bunker string to reproduce.
+        bunker_secret: None,
     };
 
     // Check for existing connection/session with same name (cross-protocol)
@@ -1787,6 +1789,14 @@ async fn handle_nip46_event(
             signer_pubkey: signing_keys.public_key().to_hex(),
             auto_replace: false,
             source: source.to_string(),
+            // Only a real bunker:// connect (inbound, source "nip46") carries the secret from the
+            // bunker string DENOS issued; capture it so the UI can reproduce that string. For LRS
+            // (source "lrs") leave it None — the loopback signer has its own copy affordance.
+            bunker_secret: if source == "nip46" {
+                request.params.get(1).filter(|s| !s.is_empty()).cloned()
+            } else {
+                None
+            },
         };
         {
             let mut connections = state.connections.lock().unwrap();
