@@ -1528,30 +1528,33 @@ pub async fn run_signer_loop(
                     Ok(RelayPoolNotification::Event { event, .. }) => {
                         info!("Received event kind={} from={}", event.kind.as_u16(), &event.pubkey.to_hex()[..16]);
                         let _ = app.emit("log-event", format!("[EVENT] kind={} from={}…", event.kind.as_u16(), &event.pubkey.to_hex()[..16]));
-                        if event.kind == Kind::Custom(24133) {
-                            // Remote NIP-46: the account key is both the envelope identity and the
-                            // signing identity.
-                            handle_nip46_event(
-                                &app,
-                                &signer_keys,
-                                &signer_keys,
-                                "nip46",
-                                &client,
-                                &event,
-                            ).await;
-                        } else if event.kind == Kind::Custom(24134) {
-                            upv2::handle_upv2_event(
-                                &app,
-                                &signer_keys,
-                                &client,
-                                &event,
-                            ).await;
-                        }
+                        // Handle each request on its own task, CONCURRENTLY — never await a handler
+                        // inline here. The response publish (send_encrypted_response) can take up to
+                        // PUBLISH_OK_TIMEOUT; awaiting it inline serialized every request, so a burst
+                        // stacked up at seconds each (5s/10s/15s…), blew past the client's request
+                        // timeout and tripped its circuit breaker. Spawning lets recv() keep draining
+                        // and runs handlers concurrently — the same fix the LRS loop already uses.
+                        // Remote NIP-46: the account key is both the envelope and the signing identity.
+                        let app = app.clone();
+                        let signer_keys = signer_keys.clone();
+                        let client = client.clone();
+                        tokio::spawn(async move {
+                            if event.kind == Kind::Custom(24133) {
+                                handle_nip46_event(&app, &signer_keys, &signer_keys, "nip46", &client, &event).await;
+                            } else if event.kind == Kind::Custom(24134) {
+                                upv2::handle_upv2_event(&app, &signer_keys, &client, &event).await;
+                            }
+                        });
                     }
                     Ok(_) => {}
-                    Err(e) => {
-                        error!("Notification error: {}", e);
-                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        // Fell behind and the channel dropped n events. Do NOT sleep — that only lets
+                        // more pile up and drop; keep draining.
+                        warn!("Notification channel lagged — dropped {} event(s)", n);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        error!("Notification channel closed; stopping signer loop");
+                        break;
                     }
                 }
             }
@@ -1998,18 +2001,24 @@ async fn handle_nip46_event(
     emit_signer_state(app, &state);
 }
 
-/// Time to wait for the relay's `OK` on a published response before giving up on the ack. The
-/// loopback relay broadcasts the response to the subscribed client the instant it RECEIVES the
-/// event (see `lrs::handle_client_text`), independently of this `OK` round-trip — so a slow/absent
-/// `OK` under burst means "ack delayed", NOT "not delivered". Bounding the wait keeps a stalled ack
-/// from hanging the handler for the client's full ~20s request timeout.
+/// Upper bound on how long to wait for ANY relay to accept a published response. We return the
+/// instant the first relay OKs (see below), so this cap only bites when no relay answers at all; it
+/// keeps a pool full of dead/slow relays from hanging the handler for the client's full request
+/// timeout.
 const PUBLISH_OK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Encrypt and publish a NIP-46 response. Returns `Err` only if the response could not be ENCRYPTED
-/// or the relay actively REFUSED the publish after a retry. A slow/absent `OK` (ack) is treated as
-/// delivered-unconfirmed (`Ok`), because the loopback relay has already broadcast the event to the
-/// client by then; hanging on the ack is what made one slow publish look like a dropped request
-/// (no reply → the client's ~20s timeout → decrypt circuit breaker). Callers surface a real `Err`
+/// Encrypt and publish a NIP-46 response, returning as soon as the FIRST relay accepts it
+/// (first-accept), not when every relay has OK'd. The per-relay sends keep running in the background
+/// after we return, so the event still propagates to every relay the client might be subscribed on.
+///
+/// This is what keeps the remote (public-relay) path fast: `Client::send_event`/`send_event_builder`
+/// waits for an OK from *every* relay in the pool, so a single dead relay (e.g. one returning 503)
+/// stalled every response for the full `PUBLISH_OK_TIMEOUT` — the ~5s-per-request bunker bug. On
+/// loopback (LRS) the pool is a single relay, so this is simply "wait for that relay's instant OK".
+///
+/// Returns `Err` only when the response could not be ENCRYPTED/SIGNED, there are no relays, or every
+/// relay actively refused the publish. If no relay OKs within the cap the sends are still in flight,
+/// so this returns `Ok` (delivered-unconfirmed) rather than hang. Callers surface a real `Err`
 /// instead of logging success.
 async fn send_encrypted_response(
     signer_keys: &Keys,
@@ -2026,32 +2035,54 @@ async fn send_encrypted_response(
             .map_err(|err| format!("NIP-04 encrypt failed: {}", err))?
     };
 
-    let mut last_err = String::new();
-    for attempt in 1..=2 {
-        let response_event = EventBuilder::new(Kind::Custom(24133), encrypted.clone())
-            .tag(Tag::public_key(*recipient));
-        match tokio::time::timeout(PUBLISH_OK_TIMEOUT, client.send_event_builder(response_event)).await {
-            Ok(Ok(_)) => return Ok(()),
-            Ok(Err(e)) => {
-                // The relay actively refused the publish — retry once (a transient hiccup is common).
-                last_err = format!("publish failed: {}", e);
-                if attempt == 1 {
-                    warn!("NIP-46 response publish attempt {} failed, retrying: {}", attempt, e);
-                }
-            }
-            Err(_elapsed) => {
-                // Ack not received in time. The event was handed to the relay and broadcast to the
-                // client on receipt, so the response was (almost certainly) delivered — do NOT hang
-                // and do NOT re-send (a duplicate response event under load would only add noise).
-                warn!(
-                    "NIP-46 response ack not received within {}s (delivered via broadcast); not retrying",
-                    PUBLISH_OK_TIMEOUT.as_secs()
-                );
-                return Ok(());
+    // Sign the response once, then publish it to every relay CONCURRENTLY and return as soon as the
+    // first relay accepts. The remaining sends are left running (detached) so the event still
+    // reaches every relay — we just don't block the handler waiting on the slowest/dead one.
+    let event = EventBuilder::new(Kind::Custom(24133), encrypted)
+        .tag(Tag::public_key(*recipient))
+        .sign_with_keys(signer_keys)
+        .map_err(|e| format!("sign response failed: {}", e))?;
+
+    let relays = client.relays().await;
+    if relays.is_empty() {
+        return Err("no relays connected to publish response".to_string());
+    }
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<(), String>>(relays.len());
+    for (_url, relay) in relays {
+        let ev = event.clone();
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            let r = relay.send_event(ev).await.map(|_| ()).map_err(|e| e.to_string());
+            let _ = tx.send(r).await;
+        });
+    }
+    drop(tx); // channel closes once every send task has reported
+
+    match tokio::time::timeout(PUBLISH_OK_TIMEOUT, async {
+        let mut last_err = "no relay accepted the publish".to_string();
+        while let Some(res) = rx.recv().await {
+            match res {
+                Ok(()) => return Ok(()),  // first relay accepted — delivered
+                Err(e) => last_err = e,   // this relay failed; keep waiting for another
             }
         }
+        Err(last_err) // every relay reported back, none accepted
+    })
+    .await
+    {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(format!("publish failed on all relays: {}", e)),
+        Err(_elapsed) => {
+            // No OK within the cap, but the sends are still propagating in the background and the
+            // client's relay will receive it — do NOT hang the handler on a laggard.
+            warn!(
+                "NIP-46 response: no relay OK within {}s (sends still propagating); treating as delivered",
+                PUBLISH_OK_TIMEOUT.as_secs()
+            );
+            Ok(())
+        }
     }
-    Err(last_err)
 }
 
 pub(crate) fn process_nip46_request(signer_keys: &Keys, request: &Nip46Request) -> Nip46Response {
